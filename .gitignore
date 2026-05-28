@@ -1,0 +1,15 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.env
+.venv/
+venv/
+
+ipo_predictor/data/raw/
+ipo_predictor/data/processed/
+ipo_predictor/models/saved/
+ipo_predictor/reports/
