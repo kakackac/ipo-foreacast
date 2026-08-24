@@ -83,13 +83,14 @@ export DART_API_KEY=your_key_here   # https://opendart.fss.or.kr
 export KRX_API_KEY=your_krx_openapi_key
 
 # 2. OpenDART 증권신고서 원문, 재무제표와 KRX 상장일 가격·지수를 수집하고 정합
-python pipeline.py --mode collect --start-year 2020 --end-year 2025 --phase phase2
+# 2015~2025: 최소 10년의 시장 국면과 IPO 표본을 확보하는 학습 기준 범위
+python pipeline.py --mode collect --start-year 2015 --end-year 2025 --phase phase2
 
 # 3. 생성된 실제 데이터로 시계열 백테스트와 두 모델 학습
 python pipeline.py --mode train --phase phase2
 ```
 
-수집 결과는 `data/raw/`에 원본별로, 학습용 결과는 `data/processed/features_all.parquet`에 저장됩니다. KRX 수집기는 승인된 KOSPI·KOSDAQ 일별 종목/지수 API를 `AUTH_KEY` 헤더로 호출하며, 웹사이트 로그인 자격증명은 사용하지 않습니다. `data_collection_summary.json`에는 일정·공시·가격·타깃의 행 수와 핵심 피처 충족 현황이 남습니다. API 키가 없거나 원문 파싱에 실패한 종목은 0으로 채우지 않고 결측으로 보존하므로, 이 파일로 데이터 품질을 먼저 확인한 뒤 학습합니다.
+수집 결과는 `data/raw/`에 원본별로, 학습용 결과는 `data/processed/features_all.parquet`에 저장됩니다. KRX 수집기는 승인된 KOSPI·KOSDAQ 일별 종목/지수 API를 `AUTH_KEY` 헤더로 호출하며, 웹사이트 로그인 자격증명은 사용하지 않습니다. `data_collection_summary.json`에는 일정·공시·가격·타깃의 행 수와 핵심 피처 충족 현황이 남습니다. API 키가 없거나 원문 파싱에 실패한 종목은 0으로 채우지 않고 결측으로 보존하므로, 이 파일로 데이터 품질을 먼저 확인한 뒤 학습합니다. 처음에는 `2015~2025` 전체를 한 번 수집하고, 이후에는 새 상장분만 해당 연도 범위로 갱신합니다.
 
 ---
 

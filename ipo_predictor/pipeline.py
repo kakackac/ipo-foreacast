@@ -318,7 +318,7 @@ if __name__ == "__main__":
         default="core",
         help="피처 세트",
     )
-    parser.add_argument("--start-year", type=int, default=2020, help="실제 수집 시작 연도")
+    parser.add_argument("--start-year", type=int, default=2015, help="실제 수집 시작 연도")
     parser.add_argument("--end-year", type=int, default=2025, help="실제 수집 종료 연도")
     args = parser.parse_args()
 
