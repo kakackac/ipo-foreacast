@@ -122,37 +122,45 @@ class DARTCollector:
         self,
         start_date: str,   # "20150101"
         end_date:   str,   # "20241231"
-        pblntf_ty:  str = "I",   # I = 증권신고서
+        pblntf_ty: str = "C",  # C = 발행공시
+        pblntf_detail_ty: str = "C001",  # 증권신고서(지분증권)
     ) -> pd.DataFrame:
-        """
-        증권신고서 목록을 날짜 범위로 수집.
-        반환: corp_code, corp_name, rcept_no, rcept_dt
+        """증권신고서(지분증권) 목록을 날짜 범위로 수집한다.
+
+        법인 고유번호 없이 OpenDART 목록 API를 호출할 때는 조회 기간이
+        3개월로 제한되므로 긴 기간을 90일 단위로 나눈다.
         """
         all_records = []
-        page = 1
+        cursor = pd.Timestamp(start_date)
+        final_date = pd.Timestamp(end_date)
 
-        while True:
-            data = self._get("list", {
-                "bgn_de":   start_date,
-                "end_de":   end_date,
-                "pblntf_ty": pblntf_ty,
-                "page_no":  page,
-                "page_count": 100,
-            })
-            items = data.get("list", [])
-            if not items:
-                break
-            all_records.extend(items)
-            total_page = int(data.get("total_page", 1))
-            if page >= total_page:
-                break
-            page += 1
-            time.sleep(REQUEST_DELAY)
+        while cursor <= final_date:
+            chunk_end = min(cursor + pd.Timedelta(days=89), final_date)
+            page = 1
+            while True:
+                data = self._get("list", {
+                    "bgn_de": cursor.strftime("%Y%m%d"),
+                    "end_de": chunk_end.strftime("%Y%m%d"),
+                    "pblntf_ty": pblntf_ty,
+                    "pblntf_detail_ty": pblntf_detail_ty,
+                    "page_no": page,
+                    "page_count": 100,
+                })
+                items = data.get("list", [])
+                if not items:
+                    break
+                all_records.extend(items)
+                total_page = int(data.get("total_page", 1))
+                if page >= total_page:
+                    break
+                page += 1
+                time.sleep(REQUEST_DELAY)
+            cursor = chunk_end + pd.Timedelta(days=1)
 
         if not all_records:
             return pd.DataFrame()
 
-        df = pd.DataFrame(all_records)
+        df = pd.DataFrame(all_records).drop_duplicates("rcept_no", keep="last")
         # 공모 관련 공시만 필터 (제목에 '증권신고서(지분증권)' 포함)
         mask = df["report_nm"].str.contains("증권신고서.*지분증권|지분증권.*증권신고서", na=False)
         df = df[mask].copy()

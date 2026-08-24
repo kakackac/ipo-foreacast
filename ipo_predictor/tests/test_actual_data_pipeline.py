@@ -69,7 +69,7 @@ class _FakeKRX:
             "sector": "소프트웨어", "same_day_ipo_count": 1,
         }])
 
-    def get_listing_day_price(self, ticker, listing_date, isu_cd=None):
+    def get_listing_day_price(self, ticker, listing_date, isu_cd=None, market=None):
         return {
             "ticker": ticker, "isu_cd": isu_cd, "listing_date": listing_date,
             "open_price": 18000, "close_price": 15000, "high_price": 19000,
@@ -85,6 +85,31 @@ class _FakeKRX:
 
 
 class ActualDataPipelineTests(unittest.TestCase):
+    def test_dart_ipo_list_uses_equity_offering_filter_in_three_month_chunks(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "status": "000",
+            "total_page": 1,
+            "list": [{
+                "corp_code": "12345678", "corp_name": "테스트", "rcept_no": "20240101000001",
+                "rcept_dt": "20240101", "report_nm": "증권신고서(지분증권)",
+            }],
+        }
+        collector = DARTCollector(api_key="a" * 40)
+        collector.session.get = Mock(return_value=response)
+
+        disclosures = collector.get_ipo_disclosure_list("20240101", "20240430")
+
+        self.assertEqual(len(disclosures), 1)
+        self.assertEqual(collector.session.get.call_count, 2)
+        first_params = collector.session.get.call_args_list[0].kwargs["params"]
+        second_params = collector.session.get.call_args_list[1].kwargs["params"]
+        self.assertEqual(first_params["pblntf_ty"], "C")
+        self.assertEqual(first_params["pblntf_detail_ty"], "C001")
+        self.assertEqual((first_params["bgn_de"], first_params["end_de"]), ("20240101", "20240330"))
+        self.assertEqual((second_params["bgn_de"], second_params["end_de"]), ("20240331", "20240430"))
+
     def test_document_zip_is_converted_to_plain_text(self):
         content = io.BytesIO()
         with zipfile.ZipFile(content, "w") as archive:

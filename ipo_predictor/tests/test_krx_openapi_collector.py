@@ -17,7 +17,7 @@ class KRXOpenAPICollectorTests(unittest.TestCase):
     def test_listing_price_uses_auth_header_and_full_issue_code(self):
         session = Mock()
         session.get.return_value = _response({"OutBlock_1": [{
-            "ISU_CD": "KR7123456000",
+            "ISU_CD": "123456",
             "ISU_NM": "테스트",
             "TDD_OPNPRC": "18,000",
             "TDD_CLSPRC": "15,000",

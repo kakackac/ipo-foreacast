@@ -111,6 +111,19 @@ class KRXCollector:
     def _normalise_ticker(value: object) -> str:
         return str(value or "").strip().zfill(6)
 
+    @classmethod
+    def _short_issue_code(cls, value: object) -> str:
+        """KRX 표준종목코드 또는 거래코드를 6자리 거래코드로 통일한다.
+
+        종목기본정보의 ``ISU_CD``는 ``KR7365550003``처럼 12자리 ISIN이고,
+        일별매매정보의 ``ISU_CD``는 ``365550``처럼 거래코드다. ISIN의
+        4~9번째 문자가 거래코드이므로 두 응답을 비교하기 전에 변환한다.
+        """
+        code = str(value or "").strip().upper()
+        if len(code) == 12 and code.startswith("KR"):
+            return code[3:9]
+        return cls._normalise_ticker(code)
+
     @staticmethod
     def _normalise_index_name(value: object) -> str:
         return str(value or "").replace(" ", "").upper()
@@ -199,6 +212,7 @@ class KRXCollector:
         markets = [selected_market] if selected_market else list(MARKETS)
         normalized_ticker = self._normalise_ticker(ticker)
         normalized_isu_cd = str(isu_cd or "").strip().upper()
+        expected_short_code = self._short_issue_code(isu_cd or ticker)
 
         for market_name in markets:
             rows = self._get_daily_records(
@@ -209,7 +223,10 @@ class KRXCollector:
                 row_ticker = self._normalise_ticker(row.get("ISU_SRT_CD"))
                 if normalized_isu_cd and row_isu_cd == normalized_isu_cd:
                     return self._price_record(ticker, listing_date, isu_cd, row, market_name)
-                if row_ticker == normalized_ticker:
+                if (
+                    row_ticker == normalized_ticker
+                    or self._short_issue_code(row_isu_cd) == expected_short_code
+                ):
                     return self._price_record(ticker, listing_date, isu_cd or row_isu_cd, row, market_name)
 
         logger.warning("상장일 가격을 찾지 못했습니다: %s (%s)", ticker, listing_date)
