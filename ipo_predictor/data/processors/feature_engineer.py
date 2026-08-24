@@ -134,21 +134,53 @@ class FeatureEngineer:
     # ── 병합 ──────────────────────────────────────────────────
 
     def _merge_base(self, dart_df: pd.DataFrame, krx_df: pd.DataFrame) -> pd.DataFrame:
-        """DART + KRX 데이터 corp_name 기준 병합"""
-        # 기업명 정규화 (주식회사, (주) 등 제거)
-        for df in [dart_df, krx_df]:
-            df["corp_name_clean"] = (
-                df["corp_name"]
+        """DART 공시와 KRX 상장 실적을 원본을 바꾸지 않고 정합한다."""
+        dart = dart_df.copy()
+        krx = krx_df.copy()
+        if "corp_name" not in dart.columns or "corp_name" not in krx.columns:
+            raise ValueError("DART와 KRX 데이터에는 corp_name 컬럼이 필요합니다.")
+
+        # 법인 표기, 공백, 문장부호 차이 때문에 이름이 달라도 같은 회사인
+        # 사례를 줄인다. DART 쪽에는 아직 ticker가 없으므로 이름이 기본 키다.
+        for frame in (dart, krx):
+            frame["corp_name_clean"] = (
+                frame["corp_name"].astype(str)
                 .str.replace(r"(주식회사|㈜|\(주\)|\(株\))", "", regex=True)
+                .str.replace(r"[\s·.()\-]", "", regex=True)
+                .str.upper()
                 .str.strip()
             )
 
         merged = pd.merge(
-            dart_df, krx_df,
+            dart, krx,
             on="corp_name_clean",
             how="inner",
             suffixes=("_dart", "_krx"),
         )
+
+        # 병합 뒤 suffix가 생긴 공통 컬럼을 후속 계산의 표준 이름으로
+        # 되돌린다. KRX 상장일/가격을 우선하고, DART 공시 값은 보완용이다.
+        canonical_sources = {
+            "corp_name": ["corp_name_krx", "corp_name_dart"],
+            "listing_date": ["listing_date_krx", "listing_date", "listing_date_dart"],
+            "ticker": ["ticker", "ticker_krx", "ticker_dart"],
+            "sector_name": ["sector_name", "sector_krx", "sector", "sector_dart"],
+            "market": ["market", "market_krx", "market_dart"],
+            "same_day_ipo_count": ["same_day_ipo_count", "same_day_ipo_count_krx"],
+            "open_price": ["open_price", "open_price_krx"],
+            "close_price": ["close_price", "close_price_krx"],
+        }
+        for target, candidates in canonical_sources.items():
+            existing = [col for col in candidates if col in merged.columns]
+            if not existing:
+                continue
+            series = merged[existing[0]]
+            for col in existing[1:]:
+                series = series.combine_first(merged[col])
+            merged[target] = series
+
+        if "listing_date" in merged.columns:
+            merged["listing_date"] = pd.to_datetime(merged["listing_date"], errors="coerce")
         logger.info("병합 결과: %d건 (DART %d × KRX %d)", len(merged), len(dart_df), len(krx_df))
         return merged
 

@@ -15,8 +15,9 @@
 |------|------|------|
 | 설정 | `config.py` | ✅ 완료 |
 | 피처 정의 | `features/definitions.py` | ✅ 완료 |
-| DART 수집기 | `data/collectors/dart_collector.py` | ✅ 완료 (API 키 필요) |
-| KRX 수집기 | `data/collectors/krx_collector.py` | ✅ 완료 |
+| DART 수집기 | `data/collectors/dart_collector.py` | ✅ 원문 ZIP 다운로드·파싱 (API 키 필요) |
+| KRX 수집기 | `data/collectors/krx_collector.py` | ✅ 상장 일정·상장일 가격·지수 수집 |
+| 실제 이력 정합 | `data/pipelines/historical_ipo_pipeline.py` | ✅ DART·KRX 정합 → 학습 피처 생성 |
 | 피처 엔지니어링 | `data/processors/feature_engineer.py` | ✅ 완료 |
 | Phase 2 피처 연결 | `data/processors/feature_engineer.py` | ✅ 완료 (데모/학습 연동) |
 | Phase 2 DART 파서 | `data/collectors/dart_collector.py` | ✅ 부분 완료 (정규식 기반) |
@@ -77,23 +78,19 @@ python pipeline.py --mode demo --phase phase2
 # 1. DART API 키 설정
 export DART_API_KEY=your_key_here   # https://opendart.fss.or.kr
 
-# 2. 히스토리 수집 (2015~2024)
-python -c "
-from data.collectors.dart_collector import DARTCollector
-DARTCollector().collect_full_history(2015, 2024)
-"
+# 1-1. KRX 데이터시스템 로그인 정보 설정
+# KRX가 현재 데이터 조회 세션에 로그인을 요구하므로, 계정 정보는 로컬 환경변수로만 둔다.
+export KRX_ID=your_krx_id
+export KRX_PASSWORD=your_krx_password
 
-# 3. KRX 시장 데이터 수집
-python -c "
-from data.collectors.krx_collector import KRXCollector
-KRXCollector().collect_market_data(2015, 2024)
-"
+# 2. OpenDART 증권신고서 원문, 재무제표와 KRX 상장일 가격·지수를 수집하고 정합
+python pipeline.py --mode collect --start-year 2020 --end-year 2025 --phase phase2
 
-# 4. 실제 학습 실행
-python pipeline.py --mode train
+# 3. 생성된 실제 데이터로 시계열 백테스트와 두 모델 학습
+python pipeline.py --mode train --phase phase2
 ```
 
-`특징은 수집기가 포맷을 맞춘 과거 데이터 파일을 생성한 후에만 실제 학습을 시작합니다. 현재 DART 원문·수요예측 자료를 실제 상장 이력과 정확히 연결하는 수집 파이프라인은 제작 중입니다.
+수집 결과는 `data/raw/`에 원본별로, 학습용 결과는 `data/processed/features_all.parquet`에 저장됩니다. `data_collection_summary.json`에는 일정·공시·가격·타깃의 행 수와 핵심 피처 충족 현황이 남습니다. API 키가 없거나 원문 파싱에 실패한 종목은 0으로 채우지 않고 결측으로 보존하므로, 이 파일로 데이터 품질을 먼저 확인한 뒤 학습합니다.
 
 ---
 
@@ -150,8 +147,8 @@ reports/outlier_report_*.txt 확인
 - [x] `offering_per` + `per_vs_sector_median` — 밸류에이션 피처
 - [x] `revenue_growth_3y`, `operating_margin`, `debt_ratio` — 재무 피처 계산 연결
 - [x] 시초가·종가 수익률 분리 예측/백테스트/API 지원
-- [ ] 실제 DART 원문 샘플 기반 Phase 2 파서 보강
-- [ ] IPO 일정·증권신고서·수요예측·상장일 시세 데이터의 실제 이력 수집·정합
+- [ ] 실제 DART 원문 샘플 기반 Phase 2 파서 보강 및 예외 패턴 추가
+- [x] IPO 일정·증권신고서·수요예측·상장일 시세 데이터의 실제 이력 수집·정합
 - [ ] 상장일 21:00 KST 실습 결과 수집·NXT 체결대상 확인 스케줄러 연결
 - [ ] 실제 원본 데이터 기반 시계열 성능 보고서 생성
 - [ ] XGBoost / LightGBM 환경에서 재테스트 (현재는 sklearn GBM)

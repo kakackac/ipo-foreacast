@@ -8,6 +8,7 @@ pipeline.py
   python pipeline.py --mode backtest   백테스트만 재실행
   python pipeline.py --mode analyze    저장된 백테스트 결과로 아웃라이어 재분석
   python pipeline.py --mode demo       실제 데이터 없이 전 과정 시뮬레이션
+  python pipeline.py --mode collect    OpenDART + KRX 실제 이력 수집 및 피처 생성
 
 에러 주도 개발 루프:
   1. train 모드로 초기 모델 학습 + 백테스트
@@ -287,13 +288,27 @@ def run_analyze():
     logger.info(report.summary())
 
 
+def run_collect(start_year: int, end_year: int, phase: str = "phase2"):
+    """공식 원천 데이터를 수집해 학습용 피처 파일을 생성한다."""
+    from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline
+
+    logger.info("════ 실제 IPO 데이터 수집 (%d~%d) ════", start_year, end_year)
+    summary = HistoricalIPOPipeline().run(start_year, end_year, feature_set=phase)
+    logger.info(
+        "수집 완료 | KRX 일정 %d | DART 정합 %d | 학습 행 %d | 시초가 타깃 %d | 종가 타깃 %d",
+        summary["calendar_rows"], summary["dart_matched_rows"], summary["feature_rows"],
+        summary["open_target_rows"], summary["close_target_rows"],
+    )
+    return summary
+
+
 if __name__ == "__main__":
     import pandas as pd
 
     parser = argparse.ArgumentParser(description="IPO 예측 파이프라인")
     parser.add_argument(
         "--mode",
-        choices=["train", "backtest", "analyze", "demo"],
+        choices=["train", "backtest", "analyze", "demo", "collect"],
         default="demo",
         help="실행 모드",
     )
@@ -303,6 +318,8 @@ if __name__ == "__main__":
         default="core",
         help="피처 세트",
     )
+    parser.add_argument("--start-year", type=int, default=2020, help="실제 수집 시작 연도")
+    parser.add_argument("--end-year", type=int, default=2025, help="실제 수집 종료 연도")
     args = parser.parse_args()
 
     if args.mode == "demo":
@@ -313,5 +330,11 @@ if __name__ == "__main__":
         run_analyze()
     elif args.mode == "backtest":
         run_backtest(phase=args.phase)
+    elif args.mode == "collect":
+        try:
+            run_collect(args.start_year, args.end_year, phase=args.phase)
+        except RuntimeError as exc:
+            logger.error("실제 데이터 수집 중단: %s", exc)
+            sys.exit(2)
     else:
         logger.error("지원하지 않는 모드: %s", args.mode)

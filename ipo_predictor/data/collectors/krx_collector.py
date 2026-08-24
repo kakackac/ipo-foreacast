@@ -21,15 +21,15 @@ from typing import Optional
 import requests
 import pandas as pd
 
-from config import KRX_BASE_URL, RAW_DIR
+from config import KRX_BASE_URL, KRX_ID, KRX_PASSWORD, RAW_DIR
 
 logger = logging.getLogger(__name__)
 
 REQUEST_DELAY = 0.5
 HEADERS = {
     "User-Agent":  "Mozilla/5.0 (compatible; IPO-Research/1.0)",
-    "Referer":     "http://data.krx.co.kr/",
-    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "Referer":     "https://data.krx.co.kr/contents/MDC/MDI/outerLoader/index.cmd",
+    "X-Requested-With": "XMLHttpRequest",
 }
 
 
@@ -39,15 +39,49 @@ class KRXCollector:
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update(HEADERS)
+        self._authenticated = False
+
+    @property
+    def is_configured(self) -> bool:
+        """현재 KRX 데이터 시스템이 요구하는 로그인 정보의 설정 여부."""
+        return bool(KRX_ID and KRX_PASSWORD)
+
+    def _authenticate(self) -> None:
+        """KRX 세션을 초기화하고 환경변수 자격증명으로 로그인한다."""
+        if self._authenticated:
+            return
+        if not self.is_configured:
+            raise RuntimeError("KRX_ID와 KRX_PASSWORD를 설정한 뒤 KRX 수집을 실행하세요.")
+        user_agent = HEADERS["User-Agent"]
+        try:
+            login_page = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001.cmd"
+            login_view = "https://data.krx.co.kr/contents/MDC/COMS/client/view/login.jsp?site=mdc"
+            login_url = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001D1.cmd"
+            self.session.get(login_page, headers={"User-Agent": user_agent}, timeout=15)
+            self.session.get(login_view, headers={"User-Agent": user_agent, "Referer": login_page}, timeout=15)
+            response = self.session.post(
+                login_url,
+                data={"mbrNm": "", "telNo": "", "di": "", "certType": "", "mbrId": KRX_ID, "pw": KRX_PASSWORD},
+                headers={"User-Agent": user_agent, "Referer": login_page},
+                timeout=15,
+            )
+            response.raise_for_status()
+            if response.json().get("_error_code") != "CD001":
+                raise RuntimeError("KRX 로그인에 실패했습니다. KRX_ID와 KRX_PASSWORD를 확인하세요.")
+            self._authenticated = True
+        except (requests.RequestException, ValueError) as exc:
+            raise RuntimeError(f"KRX 로그인 실패: {exc}") from exc
 
     def _post(self, params: dict) -> dict:
         try:
+            self._authenticate()
             resp = self.session.post(KRX_BASE_URL, data=params, timeout=15)
             resp.raise_for_status()
             return resp.json()
+        except RuntimeError:
+            raise
         except Exception as e:
-            logger.warning("KRX 요청 실패: %s", e)
-            return {}
+            raise RuntimeError(f"KRX 요청 실패: {e}") from e
 
     # ── 지수 데이터 ────────────────────────────────────────────
 
@@ -67,9 +101,6 @@ class KRXCollector:
             "indIdx2":  "001" if index_code == "1" else "001",
             "strtDd":   start_date,
             "endDd":    end_date,
-            "share":    "2",
-            "money":    "3",
-            "csvxls_isNo": "false",
         }
         data = self._post(params)
         items = data.get("output", [])
@@ -126,20 +157,22 @@ class KRXCollector:
         self,
         ticker:       str,
         listing_date: str,   # "20230310"
+        isu_cd: Optional[str] = None,
     ) -> dict:
         """
         상장 당일 시초가 / 종가 수집.
         수익률 = (시초가 / 공모가 - 1) 은 feature_engineer에서 계산한다.
 
-        KRX bld: dbms/MDC/STAT/standard/MDCSTAT01501
+        KRX bld: dbms/MDC/STAT/standard/MDCSTAT01701
         """
         params = {
-            "bld":       "dbms/MDC/STAT/standard/MDCSTAT01501",
-            "isuCd":     ticker,
+            "bld":       "dbms/MDC/STAT/standard/MDCSTAT01701",
+            # KRX 조회에는 6자리 단축코드가 아니라 12자리 ISU_CD가 필요한
+            # 경우가 있다. 캘린더에서 받은 ISU_CD를 우선 사용한다.
+            "isuCd":     isu_cd or ticker,
             "strtDd":    listing_date,
             "endDd":     listing_date,
             "adjStkPrc": "1",
-            "csvxls_isNo": "false",
         }
         data = self._post(params)
         items = data.get("output", [])
@@ -149,6 +182,7 @@ class KRXCollector:
         row = items[0]
         return {
             "ticker":      ticker,
+            "isu_cd":      isu_cd,
             "listing_date": listing_date,
             "open_price":  self._parse_num(row.get("TDD_OPNPRC")),
             "close_price": self._parse_num(row.get("TDD_CLSPRC")),
@@ -163,29 +197,41 @@ class KRXCollector:
         end_date:   str,
     ) -> pd.DataFrame:
         """
-        KRX 신규 상장 일정 수집.
+        KRX 상장종목 기본정보에서 기간 내 신규 상장 종목을 추린다.
+
+        KRX는 이력형 IPO 달력 API를 별도로 공개하지 않으므로, 상장일
+        (LIST_DD)이 담긴 공식 기본정보를 기준으로 한다. 현재 상장 중인
+        종목을 우선 확보하며, 이후 DART 증권신고서와 정합해 ETF/ETN 등
+        비공모 상장을 제거한다.
         반환: ticker, corp_name, listing_date, market (KOSPI/KOSDAQ)
         """
         params = {
-            "bld":       "dbms/MDC/STAT/standard/MDCSTAT03901",
-            "strtDd":    start_date,
-            "endDd":     end_date,
-            "csvxls_isNo": "false",
+            "bld":       "dbms/MDC/STAT/standard/MDCSTAT01901",
+            "mktId":     "ALL",
         }
         data = self._post(params)
-        items = data.get("output", [])
+        items = data.get("OutBlock_1", [])
         if not items:
             return pd.DataFrame()
 
         df = pd.DataFrame(items)
         df = df.rename(columns={
-            "ISU_CD":      "ticker",
+            "ISU_CD":      "isu_cd",
+            "ISU_SRT_CD":  "ticker",
             "ISU_ABBRV":   "corp_name",
             "LIST_DD":     "listing_date",
             "MKT_TP_NM":   "market",
             "SECT_TP_NM":  "sector",
         })
-        df["listing_date"] = pd.to_datetime(df["listing_date"].str.replace("/", "-"))
+        if "ticker" not in df.columns:
+            # 구형 응답에는 단축코드가 없을 수 있다. 이 경우에도 ISU_CD를
+            # 보존해 가격 조회가 가능하도록 한다.
+            df["ticker"] = df["isu_cd"]
+        df["ticker"] = df["ticker"].astype(str).str.strip().str.zfill(6)
+        df["listing_date"] = pd.to_datetime(df["listing_date"].astype(str).str.replace("/", "-"))
+        start = pd.to_datetime(start_date)
+        end = pd.to_datetime(end_date)
+        df = df[(df["listing_date"] >= start) & (df["listing_date"] <= end)].copy()
 
         # 동일 상장일 종목 수 계산
         date_counts = df.groupby("listing_date").size().reset_index(name="same_day_ipo_count")
@@ -202,15 +248,20 @@ class KRXCollector:
         동일 섹터 최근 IPO 수익률 계산에 사용.
         """
         params = {
-            "bld":       "dbms/MDC/STAT/standard/MDCSTAT03901",
-            "isuCd":     ticker,
-            "csvxls_isNo": "false",
+            "bld":       "dbms/MDC/STAT/standard/MDCSTAT01901",
+            "mktId":     "ALL",
         }
         data = self._post(params)
-        items = data.get("output", [])
+        items = data.get("OutBlock_1", [])
         if not items:
             return {"ticker": ticker, "sector_code": None, "sector_name": None}
-        row = items[0]
+        normalized = str(ticker).zfill(6)
+        row = next(
+            (item for item in items if str(item.get("ISU_SRT_CD", "")).zfill(6) == normalized),
+            None,
+        )
+        if row is None:
+            return {"ticker": ticker, "sector_code": None, "sector_name": None}
         return {
             "ticker":       ticker,
             "sector_code":  row.get("SECT_TP_CD"),
@@ -256,9 +307,10 @@ class KRXCollector:
         total = len(ipo_list)
 
         for i, row in enumerate(ipo_list.itertuples(), 1):
-            ticker = row.ticker
+            ticker = str(row.ticker)
+            isu_cd = getattr(row, "isu_cd", None)
             dt = row.listing_date.strftime("%Y%m%d")
-            price_data = self.get_listing_day_price(ticker, dt)
+            price_data = self.get_listing_day_price(ticker, dt, isu_cd=isu_cd)
             records.append(price_data)
 
             if i % 20 == 0:

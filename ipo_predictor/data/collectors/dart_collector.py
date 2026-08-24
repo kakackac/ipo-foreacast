@@ -14,9 +14,11 @@ DART OpenAPI를 통해 공모주 관련 공시 데이터를 수집한다.
   - 투자설명서(prospectus) PDF는 별도 파싱 파이프라인이 필요하다.
 """
 
-import time
 import logging
 import re
+import time
+import zipfile
+from io import BytesIO
 from datetime import date, timedelta
 from html import unescape as html_unescape
 from typing import Optional
@@ -43,6 +45,11 @@ class DARTCollector:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "IPO-Research/1.0"})
 
+    @property
+    def is_configured(self) -> bool:
+        """실제 OpenDART 인증키가 설정되었는지 반환한다."""
+        return bool(self.api_key and self.api_key != "YOUR_DART_API_KEY")
+
     # ── 저수준 API 호출 ────────────────────────────────────────
 
     def _get(self, endpoint: str, params: dict) -> dict:
@@ -67,6 +74,47 @@ class DARTCollector:
                 if attempt < MAX_RETRIES:
                     time.sleep(attempt * 2)
         return {}
+
+    def get_document_text(self, rcept_no: str) -> str:
+        """DART 원문 ZIP을 내려받아 분석 가능한 평문으로 변환한다.
+
+        OpenDART의 ``document.xml``은 이름과 달리 JSON/XBRL API가 아닌 ZIP
+        바이너리 응답이다. 공시별 XML/HTML 조각을 모두 읽어 합치므로, 신고서
+        정정본처럼 여러 파일로 구성된 원문도 같은 파서로 처리할 수 있다.
+        """
+        if not self.is_configured:
+            raise RuntimeError("DART_API_KEY가 설정되지 않았습니다.")
+
+        url = f"{DART_BASE_URL}/document.xml"
+        try:
+            response = self.session.get(
+                url,
+                params={"crtfc_key": self.api_key, "rcept_no": rcept_no},
+                timeout=TIMEOUT,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"DART 원문 다운로드 실패 ({rcept_no}): {exc}") from exc
+
+        content = response.content
+        if not zipfile.is_zipfile(BytesIO(content)):
+            message = content.decode("utf-8", errors="ignore")[:300]
+            raise RuntimeError(f"DART 원문 ZIP 응답이 아닙니다 ({rcept_no}): {message}")
+
+        fragments: list[str] = []
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            for name in archive.namelist():
+                if name.endswith("/") or name.lower().endswith((".jpg", ".jpeg", ".gif", ".png", ".pdf")):
+                    continue
+                raw = archive.read(name)
+                for encoding in ("utf-8", "cp949", "euc-kr"):
+                    try:
+                        fragments.append(raw.decode(encoding))
+                        break
+                    except UnicodeDecodeError:
+                        continue
+
+        return self._normalize_text(" ".join(fragments))
 
     # ── 공시 목록 수집 ─────────────────────────────────────────
 
@@ -112,6 +160,66 @@ class DARTCollector:
         logger.info("IPO 공시 수집 완료: %d건 (%s ~ %s)", len(df), start_date, end_date)
         return df.reset_index(drop=True)
 
+    def get_company_disclosure_list(
+        self,
+        corp_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """기업별 공시 목록을 반환한다.
+
+        수요예측 결과는 신고서 정정본 또는 별도 공시 안에 들어갈 수 있어,
+        공시 제목만으로 단정하지 않고 이 목록을 후보 탐색에 사용한다.
+        """
+        records = []
+        page = 1
+        while True:
+            data = self._get("list", {
+                "corp_code": corp_code,
+                "bgn_de": start_date,
+                "end_de": end_date,
+                "page_no": page,
+                "page_count": 100,
+            })
+            items = data.get("list", [])
+            if not items:
+                break
+            records.extend(items)
+            if page >= int(data.get("total_page", 1)):
+                break
+            page += 1
+            time.sleep(REQUEST_DELAY)
+
+        if not records:
+            return pd.DataFrame()
+        result = pd.DataFrame(records)
+        result["rcept_dt"] = pd.to_datetime(result["rcept_dt"], format="%Y%m%d", errors="coerce")
+        return result.sort_values("rcept_dt").reset_index(drop=True)
+
+    def find_demand_forecast_disclosure(
+        self,
+        corp_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> Optional[str]:
+        """수요예측 숫자를 포함할 가능성이 가장 큰 공시 접수번호를 찾는다."""
+        disclosures = self.get_company_disclosure_list(corp_code, start_date, end_date)
+        if disclosures.empty:
+            return None
+
+        title = disclosures["report_nm"].fillna("")
+        score = (
+            title.str.contains("수요예측", regex=False).astype(int) * 10
+            + title.str.contains("기관투자자", regex=False).astype(int) * 4
+            + title.str.contains("투자설명서", regex=False).astype(int) * 2
+            + title.str.contains("증권신고서", regex=False).astype(int)
+        )
+        candidates = disclosures.assign(_score=score).sort_values(["_score", "rcept_dt"], ascending=[False, False])
+        best = candidates.iloc[0]
+        # 단순 증권신고서만 있는 경우에는 같은 원문을 수요예측 결과로 오인하지
+        # 않는다. 수요예측 또는 투자설명서 단서가 있는 경우만 원문 파싱한다.
+        return str(best["rcept_no"]) if int(best["_score"]) >= 2 else None
+
     # ── 수요예측 결과 파싱 ─────────────────────────────────────
 
     def get_demand_forecast(self, corp_code: str, rcept_no: str) -> dict:
@@ -125,14 +233,7 @@ class DARTCollector:
         실제 구현 시: DART XML API를 통해 공시 원문을 가져온 후
         특정 테이블 패턴을 정규식으로 파싱한다.
         """
-        data = self._get("fnlttXbrl", {
-            "rcept_no": rcept_no,
-            "reprt_code": "F001",
-        })
-        # NOTE: 실제 파싱 로직은 DART 공시 HTML 구조에 의존하므로
-        # 여기서는 인터페이스만 정의하고 파서를 별도 모듈로 분리한다.
-        raw_html = data.get("document", "")
-        return self._parse_demand_forecast_html(raw_html, corp_code)
+        return self._parse_demand_forecast_html(self.get_document_text(rcept_no), corp_code)
 
     def _parse_demand_forecast_html(self, html: str, corp_code: str) -> dict:
         """
@@ -246,7 +347,7 @@ class DARTCollector:
         filtered = df[df["account_id"].isin(target_accounts.keys())].copy()
         filtered["account_name_en"] = filtered["account_id"].map(target_accounts)
         filtered["amount"] = pd.to_numeric(
-            filtered["thstrm_amount"].str.replace(",", ""), errors="coerce"
+            filtered["thstrm_amount"].astype(str).str.replace(",", ""), errors="coerce"
         )
         return filtered[["year", "account_name_en", "amount"]].dropna()
 
@@ -264,9 +365,7 @@ class DARTCollector:
           - 주관사명
           - 최대주주 보호예수 기간
         """
-        data = self._get("fnlttXbrl", {"rcept_no": rcept_no, "reprt_code": "F001"})
-        html = data.get("document", "")
-        return self._parse_offering_html(html, rcept_no)
+        return self._parse_offering_html(self.get_document_text(rcept_no), rcept_no)
 
     def _parse_offering_html(self, html: str, rcept_no: str) -> dict:
         """공모 정보 HTML 파싱"""
