@@ -75,6 +75,12 @@ def set_table_widths(table, widths):
             set_cell_margins(cell)
 
 
+def keep_table_row_together(row):
+    row_properties = row._tr.get_or_add_trPr()
+    marker = OxmlElement("w:cantSplit")
+    row_properties.append(marker)
+
+
 def add_page_number(paragraph):
     paragraph.alignment = WD_ALIGN_PARAGRAPH.RIGHT
     run = paragraph.add_run("Page ")
@@ -180,6 +186,7 @@ def add_table(doc, headers, rows, widths):
     header_marker = OxmlElement("w:tblHeader")
     header_marker.set(qn("w:val"), "true")
     header_row_properties.append(header_marker)
+    keep_table_row_together(table.rows[0])
     for cell, header in zip(table.rows[0].cells, headers):
         set_cell_shading(cell, LIGHT_BLUE)
         p = cell.paragraphs[0]
@@ -189,6 +196,7 @@ def add_table(doc, headers, rows, widths):
         run.font.size = Pt(9.5)
     for row in rows:
         cells = table.add_row().cells
+        keep_table_row_together(table.rows[-1])
         for cell, value in zip(cells, row):
             p = cell.paragraphs[0]
             p.paragraph_format.space_after = Pt(0)
@@ -231,18 +239,19 @@ def build_document():
     add_bullet(doc, "상장 후 실측: KRX 상장일 시초가·정규장 종가. NXT 애프터마켓은 관측 데이터로 분리하고 모델 타깃과 혼합하지 않는다.")
 
     doc.add_heading("2. 인증정보를 시스템에 설정하는 방법", level=1)
-    doc.add_paragraph("인증정보는 코드, Git, 문서, 로그에 직접 넣지 않는다. 현재 코드는 운영체제 환경변수에서 값을 읽으므로 개발 PC에서는 터미널 환경변수로 주입한다. 향후 .env 방식을 도입할 경우에는 전용 로더를 추가하고 Git에 포함하지 않는다. 운영 환경은 클라우드 Secret Manager 또는 배포 플랫폼의 Secret 기능을 사용한다. 애플리케이션은 시작할 때만 비밀값을 읽고 이후에는 값 자체를 출력하지 않는다.")
+    doc.add_paragraph("인증정보는 코드, Git, 문서, 로그에 직접 넣지 않는다. 개발 PC에서는 터미널 환경변수로 주입하고, 운영 환경은 클라우드 Secret Manager 또는 배포 플랫폼의 Secret 기능을 사용한다. KRX는 개인 ID·비밀번호 로그인 수집을 출시 구조에서 사용하지 않고, 승인된 KRX OpenAPI 인증키를 AUTH_KEY 요청 헤더로 전송한다. 애플리케이션은 시작할 때만 비밀값을 읽고 이후에는 값 자체를 출력하지 않는다.")
     add_table(doc, ["환경", "설정 방식", "필수 값", "확인 방법"], [
-        ("개발 PC", "터미널 환경변수 (현재 코드)", "DART_API_KEY, KRX_ID, KRX_PASSWORD", "collect 명령이 키 누락 오류 없이 시작되는지 확인"),
+        ("개발 PC", "터미널 환경변수", "DART_API_KEY, KRX_API_KEY", "승인된 KRX API 샘플 호출과 DART 연결 확인"),
         ("CI/CD", "암호화된 저장소 Secret", "동일", "값을 출력하지 않는 연결·단위 테스트"),
         ("운영", "Secret Manager + 서비스 계정", "동일 및 DB/서명 키", "헬스체크는 설정 여부만 보고"),
     ], [1200, 2700, 2800, 2660])
     doc.add_heading("2.1 개발 PC 예시", level=2)
     p = doc.add_paragraph()
     p.paragraph_format.left_indent = Inches(0.25)
-    r = p.add_run("export DART_API_KEY=발급받은_40자리_키\nexport KRX_ID=개인_KRX_아이디\nexport KRX_PASSWORD=개인_KRX_비밀번호\npython pipeline.py --mode collect --start-year 2020 --end-year 2025 --phase phase2")
+    r = p.add_run("export DART_API_KEY=발급받은_40자리_키\nexport KRX_API_KEY=발급받은_KRX_OpenAPI_인증키\npython pipeline.py --mode collect --start-year 2020 --end-year 2025 --phase phase2")
     r.font.name = "Courier New"
     r.font.size = Pt(9.5)
+    add_callout(doc, "적용 상태", "위 예시는 KRX OpenAPI 수집기 교체 후의 목표 설정이다. 현재 개인 로그인 방식 수집기는 공식 API 수집기로 교체되기 전까지 배포 환경에서 사용하지 않는다.")
     add_callout(doc, "운영 규칙", "DART 키는 OpenDART에서 발급받는다. KRX 계정·시장 데이터의 이용 범위와 재배포 가능 여부는 서비스 출시 전 KRX/코스콤 약관 및 계약으로 확정한다. 특히 앱에 원시 시세를 재배포하는 기능은 별도 법무·데이터 라이선스 검토 없이는 출시하지 않는다.")
 
     doc.add_heading("3. 통합 데이터 거버넌스 프레임워크", level=1)
@@ -259,7 +268,7 @@ def build_document():
     add_table(doc, ["등급", "예시", "통제", "기본 보존"], [
         ("공개", "DART 공시 식별자, 공개된 기업 정보", "읽기 전용 원문 해시·출처 기록", "7년, 이용권한 재검토"),
         ("제한", "KRX 수집 데이터, 가공 시계열, 원문 파일", "서비스 계정만 수집, 사용자 직접 다운로드 차단", "계약·약관 및 내부 정책 기준"),
-        ("기밀", "API 키, KRX ID·비밀번호, DB 비밀번호", "Secret Manager, 마스킹, 로그 금지, 90일 검토", "회전 즉시 이전 버전 폐기"),
+        ("기밀", "DART·KRX API 키, DB 비밀번호", "Secret Manager, 마스킹, 로그 금지, 90일 검토", "회전 즉시 이전 버전 폐기"),
         ("내부", "피처 스냅샷, 모델, 예측·오차, 감사 로그", "역할 기반 접근, 버전 고정", "모델·감사 목적상 7년 / 로그 2년"),
     ], [1000, 2900, 3300, 2160])
 
@@ -340,9 +349,27 @@ def build_document():
         ("모델 이상", "신규 모델 중지 또는 롤백, 사용자에게 데이터 상태 표시", "원인 분석·재검증·승인 재수행"),
     ], [2000, 3600, 3760])
 
-    doc.add_heading("10. 단계별 구현 로드맵", level=1)
+    doc.add_heading("10. API·계약 유효기간 관리", level=1)
+    doc.add_paragraph("기준일은 2026-08-25이며, 아래 상태는 KRX OpenAPI 이용현황 화면에서 확인한 승인 결과를 기준으로 한다. 인증키 값 자체는 문서·소스·로그에 적지 않는다. 갱신 책임자는 서비스 오너, 실행 담당은 플랫폼/보안 오너로 지정한다.")
+    add_table(doc, ["승인 API", "사용기간", "상태", "서비스 역할"], [
+        ("KOSDAQ 시리즈 일별시세정보", "2026-08-25 ~ 2027-08-24", "승인", "코스닥 시장 모멘텀 피처"),
+        ("코스닥 일별매매정보", "2026-08-25 ~ 2027-08-24", "승인", "코스닥 상장일 시초가·종가 실측"),
+        ("유가증권 종목기본정보", "2026-08-25 ~ 2027-08-24", "승인", "유가증권 종목·상장정보 정합"),
+        ("유가증권 일별매매정보", "2026-08-25 ~ 2027-08-24", "승인", "유가증권 상장일 시초가·종가 실측"),
+        ("KOSPI 시리즈 일별시세정보", "2026-08-25 ~ 2027-08-24", "승인", "유가증권 시장 모멘텀 피처"),
+        ("코스닥 종목기본정보", "2026-08-25 ~ 2027-08-24", "승인", "코스닥 종목·상장정보 정합"),
+    ], [2800, 2700, 950, 2910])
+    add_table(doc, ["대상", "유효기간·상태", "운영 통제"], [
+        ("KRX OpenAPI 인증키·승인 API", "각 승인 API는 2027-08-24 종료. KRX 약관상 인증키는 발급일로부터 1년이며 연장 요청 시 1년 단위 연장 가능.", "2027-07-25 갱신 시작, 2027-08-10 미갱신 알림, 2027-08-20 새 기간 샘플 호출·배치 검증, 2027-08-24 만료 전 연장 완료."),
+        ("KRX 호출 한도", "키당 하루 10,000회 이하. 12개월 미사용 키는 사전 공지 없이 삭제될 수 있음.", "21:00 배치, 과거 적재, 재시도까지 일별 호출 수를 메트릭으로 기록하고 80%에서 경고."),
+        ("OpenDART 인증키", "공개 약관에는 고정 만료일이 명시되지 않음. 다만 회원 개인정보 보유기간은 2년마다 재동의가 필요하며, 만료 시 키가 중지될 수 있음.", "반기마다 인증키 관리·이용현황과 계정 재동의 상태를 확인. 수집 실패 코드 901을 긴급 점검 신호로 처리."),
+        ("실시간 시세 분배 계약", "미체결·보류. 현재 출시 범위에는 실시간 체결가·분봉 차트 미포함.", "계약 체결 전에는 일별 API를 통한 상장일 21:00 실측만 제공. 실시간 화면은 계약·재배포 권한·수신 서버 승인 뒤 별도 기능으로 활성화."),
+    ], [1800, 3650, 3910])
+    add_callout(doc, "갱신 일정의 의미", "2027-08-24 이후에는 KRX 일별 API 수집이 중단될 수 있으므로, 30일 전부터 갱신과 샘플 호출을 완료한다. 실시간 시세 계약 보류는 기능 보류일 뿐이며, 상장 전 예측·상장일 21:00 실측·모델 재학습은 승인된 일별 API만으로 계속 운영한다.")
+
+    doc.add_heading("11. 단계별 구현 로드맵", level=1)
     add_table(doc, ["단계", "완료 기준"], [
-        ("0. 계약·접근 준비", "DART 키 발급, KRX 이용·재배포 범위 확인, Secret 저장소와 역할 정의"),
+        ("0. 계약·접근 준비", "DART 키 발급, 승인된 KRX 일별 API의 Secret 등록, 갱신 일정·역할 정의. 실시간 시세 계약은 보류"),
         ("1. 실제 이력 적재", "원문·정규화·정합·품질 요약 생성, 오류 격리 큐와 출처 메타데이터 확보"),
         ("2. 검증·모델", "실제 과거 데이터 walk-forward 성능 보고서, 모델 카드, 승격 기준 확정"),
         ("3. API·앱", "인증된 예측 조회, 입력 데이터 최신성·출처·불확실성 표시, 관리자 품질 화면"),
@@ -366,6 +393,9 @@ def build_document():
     add_source(doc, "OpenDART, 공시검색 API: 인증키와 공시 목록 수집 파라미터 참고.", "https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019001")
     add_source(doc, "OpenDART, 공시서류 원본파일 API: document.xml의 ZIP 바이너리 응답과 인증키 요구사항 참고.", "https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019003")
     add_source(doc, "KRX/KOSCOM, Market Data Usage Policies: 시장 데이터 외부 제공·재배포 관련 사전 검토 필요성 참고.", "https://data.krx.co.kr/inc/datasale/Market%20Data%20Usage%20Polices_ko.pdf?v=20230121_1")
+    add_source(doc, "KRX OpenAPI 이용약관: 인증키 1년 유효기간, 연장, 호출 한도와 12개월 미사용 키 삭제 조건 참고.", "https://openapi.krx.co.kr/contents/OPP/INFO/OPPINFO002.jsp")
+    add_source(doc, "KRX 데이터 수신방법: 실시간·지연 시세는 별도 데이터 분배 계약이 필요함을 참고.", "https://openapi.krx.co.kr/contents/OPP/DATA/OPPDATA003.jsp")
+    add_source(doc, "OpenDART 오류 코드: 개인정보 보유기간 만료에 따른 인증키 중지(901) 참고.", "https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DE006&apiId=AE00081")
 
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     doc.save(OUTPUT)
