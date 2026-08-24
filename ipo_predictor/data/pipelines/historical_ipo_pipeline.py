@@ -39,7 +39,7 @@ class HistoricalIPOPipeline:
         if getattr(self.dart, "is_configured", True) is False:
             raise RuntimeError("DART_API_KEY를 설정한 뒤 실제 수집을 실행하세요.")
         if getattr(self.krx, "is_configured", True) is False:
-            raise RuntimeError("KRX_ID와 KRX_PASSWORD를 설정한 뒤 실제 수집을 실행하세요.")
+            raise RuntimeError("KRX_API_KEY를 설정한 뒤 KRX OpenAPI 수집을 실행하세요.")
 
         calendar = self._collect_calendar(start_year, end_year)
         if calendar.empty:
@@ -222,5 +222,5 @@ class HistoricalIPOPipeline:
             "close_target_rows": int(features.get("close_return_pct", pd.Series(dtype=float)).notna().sum()),
             "offering_price_rows": int(dart_ipo.get("offering_price", pd.Series(dtype=float)).notna().sum()),
             "demand_ratio_rows": int(dart_ipo.get("institutional_demand_ratio", pd.Series(dtype=float)).notna().sum()),
-            "source": "OpenDART + KRX data system",
+            "source": "OpenDART + KRX OpenAPI",
         }

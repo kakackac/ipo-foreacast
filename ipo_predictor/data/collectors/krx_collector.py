@@ -1,126 +1,163 @@
-"""
-data/collectors/krx_collector.py
-─────────────────────────────────
-KRX(한국거래소) 데이터 수집기.
+"""KRX OpenAPI를 이용해 IPO 사후 실적과 시장 데이터를 수집한다.
 
-수집 대상:
-  1. KOSPI / KOSDAQ 일별 지수 (시장 모멘텀 계산용)
-  2. 신규 상장 종목 일별 OHLCV (시초가·종가 수익률 계산용)
-  3. IPO 일정 (상장 예정일 목록)
-
-KRX는 공식 API가 없어 정보데이터시스템(data.krx.co.kr)의
-AJAX 엔드포인트를 사용한다.
-실 운영 시 User-Agent 및 Referer 헤더 설정이 필수이다.
+승인된 일별 API만 사용한다. KRX 웹사이트 로그인이나 개인 ID/비밀번호는
+사용하지 않으며, API 키는 ``KRX_API_KEY`` 환경변수로만 전달한다.
 """
 
-import time
 import logging
-from datetime import date, timedelta
-from typing import Optional
+import time
+from datetime import date, datetime, timedelta
+from typing import Any, Optional
 
-import requests
 import pandas as pd
+import requests
 
-from config import KRX_BASE_URL, KRX_ID, KRX_PASSWORD, RAW_DIR
+from config import KRX_API_KEY, KRX_OPENAPI_BASE_URL, RAW_DIR
 
 logger = logging.getLogger(__name__)
 
-REQUEST_DELAY = 0.5
-HEADERS = {
-    "User-Agent":  "Mozilla/5.0 (compatible; IPO-Research/1.0)",
-    "Referer":     "https://data.krx.co.kr/contents/MDC/MDI/outerLoader/index.cmd",
-    "X-Requested-With": "XMLHttpRequest",
+REQUEST_DELAY = 0.1
+# KRX 일반 인증키의 일일 호출 한도보다 여유를 두고 중단한다.
+MAX_REQUESTS_PER_RUN = 8_000
+
+MARKETS = {
+    "KOSPI": {
+        "daily_price": "sto/stk_bydd_trd",
+        "basic_info": "sto/stk_isu_base_info",
+        "index": "idx/kospi_dd_trd",
+        "index_names": {"KOSPI", "코스피"},
+    },
+    "KOSDAQ": {
+        "daily_price": "sto/ksq_bydd_trd",
+        "basic_info": "sto/ksq_isu_base_info",
+        "index": "idx/kosdaq_dd_trd",
+        "index_names": {"KOSDAQ", "코스닥"},
+    },
 }
 
 
 class KRXCollector:
-    """KRX 정보데이터시스템 수집기"""
+    """KRX OpenAPI 일별 데이터 수집기."""
 
-    def __init__(self):
-        self.session = requests.Session()
-        self.session.headers.update(HEADERS)
-        self._authenticated = False
+    def __init__(
+        self,
+        api_key: str | None = None,
+        base_url: str = KRX_OPENAPI_BASE_URL,
+        session: requests.Session | None = None,
+        request_delay: float = REQUEST_DELAY,
+    ):
+        self.api_key = (api_key if api_key is not None else KRX_API_KEY).strip()
+        self.base_url = base_url.rstrip("/")
+        self.session = session or requests.Session()
+        self.request_delay = request_delay
+        self.request_count = 0
 
     @property
     def is_configured(self) -> bool:
-        """현재 KRX 데이터 시스템이 요구하는 로그인 정보의 설정 여부."""
-        return bool(KRX_ID and KRX_PASSWORD)
+        """KRX OpenAPI 키가 준비됐는지 반환한다."""
+        return bool(self.api_key)
 
-    def _authenticate(self) -> None:
-        """KRX 세션을 초기화하고 환경변수 자격증명으로 로그인한다."""
-        if self._authenticated:
-            return
+    def _get_daily_records(self, endpoint: str, bas_dd: str) -> list[dict[str, Any]]:
+        """한 기준일의 KRX OpenAPI 응답을 표준 레코드 목록으로 바꾼다."""
         if not self.is_configured:
-            raise RuntimeError("KRX_ID와 KRX_PASSWORD를 설정한 뒤 KRX 수집을 실행하세요.")
-        user_agent = HEADERS["User-Agent"]
-        try:
-            login_page = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001.cmd"
-            login_view = "https://data.krx.co.kr/contents/MDC/COMS/client/view/login.jsp?site=mdc"
-            login_url = "https://data.krx.co.kr/contents/MDC/COMS/client/MDCCOMS001D1.cmd"
-            self.session.get(login_page, headers={"User-Agent": user_agent}, timeout=15)
-            self.session.get(login_view, headers={"User-Agent": user_agent, "Referer": login_page}, timeout=15)
-            response = self.session.post(
-                login_url,
-                data={"mbrNm": "", "telNo": "", "di": "", "certType": "", "mbrId": KRX_ID, "pw": KRX_PASSWORD},
-                headers={"User-Agent": user_agent, "Referer": login_page},
-                timeout=15,
+            raise RuntimeError("KRX_API_KEY를 설정한 뒤 KRX OpenAPI 수집을 실행하세요.")
+        if self.request_count >= MAX_REQUESTS_PER_RUN:
+            raise RuntimeError(
+                f"이번 실행의 KRX OpenAPI 요청이 {MAX_REQUESTS_PER_RUN:,}건에 도달했습니다. "
+                "기간을 나누어 다시 실행하세요."
             )
-            response.raise_for_status()
-            if response.json().get("_error_code") != "CD001":
-                raise RuntimeError("KRX 로그인에 실패했습니다. KRX_ID와 KRX_PASSWORD를 확인하세요.")
-            self._authenticated = True
-        except (requests.RequestException, ValueError) as exc:
-            raise RuntimeError(f"KRX 로그인 실패: {exc}") from exc
 
-    def _post(self, params: dict) -> dict:
         try:
-            self._authenticate()
-            resp = self.session.post(KRX_BASE_URL, data=params, timeout=15)
-            resp.raise_for_status()
-            return resp.json()
-        except RuntimeError:
-            raise
-        except Exception as e:
-            raise RuntimeError(f"KRX 요청 실패: {e}") from e
+            response = self.session.get(
+                f"{self.base_url}/{endpoint}",
+                params={"basDd": bas_dd},
+                headers={"AUTH_KEY": self.api_key, "Accept": "application/json"},
+                timeout=30,
+            )
+            self.request_count += 1
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise RuntimeError(f"KRX OpenAPI 요청 실패 ({endpoint}, {bas_dd}): {exc}") from exc
 
-    # ── 지수 데이터 ────────────────────────────────────────────
+        if self.request_delay:
+            time.sleep(self.request_delay)
 
-    def get_index_ohlcv(
-        self,
-        index_code: str,   # "1" = KOSPI, "2" = KOSDAQ
-        start_date: str,   # "20150101"
-        end_date:   str,
-    ) -> pd.DataFrame:
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"KRX OpenAPI 응답 형식이 올바르지 않습니다 ({endpoint}, {bas_dd}).")
+        records = payload.get("OutBlock_1", payload.get("output", []))
+        if not isinstance(records, list):
+            logger.warning("KRX OpenAPI 응답에 데이터 목록이 없습니다: %s %s", endpoint, bas_dd)
+            return []
+        return records
+
+    @staticmethod
+    def _to_number(value: object) -> Optional[float]:
+        if value is None or pd.isna(value):
+            return None
+        text = str(value).replace(",", "").strip()
+        if text in {"", "-", "N/A"}:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _as_bas_dd(value: str | date | datetime | pd.Timestamp) -> str:
+        return pd.Timestamp(value).strftime("%Y%m%d")
+
+    @staticmethod
+    def _normalise_ticker(value: object) -> str:
+        return str(value or "").strip().zfill(6)
+
+    @staticmethod
+    def _normalise_index_name(value: object) -> str:
+        return str(value or "").replace(" ", "").upper()
+
+    @staticmethod
+    def _normalise_market(market: str | None) -> str | None:
+        if market is None:
+            return None
+        normalised = str(market).upper().strip()
+        return normalised if normalised in MARKETS else None
+
+    # ── 시장 지수 ─────────────────────────────────────────────
+
+    def get_index_ohlcv(self, index_code: str, start_date: str, end_date: str) -> pd.DataFrame:
+        """KOSPI 또는 KOSDAQ의 일별 종가를 공식 OpenAPI에서 수집한다.
+
+        KRX 일별 API는 하나의 기준일(``basDd``)만 받으므로 영업일별로
+        조회한다. 휴장일은 빈 응답으로 건너뛴다.
         """
-        KOSPI / KOSDAQ 일별 종가 수집.
-        KRX bld 코드: MDCSTAT00301 (지수 시계열)
-        """
-        params = {
-            "bld":      "dbms/MDC/STAT/standard/MDCSTAT00301",
-            "indIdx":   index_code,
-            "indIdx2":  "001" if index_code == "1" else "001",
-            "strtDd":   start_date,
-            "endDd":    end_date,
-        }
-        data = self._post(params)
-        items = data.get("output", [])
-        if not items:
-            logger.warning("지수 데이터 없음: %s %s~%s", index_code, start_date, end_date)
-            return pd.DataFrame()
+        market = "KOSPI" if str(index_code) == "1" else "KOSDAQ"
+        metadata = MARKETS[market]
+        start = pd.Timestamp(start_date)
+        end = min(pd.Timestamp(end_date), pd.Timestamp.today().normalize())
+        if start > end:
+            return pd.DataFrame(columns=["date", "index_code", "close"])
 
-        df = pd.DataFrame(items)
-        df = df.rename(columns={
-            "TRD_DD":   "date",
-            "CLSPRC_IDX": "close",
-            "OPNPRC_IDX": "open",
-            "HGPRC_IDX":  "high",
-            "LWPRC_IDX":  "low",
-        })
-        df["date"]  = pd.to_datetime(df["date"].str.replace("/", "-"))
-        df["close"] = pd.to_numeric(df["close"].str.replace(",", ""), errors="coerce")
-        df = df.sort_values("date").reset_index(drop=True)
-        df["index_code"] = "KOSPI" if index_code == "1" else "KOSDAQ"
-        return df[["date", "index_code", "close"]]
+        records: list[dict[str, Any]] = []
+        target_names = {self._normalise_index_name(name) for name in metadata["index_names"]}
+        for bas_dd in pd.bdate_range(start, end):
+            rows = self._get_daily_records(metadata["index"], self._as_bas_dd(bas_dd))
+            row = next(
+                (item for item in rows if self._normalise_index_name(item.get("IDX_NM")) in target_names),
+                None,
+            )
+            if row is None:
+                continue
+            records.append({
+                "date": pd.Timestamp(row.get("BAS_DD", bas_dd)),
+                "index_code": market,
+                "close": self._to_number(row.get("CLSPRC_IDX")),
+            })
+
+        frame = pd.DataFrame(records, columns=["date", "index_code", "close"])
+        if frame.empty:
+            logger.warning("%s 지수 데이터가 없습니다: %s~%s", market, start_date, end_date)
+            return frame
+        return frame.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
 
     def get_market_momentum(
         self,
@@ -128,216 +165,165 @@ class KRXCollector:
         index: str = "KOSPI",
         windows: list[int] = [5, 20, 60],
     ) -> dict[str, float]:
-        """
-        특정 상장일 기준 지수 모멘텀 계산.
-        listing_date 이전 영업일의 종가를 기준으로 windows일 수익률 반환.
-        """
-        # 충분한 기간의 데이터 로드
-        start = (listing_date - timedelta(days=max(windows) * 2)).strftime("%Y%m%d")
-        end   = (listing_date - timedelta(days=1)).strftime("%Y%m%d")
+        """상장 직전 거래일 종가를 기준으로 시장 모멘텀을 계산한다."""
+        start = listing_date - timedelta(days=max(windows) * 2)
+        end = listing_date - timedelta(days=1)
+        index_code = "1" if index.upper() == "KOSPI" else "2"
+        frame = self.get_index_ohlcv(index_code, self._as_bas_dd(start), self._as_bas_dd(end))
+        if frame.empty:
+            return {f"{index.lower()}_momentum_{window}d": 0.0 for window in windows}
 
-        idx_code = "1" if index == "KOSPI" else "2"
-        df = self.get_index_ohlcv(idx_code, start, end)
-        if df.empty:
-            return {f"{index.lower()}_momentum_{w}d": 0.0 for w in windows}
-
-        closes = df["close"].values
+        closes = frame["close"].to_numpy()
         result = {}
-        for w in windows:
-            if len(closes) > w:
-                ret = closes[-1] / closes[-1 - w] - 1
-            else:
-                ret = 0.0
-            result[f"{index.lower()}_momentum_{w}d"] = round(ret, 6)
+        for window in windows:
+            result[f"{index.lower()}_momentum_{window}d"] = (
+                round(closes[-1] / closes[-1 - window] - 1, 6) if len(closes) > window else 0.0
+            )
         return result
 
-    # ── 신규 상장 종목 가격 ────────────────────────────────────
+    # ── 상장 종목과 상장일 가격 ─────────────────────────────────
 
     def get_listing_day_price(
         self,
-        ticker:       str,
-        listing_date: str,   # "20230310"
+        ticker: str,
+        listing_date: str,
         isu_cd: Optional[str] = None,
-    ) -> dict:
-        """
-        상장 당일 시초가 / 종가 수집.
-        수익률 = (시초가 / 공모가 - 1) 은 feature_engineer에서 계산한다.
+        market: str | None = None,
+    ) -> dict[str, Any]:
+        """상장일 시가·정규장 종가를 수집한다.
 
-        KRX bld: dbms/MDC/STAT/standard/MDCSTAT01701
+        ``isu_cd``가 있으면 KRX 표준 종목코드로 우선 비교한다. 시장을 알 수
+        없을 때만 KOSPI와 KOSDAQ를 모두 조회해, API 호출을 최소화한다.
         """
-        params = {
-            "bld":       "dbms/MDC/STAT/standard/MDCSTAT01701",
-            # KRX 조회에는 6자리 단축코드가 아니라 12자리 ISU_CD가 필요한
-            # 경우가 있다. 캘린더에서 받은 ISU_CD를 우선 사용한다.
-            "isuCd":     isu_cd or ticker,
-            "strtDd":    listing_date,
-            "endDd":     listing_date,
-            "adjStkPrc": "1",
-        }
-        data = self._post(params)
-        items = data.get("output", [])
-        if not items:
-            return {"ticker": ticker, "open_price": None, "close_price": None}
+        selected_market = self._normalise_market(market)
+        markets = [selected_market] if selected_market else list(MARKETS)
+        normalized_ticker = self._normalise_ticker(ticker)
+        normalized_isu_cd = str(isu_cd or "").strip().upper()
 
-        row = items[0]
+        for market_name in markets:
+            rows = self._get_daily_records(
+                MARKETS[market_name]["daily_price"], self._as_bas_dd(listing_date)
+            )
+            for row in rows:
+                row_isu_cd = str(row.get("ISU_CD", "")).strip().upper()
+                row_ticker = self._normalise_ticker(row.get("ISU_SRT_CD"))
+                if normalized_isu_cd and row_isu_cd == normalized_isu_cd:
+                    return self._price_record(ticker, listing_date, isu_cd, row, market_name)
+                if row_ticker == normalized_ticker:
+                    return self._price_record(ticker, listing_date, isu_cd or row_isu_cd, row, market_name)
+
+        logger.warning("상장일 가격을 찾지 못했습니다: %s (%s)", ticker, listing_date)
         return {
-            "ticker":      ticker,
-            "isu_cd":      isu_cd,
-            "listing_date": listing_date,
-            "open_price":  self._parse_num(row.get("TDD_OPNPRC")),
-            "close_price": self._parse_num(row.get("TDD_CLSPRC")),
-            "high_price":  self._parse_num(row.get("TDD_HGPRC")),
-            "low_price":   self._parse_num(row.get("TDD_LWPRC")),
-            "volume":      self._parse_num(row.get("ACC_TRDVOL")),
+            "ticker": ticker,
+            "isu_cd": isu_cd,
+            "listing_date": self._as_bas_dd(listing_date),
+            "open_price": None,
+            "close_price": None,
+            "high_price": None,
+            "low_price": None,
+            "volume": None,
         }
 
-    def get_ipo_calendar(
+    def _price_record(
         self,
-        start_date: str,
-        end_date:   str,
-    ) -> pd.DataFrame:
-        """
-        KRX 상장종목 기본정보에서 기간 내 신규 상장 종목을 추린다.
-
-        KRX는 이력형 IPO 달력 API를 별도로 공개하지 않으므로, 상장일
-        (LIST_DD)이 담긴 공식 기본정보를 기준으로 한다. 현재 상장 중인
-        종목을 우선 확보하며, 이후 DART 증권신고서와 정합해 ETF/ETN 등
-        비공모 상장을 제거한다.
-        반환: ticker, corp_name, listing_date, market (KOSPI/KOSDAQ)
-        """
-        params = {
-            "bld":       "dbms/MDC/STAT/standard/MDCSTAT01901",
-            "mktId":     "ALL",
+        ticker: str,
+        listing_date: str,
+        isu_cd: str | None,
+        row: dict[str, Any],
+        market: str,
+    ) -> dict[str, Any]:
+        return {
+            "ticker": ticker,
+            "isu_cd": isu_cd,
+            "listing_date": self._as_bas_dd(listing_date),
+            "market": market,
+            "open_price": self._to_number(row.get("TDD_OPNPRC")),
+            "close_price": self._to_number(row.get("TDD_CLSPRC")),
+            "high_price": self._to_number(row.get("TDD_HGPRC")),
+            "low_price": self._to_number(row.get("TDD_LWPRC")),
+            "volume": self._to_number(row.get("ACC_TRDVOL")),
         }
-        data = self._post(params)
-        items = data.get("OutBlock_1", [])
-        if not items:
+
+    def get_ipo_calendar(self, start_date: str, end_date: str) -> pd.DataFrame:
+        """기간 내 신규 상장 종목을 KRX 종목기본정보에서 찾는다.
+
+        이 API는 기준일 시점의 상장 종목을 돌려준다. 따라서 파이프라인은
+        연도별 마지막 유효 기준일을 조회하고 ``LIST_DD``로 해당 연도 IPO를
+        추린 뒤, DART 증권신고서와 정합해 비공모 상장을 제거한다.
+        """
+        start = pd.Timestamp(start_date)
+        end = min(pd.Timestamp(end_date), pd.Timestamp.today().normalize())
+        if start > end:
             return pd.DataFrame()
 
-        df = pd.DataFrame(items)
-        df = df.rename(columns={
-            "ISU_CD":      "isu_cd",
-            "ISU_SRT_CD":  "ticker",
-            "ISU_ABBRV":   "corp_name",
-            "LIST_DD":     "listing_date",
-            "MKT_TP_NM":   "market",
-            "SECT_TP_NM":  "sector",
-        })
-        if "ticker" not in df.columns:
-            # 구형 응답에는 단축코드가 없을 수 있다. 이 경우에도 ISU_CD를
-            # 보존해 가격 조회가 가능하도록 한다.
-            df["ticker"] = df["isu_cd"]
-        df["ticker"] = df["ticker"].astype(str).str.strip().str.zfill(6)
-        df["listing_date"] = pd.to_datetime(df["listing_date"].astype(str).str.replace("/", "-"))
-        start = pd.to_datetime(start_date)
-        end = pd.to_datetime(end_date)
-        df = df[(df["listing_date"] >= start) & (df["listing_date"] <= end)].copy()
+        frames = []
+        for market, metadata in MARKETS.items():
+            records = self._get_daily_records(metadata["basic_info"], self._as_bas_dd(end))
+            if not records:
+                continue
+            frame = pd.DataFrame(records).rename(columns={
+                "ISU_CD": "isu_cd",
+                "ISU_SRT_CD": "ticker",
+                "ISU_ABBRV": "corp_name",
+                "LIST_DD": "listing_date",
+                "SECT_TP_NM": "sector",
+            })
+            if "ticker" not in frame:
+                continue
+            frame["market"] = market
+            frames.append(frame)
 
-        # 동일 상장일 종목 수 계산
-        date_counts = df.groupby("listing_date").size().reset_index(name="same_day_ipo_count")
-        df = df.merge(date_counts, on="listing_date")
+        if not frames:
+            return pd.DataFrame()
+        frame = pd.concat(frames, ignore_index=True)
+        frame["ticker"] = frame["ticker"].map(self._normalise_ticker)
+        frame["listing_date"] = pd.to_datetime(frame["listing_date"], errors="coerce")
+        frame = frame[(frame["listing_date"] >= start) & (frame["listing_date"] <= end)].copy()
+        if frame.empty:
+            return frame
 
-        logger.info("IPO 캘린더 수집: %d건", len(df))
-        return df.reset_index(drop=True)
+        counts = frame.groupby("listing_date").size().rename("same_day_ipo_count")
+        frame = frame.merge(counts, on="listing_date", how="left")
+        columns = ["ticker", "isu_cd", "corp_name", "listing_date", "market", "sector", "same_day_ipo_count"]
+        return frame.reindex(columns=columns).drop_duplicates(["ticker", "listing_date"]).reset_index(drop=True)
 
-    # ── 섹터 분류 ─────────────────────────────────────────────
+    def get_sector_info(self, ticker: str, as_of_date: str | None = None) -> dict[str, Any]:
+        """현재 또는 지정 기준일의 종목 업종 정보를 반환한다."""
+        bas_dd = self._as_bas_dd(as_of_date or date.today())
+        normalized_ticker = self._normalise_ticker(ticker)
+        for market, metadata in MARKETS.items():
+            for row in self._get_daily_records(metadata["basic_info"], bas_dd):
+                if self._normalise_ticker(row.get("ISU_SRT_CD")) == normalized_ticker:
+                    return {
+                        "ticker": ticker,
+                        "market": market,
+                        "sector_code": row.get("SECT_TP_CD"),
+                        "sector_name": row.get("SECT_TP_NM"),
+                    }
+        return {"ticker": ticker, "sector_code": None, "sector_name": None}
 
-    def get_sector_info(self, ticker: str) -> dict:
-        """
-        종목 섹터(업종) 코드 및 명칭 조회.
-        동일 섹터 최근 IPO 수익률 계산에 사용.
-        """
-        params = {
-            "bld":       "dbms/MDC/STAT/standard/MDCSTAT01901",
-            "mktId":     "ALL",
-        }
-        data = self._post(params)
-        items = data.get("OutBlock_1", [])
-        if not items:
-            return {"ticker": ticker, "sector_code": None, "sector_name": None}
-        normalized = str(ticker).zfill(6)
-        row = next(
-            (item for item in items if str(item.get("ISU_SRT_CD", "")).zfill(6) == normalized),
-            None,
-        )
-        if row is None:
-            return {"ticker": ticker, "sector_code": None, "sector_name": None}
-        return {
-            "ticker":       ticker,
-            "sector_code":  row.get("SECT_TP_CD"),
-            "sector_name":  row.get("SECT_TP_NM"),
-        }
+    # ── 저장용 편의 메서드 ──────────────────────────────────────
 
-    # ── 전체 히스토리 수집 ─────────────────────────────────────
-
-    def collect_market_data(
-        self,
-        start_year: int = 2015,
-        end_year:   int = 2024,
-    ) -> dict[str, pd.DataFrame]:
-        """
-        KOSPI·KOSDAQ 전체 히스토리 지수 데이터 수집.
-        """
-        start = f"{start_year}0101"
-        end   = f"{end_year}1231"
-
-        logger.info("KOSPI 지수 수집 중...")
-        kospi = self.get_index_ohlcv("1", start, end)
-
-        logger.info("KOSDAQ 지수 수집 중...")
-        kosdaq = self.get_index_ohlcv("2", start, end)
-
+    def collect_market_data(self, start_year: int = 2015, end_year: int = 2024) -> dict[str, pd.DataFrame]:
+        """KOSPI·KOSDAQ 일별 지수를 원본 저장소에 기록한다."""
+        kospi = self.get_index_ohlcv("1", f"{start_year}0101", f"{end_year}1231")
+        kosdaq = self.get_index_ohlcv("2", f"{start_year}0101", f"{end_year}1231")
         if not kospi.empty:
             kospi.to_parquet(RAW_DIR / "kospi_index.parquet", index=False)
         if not kosdaq.empty:
             kosdaq.to_parquet(RAW_DIR / "kosdaq_index.parquet", index=False)
-
-        logger.info("시장 지수 저장 완료")
         return {"kospi": kospi, "kosdaq": kosdaq}
 
-    def collect_ipo_prices(
-        self,
-        ipo_list: pd.DataFrame,  # listing_date, ticker 컬럼 필요
-    ) -> pd.DataFrame:
-        """
-        IPO 목록의 상장일 가격 수집.
-        ipo_list: get_ipo_calendar() 결과
-        """
+    def collect_ipo_prices(self, ipo_list: pd.DataFrame) -> pd.DataFrame:
+        """IPO 목록의 상장일 시가·종가를 일별 API로 저장한다."""
         records = []
-        total = len(ipo_list)
-
-        for i, row in enumerate(ipo_list.itertuples(), 1):
-            ticker = str(row.ticker)
-            isu_cd = getattr(row, "isu_cd", None)
-            dt = row.listing_date.strftime("%Y%m%d")
-            price_data = self.get_listing_day_price(ticker, dt, isu_cd=isu_cd)
-            records.append(price_data)
-
-            if i % 20 == 0:
-                logger.info("가격 수집 %d / %d", i, total)
-            time.sleep(REQUEST_DELAY)
-
-        df = pd.DataFrame(records)
-        out_path = RAW_DIR / "ipo_listing_prices.parquet"
-        df.to_parquet(out_path, index=False)
-        logger.info("상장일 가격 저장: %d건 → %s", len(df), out_path)
-        return df
-
-    @staticmethod
-    def _parse_num(val: Optional[str]) -> Optional[float]:
-        if val is None:
-            return None
-        try:
-            return float(str(val).replace(",", ""))
-        except ValueError:
-            return None
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-    collector = KRXCollector()
-
-    # 테스트: 2024년 IPO 캘린더
-    cal = collector.get_ipo_calendar("20240101", "20241231")
-    print(cal.head(10))
-    print(f"\n2024년 상장 종목: {len(cal)}건")
+        for row in ipo_list.itertuples(index=False):
+            records.append(self.get_listing_day_price(
+                ticker=str(row.ticker),
+                listing_date=self._as_bas_dd(row.listing_date),
+                isu_cd=getattr(row, "isu_cd", None),
+                market=getattr(row, "market", None),
+            ))
+        frame = pd.DataFrame(records)
+        frame.to_parquet(RAW_DIR / "ipo_listing_prices.parquet", index=False)
+        return frame

@@ -16,7 +16,7 @@
 | 설정 | `config.py` | ✅ 완료 |
 | 피처 정의 | `features/definitions.py` | ✅ 완료 |
 | DART 수집기 | `data/collectors/dart_collector.py` | ✅ 완료 (API 키 필요) |
-| KRX 수집기 | `data/collectors/krx_collector.py` | ✅ 완료 |
+| KRX 수집기 | `data/collectors/krx_collector.py` | ✅ 공식 OpenAPI 일별 상장 일정·가격·지수 수집 |
 | 피처 엔지니어링 | `data/processors/feature_engineer.py` | ✅ 완료 |
 | Phase 2 피처 연결 | `data/processors/feature_engineer.py` | ✅ 완료 (데모/학습 연동) |
 | Phase 2 DART 파서 | `data/collectors/dart_collector.py` | ✅ 부분 완료 (정규식 기반) |
@@ -77,23 +77,18 @@ python pipeline.py --mode demo --phase phase2
 # 1. DART API 키 설정
 export DART_API_KEY=your_key_here   # https://opendart.fss.or.kr
 
-# 2. 히스토리 수집 (2015~2024)
-python -c "
-from data.collectors.dart_collector import DARTCollector
-DARTCollector().collect_full_history(2015, 2024)
-"
+# 2. KRX OpenAPI 키 설정 (웹사이트 ID/비밀번호는 사용하지 않음)
+export KRX_API_KEY=your_krx_openapi_key
 
-# 3. KRX 시장 데이터 수집
-python -c "
-from data.collectors.krx_collector import KRXCollector
-KRXCollector().collect_market_data(2015, 2024)
-"
+# 3. OpenDART와 KRX OpenAPI 실제 이력 정합
+cd ipo_predictor
+python pipeline.py --mode collect --start-year 2020 --end-year 2025 --phase phase2
 
 # 4. 실제 학습 실행
-python pipeline.py --mode train
+python pipeline.py --mode train --phase phase2
 ```
 
-`특징은 수집기가 포맷을 맞춘 과거 데이터 파일을 생성한 후에만 실제 학습을 시작합니다. 현재 DART 원문·수요예측 자료를 실제 상장 이력과 정확히 연결하는 수집 파이프라인은 제작 중입니다.
+KRX 수집은 승인된 일별 API에 `AUTH_KEY` 헤더를 사용합니다. 개인 웹사이트 로그인 ID·비밀번호를 코드나 배포 환경에 넣지 않습니다. 실제 학습은 수집기가 포맷을 맞춘 과거 데이터 파일을 생성한 후에만 시작하며, DART 원문·수요예측 자료와 KRX 상장 이력을 정합한 결과의 품질 요약을 먼저 확인합니다.
 
 ---
 
@@ -151,7 +146,8 @@ reports/outlier_report_*.txt 확인
 - [x] `revenue_growth_3y`, `operating_margin`, `debt_ratio` — 재무 피처 계산 연결
 - [x] 시초가·종가 수익률 분리 예측/백테스트/API 지원
 - [ ] 실제 DART 원문 샘플 기반 Phase 2 파서 보강
-- [ ] IPO 일정·증권신고서·수요예측·상장일 시세 데이터의 실제 이력 수집·정합
+- [x] KRX OpenAPI 기반 IPO 일정·상장일 시세·시장 지수 실제 이력 수집 연결
+- [ ] DART 공시와 KRX 상장 이력의 실제 표본 수집·정합 결과 검증
 - [ ] 상장일 21:00 KST 실습 결과 수집·NXT 체결대상 확인 스케줄러 연결
 - [ ] 실제 원본 데이터 기반 시계열 성능 보고서 생성
 - [ ] XGBoost / LightGBM 환경에서 재테스트 (현재는 sklearn GBM)

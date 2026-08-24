@@ -25,10 +25,10 @@ for d in [RAW_DIR, PROC_DIR, MODEL_DIR, REPORT_DIR]:
 DART_API_KEY = os.getenv("DART_API_KEY", "YOUR_DART_API_KEY")
 DART_BASE_URL = "https://opendart.fss.or.kr/api"
 
-# ── KRX (한국거래소) ───────────────────────────────────────────
-KRX_BASE_URL = "https://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
-KRX_ID = os.getenv("KRX_ID", "")
-KRX_PASSWORD = os.getenv("KRX_PASSWORD", "")
+# ── KRX OpenAPI (한국거래소) ───────────────────────────────────
+# 개인 웹 로그인 계정은 사용하지 않는다. API 키는 서버 환경변수에만 둔다.
+KRX_API_KEY = os.getenv("KRX_API_KEY", "")
+KRX_OPENAPI_BASE_URL = os.getenv("KRX_OPENAPI_BASE_URL", "https://data-dbg.krx.co.kr/svc/apis")
 
 # ── 상장일 실적 확정 ────────────────────────────────
 # KRX 종가를 타곟으로 사용하되, NXT 애프터마켓 종료 후에 실측치를 확정한다.

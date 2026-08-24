@@ -101,7 +101,7 @@ def configure_document(doc):
     styles = doc.styles
     normal = styles["Normal"]
     normal.font.name = "Calibri"
-    normal._element.rPr.rFonts.set(qn("w:eastAsia"), "NanumGothic")
+    normal._element.rPr.rFonts.set(qn("w:eastAsia"), "AppleGothic")
     normal.font.size = Pt(11)
     normal.paragraph_format.space_after = Pt(6)
     normal.paragraph_format.line_spacing = 1.10
@@ -113,7 +113,7 @@ def configure_document(doc):
     ]:
         style = styles[name]
         style.font.name = "Calibri"
-        style._element.rPr.rFonts.set(qn("w:eastAsia"), "NanumGothic")
+        style._element.rPr.rFonts.set(qn("w:eastAsia"), "AppleGothic")
         style.font.size = Pt(size)
         style.font.bold = True
         style.font.color.rgb = RGBColor.from_string(color)
@@ -135,7 +135,7 @@ def add_title(doc, text, subtitle=None):
     p.paragraph_format.space_after = Pt(4)
     run = p.add_run(text)
     run.font.name = "Calibri"
-    run._element.rPr.rFonts.set(qn("w:eastAsia"), "NanumGothic")
+    run._element.rPr.rFonts.set(qn("w:eastAsia"), "AppleGothic")
     run.font.size = Pt(24)
     run.font.bold = True
     run.font.color.rgb = RGBColor.from_string(INK)
@@ -251,7 +251,7 @@ def build_document():
     r = p.add_run("export DART_API_KEY=발급받은_40자리_키\nexport KRX_API_KEY=발급받은_KRX_OpenAPI_인증키\npython pipeline.py --mode collect --start-year 2020 --end-year 2025 --phase phase2")
     r.font.name = "Courier New"
     r.font.size = Pt(9.5)
-    add_callout(doc, "적용 상태", "위 예시는 KRX OpenAPI 수집기 교체 후의 목표 설정이다. 현재 개인 로그인 방식 수집기는 공식 API 수집기로 교체되기 전까지 배포 환경에서 사용하지 않는다.")
+    add_callout(doc, "적용 상태", "KRX 공식 OpenAPI 수집기가 적용됐다. 서비스는 KRX_API_KEY만 사용하며, 개인 웹사이트 로그인 ID·비밀번호 수집은 코드와 배포 환경에서 사용하지 않는다.")
     add_callout(doc, "운영 규칙", "DART 키는 OpenDART에서 발급받는다. KRX 계정·시장 데이터의 이용 범위와 재배포 가능 여부는 서비스 출시 전 KRX/코스콤 약관 및 계약으로 확정한다. 특히 앱에 원시 시세를 재배포하는 기능은 별도 법무·데이터 라이선스 검토 없이는 출시하지 않는다.")
 
     doc.add_heading("3. 통합 데이터 거버넌스 프레임워크", level=1)

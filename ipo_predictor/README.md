@@ -16,7 +16,7 @@
 | 설정 | `config.py` | ✅ 완료 |
 | 피처 정의 | `features/definitions.py` | ✅ 완료 |
 | DART 수집기 | `data/collectors/dart_collector.py` | ✅ 원문 ZIP 다운로드·파싱 (API 키 필요) |
-| KRX 수집기 | `data/collectors/krx_collector.py` | ✅ 상장 일정·상장일 가격·지수 수집 |
+| KRX 수집기 | `data/collectors/krx_collector.py` | ✅ 공식 OpenAPI로 상장 일정·상장일 가격·일별 지수 수집 |
 | 실제 이력 정합 | `data/pipelines/historical_ipo_pipeline.py` | ✅ DART·KRX 정합 → 학습 피처 생성 |
 | 피처 엔지니어링 | `data/processors/feature_engineer.py` | ✅ 완료 |
 | Phase 2 피처 연결 | `data/processors/feature_engineer.py` | ✅ 완료 (데모/학습 연동) |
@@ -78,10 +78,9 @@ python pipeline.py --mode demo --phase phase2
 # 1. DART API 키 설정
 export DART_API_KEY=your_key_here   # https://opendart.fss.or.kr
 
-# 1-1. KRX 데이터시스템 로그인 정보 설정
-# KRX가 현재 데이터 조회 세션에 로그인을 요구하므로, 계정 정보는 로컬 환경변수로만 둔다.
-export KRX_ID=your_krx_id
-export KRX_PASSWORD=your_krx_password
+# 1-1. KRX OpenAPI 인증키 설정
+# 개인 웹사이트 ID/비밀번호는 사용하지 않는다. 키 값은 터미널과 서버의 비밀 환경변수에만 둔다.
+export KRX_API_KEY=your_krx_openapi_key
 
 # 2. OpenDART 증권신고서 원문, 재무제표와 KRX 상장일 가격·지수를 수집하고 정합
 python pipeline.py --mode collect --start-year 2020 --end-year 2025 --phase phase2
@@ -90,7 +89,7 @@ python pipeline.py --mode collect --start-year 2020 --end-year 2025 --phase phas
 python pipeline.py --mode train --phase phase2
 ```
 
-수집 결과는 `data/raw/`에 원본별로, 학습용 결과는 `data/processed/features_all.parquet`에 저장됩니다. `data_collection_summary.json`에는 일정·공시·가격·타깃의 행 수와 핵심 피처 충족 현황이 남습니다. API 키가 없거나 원문 파싱에 실패한 종목은 0으로 채우지 않고 결측으로 보존하므로, 이 파일로 데이터 품질을 먼저 확인한 뒤 학습합니다.
+수집 결과는 `data/raw/`에 원본별로, 학습용 결과는 `data/processed/features_all.parquet`에 저장됩니다. KRX 수집기는 승인된 KOSPI·KOSDAQ 일별 종목/지수 API를 `AUTH_KEY` 헤더로 호출하며, 웹사이트 로그인 자격증명은 사용하지 않습니다. `data_collection_summary.json`에는 일정·공시·가격·타깃의 행 수와 핵심 피처 충족 현황이 남습니다. API 키가 없거나 원문 파싱에 실패한 종목은 0으로 채우지 않고 결측으로 보존하므로, 이 파일로 데이터 품질을 먼저 확인한 뒤 학습합니다.
 
 ---
 
