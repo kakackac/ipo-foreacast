@@ -28,6 +28,11 @@ DART_BASE_URL = "https://opendart.fss.or.kr/api"
 # ── KRX (한국거래소) ───────────────────────────────────────────
 KRX_BASE_URL = "http://data.krx.co.kr/comm/bldAttendant/getJsonData.cmd"
 
+# ── 상장일 실적 확정 ────────────────────────────────
+# KRX 종가를 타곟으로 사용하되, NXT 애프터마켓 종료 후에 실측치를 확정한다.
+POST_LISTING_RECONCILIATION_TIME = os.getenv("POST_LISTING_RECONCILIATION_TIME", "21:00")
+POST_LISTING_RECONCILIATION_TIMEZONE = "Asia/Seoul"
+
 # ── DB (PostgreSQL + TimescaleDB) ─────────────────────────────
 DB_HOST     = os.getenv("DB_HOST", "localhost")
 DB_PORT     = int(os.getenv("DB_PORT", "5432"))
