@@ -21,6 +21,7 @@ import argparse
 import json
 import logging
 import sys
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
@@ -319,7 +320,12 @@ if __name__ == "__main__":
         help="피처 세트",
     )
     parser.add_argument("--start-year", type=int, default=2015, help="실제 수집 시작 연도")
-    parser.add_argument("--end-year", type=int, default=2025, help="실제 수집 종료 연도")
+    parser.add_argument(
+        "--end-year",
+        type=int,
+        default=date.today().year,
+        help="실제 수집 종료 연도 (기본값: 실행일의 연도, 미래 날짜는 제외)",
+    )
     args = parser.parse_args()
 
     if args.mode == "demo":
