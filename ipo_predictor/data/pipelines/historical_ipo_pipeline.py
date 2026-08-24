@@ -89,7 +89,10 @@ class HistoricalIPOPipeline:
             ticker = str(row.ticker)
             isu_cd = getattr(row, "isu_cd", None)
             market = getattr(row, "market", None)
-            record = self.krx.get_listing_day_price(ticker, listing_date, isu_cd=isu_cd, market=market)
+            corp_name = getattr(row, "corp_name", None)
+            record = self.krx.get_listing_day_price(
+                ticker, listing_date, isu_cd=isu_cd, market=market, corp_name=corp_name
+            )
             records.append(record)
         return pd.DataFrame(records)
 

@@ -67,6 +67,22 @@ class KRXOpenAPICollectorTests(unittest.TestCase):
         self.assertTrue((calendar["same_day_ipo_count"] == 2).all())
         self.assertTrue(pd.api.types.is_datetime64_any_dtype(calendar["listing_date"]))
 
+    def test_foreign_listing_uses_company_name_after_code_match_fails(self):
+        session = Mock()
+        session.get.return_value = _response({"OutBlock_1": [{
+            "ISU_CD": "840150", "ISU_NM": "소마젠",
+            "TDD_OPNPRC": "12,000", "TDD_CLSPRC": "10,500",
+            "TDD_HGPRC": "14,000", "TDD_LWPRC": "10,000", "ACC_TRDVOL": "10,000",
+        }]})
+        collector = KRXCollector(api_key="test-key", session=session, request_delay=0)
+
+        price = collector.get_listing_day_price(
+            "950200", "20200713", isu_cd="KR8840150005", market="KOSDAQ", corp_name="소마젠(Reg.S)"
+        )
+
+        self.assertEqual(price["open_price"], 12000.0)
+        self.assertEqual(price["close_price"], 10500.0)
+
     def test_index_collection_selects_main_index_and_skips_non_trading_days(self):
         session = Mock()
         session.get.side_effect = [

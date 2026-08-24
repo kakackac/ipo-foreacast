@@ -5,6 +5,7 @@
 """
 
 import logging
+import re
 import time
 from datetime import date, datetime, timedelta
 from typing import Any, Optional
@@ -135,6 +136,12 @@ class KRXCollector:
         normalised = str(market).upper().strip()
         return normalised if normalised in MARKETS else None
 
+    @staticmethod
+    def _normalise_company_name(value: object) -> str:
+        """외국기업 Reg.S 표기 차이를 제외하고 회사명을 비교한다."""
+        name = re.sub(r"[^0-9A-Za-z가-힣]", "", str(value or "")).upper()
+        return name.replace("REGS", "")
+
     # ── 시장 지수 ─────────────────────────────────────────────
 
     def get_index_ohlcv(self, index_code: str, start_date: str, end_date: str) -> pd.DataFrame:
@@ -202,6 +209,7 @@ class KRXCollector:
         listing_date: str,
         isu_cd: Optional[str] = None,
         market: str | None = None,
+        corp_name: str | None = None,
     ) -> dict[str, Any]:
         """상장일 시가·정규장 종가를 수집한다.
 
@@ -213,6 +221,7 @@ class KRXCollector:
         normalized_ticker = self._normalise_ticker(ticker)
         normalized_isu_cd = str(isu_cd or "").strip().upper()
         expected_short_code = self._short_issue_code(isu_cd or ticker)
+        normalized_name = self._normalise_company_name(corp_name)
 
         for market_name in markets:
             rows = self._get_daily_records(
@@ -228,6 +237,17 @@ class KRXCollector:
                     or self._short_issue_code(row_isu_cd) == expected_short_code
                 ):
                     return self._price_record(ticker, listing_date, isu_cd or row_isu_cd, row, market_name)
+            if normalized_name:
+                name_match = next(
+                    (
+                        row for row in rows
+                        if self._normalise_company_name(row.get("ISU_NM")) == normalized_name
+                    ),
+                    None,
+                )
+                if name_match is not None:
+                    logger.info("회사명으로 외국기업 상장일 가격을 매칭했습니다: %s", corp_name)
+                    return self._price_record(ticker, listing_date, isu_cd, name_match, market_name)
 
         logger.warning("상장일 가격을 찾지 못했습니다: %s (%s)", ticker, listing_date)
         return {
@@ -340,6 +360,7 @@ class KRXCollector:
                 listing_date=self._as_bas_dd(row.listing_date),
                 isu_cd=getattr(row, "isu_cd", None),
                 market=getattr(row, "market", None),
+                corp_name=getattr(row, "corp_name", None),
             ))
         frame = pd.DataFrame(records)
         frame.to_parquet(RAW_DIR / "ipo_listing_prices.parquet", index=False)

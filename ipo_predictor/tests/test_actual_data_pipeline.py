@@ -69,7 +69,7 @@ class _FakeKRX:
             "sector": "소프트웨어", "same_day_ipo_count": 1,
         }])
 
-    def get_listing_day_price(self, ticker, listing_date, isu_cd=None, market=None):
+    def get_listing_day_price(self, ticker, listing_date, isu_cd=None, market=None, corp_name=None):
         return {
             "ticker": ticker, "isu_cd": isu_cd, "listing_date": listing_date,
             "open_price": 18000, "close_price": 15000, "high_price": 19000,
