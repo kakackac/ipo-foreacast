@@ -22,6 +22,8 @@ import logging
 import sys
 from pathlib import Path
 
+import pandas as pd
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
@@ -75,34 +77,35 @@ def step_feature_selection(df, phase: str = "core"):
     return available
 
 
-def step_backtest(df, feature_cols):
+def step_backtest(df, feature_cols, target_col: str):
     """Walk-forward 백테스트 실행"""
     from models.evaluation.backtester import WalkForwardBacktester
     from config import BACKTEST_CFG
 
-    logger.info("── Walk-Forward 백테스트 시작 ──")
+    logger.info("── %s Walk-Forward 백테스트 시작 ──", target_col)
     bt = WalkForwardBacktester(cfg=BACKTEST_CFG)
     result = bt.run(
         df           = df,
         feature_cols = feature_cols,
+        target_col   = target_col,
         model_kwargs = {"n_estimators": 200, "max_depth": 5},
     )
     logger.info(result.summary())
     return result
 
 
-def step_train_final_model(df, feature_cols):
+def step_train_final_model(df, feature_cols, target_col: str, model_name: str):
     """전체 데이터로 최종 모델 학습 후 저장"""
     import pandas as pd
     from models.baseline.gradient_boost_model import IPOPriceModel
 
     logger.info("── 최종 모델 학습 (전체 데이터) ──")
-    valid = df["open_return_pct"].notna()
+    valid = df[target_col].notna()
     df_clean = df[valid].reset_index(drop=True)
 
     available = [c for c in feature_cols if c in df_clean.columns]
     X = df_clean[available].fillna(0)
-    y = df_clean["open_return_pct"]
+    y = df_clean[target_col]
 
     # 최근 15%를 Conformal 보정셋으로 분리
     cal_size = max(10, int(len(X) * 0.15))
@@ -113,7 +116,7 @@ def step_train_final_model(df, feature_cols):
     model.fit(X_tr, y_tr, X_cal, y_cal)
     model.feature_names = available
 
-    path = model.save("baseline_v1")
+    path = model.save(model_name)
     logger.info("모델 저장: %s", path)
 
     # 피처 중요도 출력
@@ -162,31 +165,38 @@ def step_year_analysis(backtest_result):
     return by_year
 
 
-def step_save_results(backtest_result, outlier_report):
-    """결과를 JSON으로 저장"""
+def step_save_results(results: dict[str, tuple]):
+    """시초가·종가 타깃별 백테스트 결과를 JSON으로 저장"""
     from config import REPORT_DIR
     import json
 
-    summary = {
-        "backtest": {
-            "n_windows":    backtest_result.n_windows,
-            "n_predictions": len(backtest_result.predictions),
-            "overall_mae":  backtest_result.overall_mae,
-            "direction_acc": backtest_result.overall_direction_acc,
-            "coverage_90":  backtest_result.coverage_90,
-        },
-        "outliers": {
-            "n_total":    outlier_report.n_total,
-            "n_outliers": outlier_report.n_outliers,
-            "rate":       outlier_report.outlier_rate,
-            "cause_summary": outlier_report.cause_summary,
-            "feature_recommendations": outlier_report.feature_recommendations,
-        },
-    }
+    summary = {"targets": {}}
+    for target_name, (backtest_result, outlier_report) in results.items():
+        summary["targets"][target_name] = {
+            "backtest": {
+                "n_windows":    backtest_result.n_windows,
+                "n_predictions": len(backtest_result.predictions),
+                "overall_mae":  backtest_result.overall_mae,
+                "direction_acc": backtest_result.overall_direction_acc,
+                "coverage_90":  backtest_result.coverage_90,
+            },
+            "outliers": {
+                "n_total":    outlier_report.n_total,
+                "n_outliers": outlier_report.n_outliers,
+                "rate":       outlier_report.outlier_rate,
+                "cause_summary": outlier_report.cause_summary,
+                "feature_recommendations": outlier_report.feature_recommendations,
+            },
+        }
 
     out = REPORT_DIR / "pipeline_summary.json"
     with open(out, "w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
+    predictions = pd.concat(
+        [backtest_result.predictions for backtest_result, _ in results.values()],
+        ignore_index=True,
+    )
+    predictions.to_parquet(REPORT_DIR / "predictions_latest.parquet", index=False)
     logger.info("결과 저장: %s", out)
     return summary
 
@@ -201,22 +211,27 @@ def run_demo(phase: str = "core"):
 
     df           = step_load_or_build_data(demo=True, phase=phase)
     feature_cols = step_feature_selection(df, phase=phase)
-    bt_result    = step_backtest(df, feature_cols)
-
-    _           = step_train_final_model(df, feature_cols)
-    outlier_rpt = step_outlier_analysis(bt_result)
-    by_year     = step_year_analysis(bt_result)
-    summary     = step_save_results(bt_result, outlier_rpt)
+    results = {}
+    model_names = {
+        "open_return_pct": "baseline_open_v1",
+        "close_return_pct": "baseline_close_v1",
+    }
+    for target_col, model_name in model_names.items():
+        bt_result = step_backtest(df, feature_cols, target_col)
+        _ = step_train_final_model(df, feature_cols, target_col, model_name)
+        outlier_rpt = step_outlier_analysis(bt_result)
+        step_year_analysis(bt_result)
+        results[target_col] = (bt_result, outlier_rpt)
+    summary = step_save_results(results)
 
     logger.info("\n════ 파이프라인 완료 ════")
-    logger.info("  MAE:       %.2f%%", summary["backtest"]["overall_mae"])
-    logger.info("  방향정확도: %.1f%%", summary["backtest"]["direction_acc"] * 100)
-    logger.info("  90%% CI:   %.1f%%", summary["backtest"]["coverage_90"] * 100)
-
-    # 다음 단계 가이드
-    logger.info("\n── 다음 단계 권장 ──")
-    for rec in outlier_rpt.feature_recommendations[:3]:
-        logger.info("  피처 추가 후보: %s", rec)
+    for target_col, result in summary["targets"].items():
+        metrics = result["backtest"]
+        logger.info(
+            "  %s | MAE %.2f%% | 방향정확도 %.1f%% | 90%% CI %.1f%%",
+            target_col, metrics["overall_mae"], metrics["direction_acc"] * 100,
+            metrics["coverage_90"] * 100,
+        )
 
     return summary
 
@@ -228,11 +243,18 @@ def run_train(phase: str = "core"):
     logger.info("════ IPO 예측 파이프라인 — 학습 모드 (%s) ════", phase)
     df           = step_load_or_build_data(demo=False, phase=phase)
     feature_cols = step_feature_selection(df, phase=phase)
-    bt_result    = step_backtest(df, feature_cols)
-    _            = step_train_final_model(df, feature_cols)
-    outlier_rpt  = step_outlier_analysis(bt_result)
-    step_year_analysis(bt_result)
-    step_save_results(bt_result, outlier_rpt)
+    results = {}
+    model_names = {
+        "open_return_pct": "baseline_open_v1",
+        "close_return_pct": "baseline_close_v1",
+    }
+    for target_col, model_name in model_names.items():
+        bt_result = step_backtest(df, feature_cols, target_col)
+        _ = step_train_final_model(df, feature_cols, target_col, model_name)
+        outlier_rpt = step_outlier_analysis(bt_result)
+        step_year_analysis(bt_result)
+        results[target_col] = (bt_result, outlier_rpt)
+    step_save_results(results)
 
 
 def run_backtest(phase: str = "core"):
@@ -240,10 +262,13 @@ def run_backtest(phase: str = "core"):
     logger.info("════ IPO 예측 파이프라인 — 백테스트 모드 (%s) ════", phase)
     df           = step_load_or_build_data(demo=False, phase=phase)
     feature_cols = step_feature_selection(df, phase=phase)
-    bt_result    = step_backtest(df, feature_cols)
-    outlier_rpt  = step_outlier_analysis(bt_result)
-    step_year_analysis(bt_result)
-    step_save_results(bt_result, outlier_rpt)
+    results = {}
+    for target_col in ["open_return_pct", "close_return_pct"]:
+        bt_result = step_backtest(df, feature_cols, target_col)
+        outlier_rpt = step_outlier_analysis(bt_result)
+        step_year_analysis(bt_result)
+        results[target_col] = (bt_result, outlier_rpt)
+    step_save_results(results)
 
 
 def run_analyze():

@@ -8,7 +8,7 @@ XGBoost / LightGBM 대신 scikit-learn GradientBoostingRegressor로
 인터페이스(fit, predict, get_feature_importance)는 동일하다.
 
 구현 포인트:
-  - 회귀 모델: 시초가 수익률 (연속값) 예측
+  - 회귀 모델: 하나의 상장일 수익률 타깃(시초가 또는 종가) 예측
   - 분류 모델: 방향성 (상승/하락) 예측 → 확률 기반 신뢰도 출력
   - Conformal Prediction: 통계적 보장 신뢰구간
   - SHAP 대체: feature_importances_ 기반 기여도 계산
@@ -34,13 +34,13 @@ logger = logging.getLogger(__name__)
 
 class IPOPriceModel:
     """
-    공모주 시초가 수익률 예측 모델.
+    공모주 상장일 수익률 예측 모델.
 
     두 가지 예측을 동시에 수행:
       1. regressor  → 수익률 수치 (ex. +23.4%)
       2. classifier → 방향성 (상승 확률)
 
-    향후 XGBoost 교체 시 이 클래스의 내부만 바꾸면 된다.
+    시초가와 종가는 별도 인스턴스로 학습한다. 향후 XGBoost 교체 시 이 클래스의 내부만 바꾸면 된다.
     """
 
     # Conformal Prediction 분위수
@@ -67,6 +67,7 @@ class IPOPriceModel:
 
         self.feature_names: list[str] = []
         self.calibration_errors: np.ndarray = np.array([])  # Conformal Prediction용
+        self._classifier_fallback = False
         self._fitted = False
 
     # ── 학습 ──────────────────────────────────────────────────
@@ -235,6 +236,8 @@ class IPOPriceModel:
         for _, row in fi.head(top_n).iterrows():
             feat = row["feature"]
             val  = feature_dict.get(feat, 0)
+            if val is None or pd.isna(val):
+                val = 0.0
             imp  = row["importance_pct"]
             explanations.append({
                 "feature":    feat,
@@ -272,6 +275,7 @@ class IPOPriceModel:
             "params":              self.params,
             "regressor":           self.regressor,
             "classifier":          self.classifier,
+            "classifier_fallback": self._classifier_fallback,
             "feature_names":       self.feature_names,
             "calibration_errors":  self.calibration_errors,
         }
@@ -299,6 +303,7 @@ class IPOPriceModel:
         model = cls(**payload["params"])
         model.regressor          = payload["regressor"]
         model.classifier         = payload["classifier"]
+        model._classifier_fallback = payload.get("classifier_fallback", False)
         model.feature_names      = payload["feature_names"]
         model.calibration_errors = payload["calibration_errors"]
         model._fitted = True

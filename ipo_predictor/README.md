@@ -1,6 +1,9 @@
-# IPO 시초가 예측 시스템
+# IPO 상장일 수익률 예측 시스템
 
-공모주 상장일 시초가 수익률을 **순수 정량 데이터**로 예측하는 ML 파이프라인입니다.
+공모주가 상장하기 전에 공모가를 기준으로 **상장일 시초가 수익률**과 **상장일 종가 수익률**을 각각 예측하는 ML 파이프라인입니다.
+
+- 시초가 수익률: `(9시 시초가 / 확정 공모가 - 1) × 100`
+- 종가 수익률: `(상장일 종가 / 확정 공모가 - 1) × 100`
 
 ---
 
@@ -16,7 +19,7 @@
 | Phase 2 피처 연결 | `data/processors/feature_engineer.py` | ✅ 완료 (데모/학습 연동) |
 | Phase 2 DART 파서 | `data/collectors/dart_collector.py` | ✅ 부분 완료 (정규식 기반) |
 | 재무 분석기 | `data/processors/financial_analyzer.py` | ✅ 완료 |
-| 예측 모델 | `models/baseline/gradient_boost_model.py` | ✅ 완료 |
+| 예측 모델 | `models/baseline/gradient_boost_model.py` | ✅ 완료 (Open/Close 분리 모델) |
 | 백테스터 | `models/evaluation/backtester.py` | ✅ 완료 |
 | 아웃라이어 분석기 | `models/evaluation/outlier_analyzer.py` | ✅ 완료 |
 | API 서버 | `api/server.py` | ✅ 완료 (uvicorn 설치 필요) |
@@ -44,6 +47,14 @@
 
 ---
 
+## 예측·실측 운영 흐름
+
+1. IPO 상장 일정을 확인한다.
+2. 상장 전 증권신고서·수요예측 결과에서 공모가 밴드, 확정 공모가, 신주·구주매출, 유통물량, 기관 수요예측 경쟁률, 의무보유확약, 최대주주 보호예수, 재무제표, 시장·섹터 지표를 수집한다.
+3. 상장 전 시초가·종가 수익률을 별도 모델로 예측한다.
+4. 상장일 장 마감 후 16:10 KST에 시초가와 종가를 기록하고, 예측과 실제 결과를 비교한다.
+5. 신규 실측치 10건 축적 또는 월 1회 시점에만 재학습한다. 시계열 검증에서 개선된 모델만 배포한다.
+
 ## 데모 실행 (실제 API 없이)
 
 ```bash
@@ -54,12 +65,7 @@ python pipeline.py --mode demo
 python pipeline.py --mode demo --phase phase2
 ```
 
-데모 결과 (600건 시뮬레이션 데이터, 33개 Walk-forward 윈도우):
-- **방향 정확도**: 64.6%
-- **MAE**: 22.1% (데모 데이터 노이즈 포함)
-- **90% CI 커버리지**: 89.0% ✅ (목표 90% 거의 달성)
-
-실제 DART 데이터 사용 시 MAE 8~12%, 방향 정확도 68~72% 예상.
+데모는 시뮬레이션 데이터 600건으로 시초가·종가 모델의 분리 학습, Walk-forward 검증, 모델 저장, 예측 리포트 저장을 검증합니다. 출력되는 MAE와 방향 정확도는 **실제 IPO 성능이 아닌 파이프라인 연동 검증 수치**입니다. 실제 성능은 과거 IPO 원본 데이터로 시계열 백테스트를 완료한 후에만 공개합니다.
 
 ---
 
@@ -81,9 +87,11 @@ from data.collectors.krx_collector import KRXCollector
 KRXCollector().collect_market_data(2015, 2024)
 "
 
-# 4. 학습 실행
+# 4. 실제 학습 실행
 python pipeline.py --mode train
 ```
+
+`특징은 수집기가 포맷을 맞춘 과거 데이터 파일을 생성한 후에만 실제 학습을 시작합니다. 현재 DART 원문·수요예측 자료를 실제 상장 이력과 정확히 연결하는 수집 파이프라인은 제작 중입니다.
 
 ---
 
@@ -139,6 +147,10 @@ reports/outlier_report_*.txt 확인
 - [x] `risk_factor_count` — 투자설명서 위험요소 항목 수 파싱
 - [x] `offering_per` + `per_vs_sector_median` — 밸류에이션 피처
 - [x] `revenue_growth_3y`, `operating_margin`, `debt_ratio` — 재무 피처 계산 연결
+- [x] 시초가·종가 수익률 분리 예측/백테스트/API 지원
 - [ ] 실제 DART 원문 샘플 기반 Phase 2 파서 보강
+- [ ] IPO 일정·증권신고서·수요예측·상장일 시세 데이터의 실제 이력 수집·정합
+- [ ] 상장일 16:10 KST 실습 결과 수집 스케줄러 연결
+- [ ] 실제 원본 데이터 기반 시계열 성능 보고서 생성
 - [ ] XGBoost / LightGBM 환경에서 재테스트 (현재는 sklearn GBM)
 - [ ] React Native 앱 연동 (API 서버 → 모바일 앱)

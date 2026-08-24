@@ -1,8 +1,14 @@
+import tempfile
 import unittest
+from pathlib import Path
+
+import pandas as pd
 
 from data.collectors.dart_collector import DARTCollector
 from data.processors.feature_engineer import FeatureEngineer, build_demo_dataset
 from features.definitions import get_phase2_feature_names
+import models.baseline.gradient_boost_model as gradient_boost_model
+from models.baseline.gradient_boost_model import IPOPriceModel
 
 
 class Phase2FeatureTests(unittest.TestCase):
@@ -18,6 +24,21 @@ class Phase2FeatureTests(unittest.TestCase):
 
         self.assertEqual(list(X.columns), feature_names)
         self.assertEqual(int(X.isna().sum().sum()), 0)
+        self.assertEqual(int(df[["open_return_pct", "close_return_pct"]].isna().sum().sum()), 0)
+
+    def test_listing_day_returns_use_offer_price_as_base(self):
+        df = pd.DataFrame(
+            {
+                "offering_price": [10_000],
+                "open_price": [12_000],
+                "close_price": [11_000],
+            }
+        )
+
+        result = FeatureEngineer()._calc_target(df)
+
+        self.assertAlmostEqual(result.loc[0, "open_return_pct"], 20.0)
+        self.assertAlmostEqual(result.loc[0, "close_return_pct"], 10.0)
 
     def test_dart_offering_parser_extracts_phase2_fields(self):
         html = """
@@ -47,6 +68,27 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(parsed["listing_date"], "2025-03-10")
         self.assertEqual(parsed["major_shareholder_lockup_months"], 30)
         self.assertEqual(parsed["risk_factor_count"], 3)
+
+    def test_classifier_fallback_is_preserved_after_load(self):
+        df = build_demo_dataset(n=30, seed=13, phase="phase2")
+        feature_names = get_phase2_feature_names()
+        X = df[feature_names]
+        y = pd.Series([5.0] * len(df))
+        model = IPOPriceModel(n_estimators=5, max_depth=1)
+        model.fit(X, y)
+
+        original_model_dir = gradient_boost_model.MODEL_DIR
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                gradient_boost_model.MODEL_DIR = Path(temp_dir)
+                model.save("fallback_persistence_test")
+                loaded = IPOPriceModel.load("fallback_persistence_test")
+                prediction = loaded.predict(X.head(1))
+            finally:
+                gradient_boost_model.MODEL_DIR = original_model_dir
+
+        self.assertEqual(len(prediction), 1)
+        self.assertEqual(float(prediction.iloc[0]["up_probability"]), 0.8)
 
 
 if __name__ == "__main__":

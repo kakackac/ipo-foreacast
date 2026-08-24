@@ -89,7 +89,7 @@ class WalkForwardBacktester:
         self,
         df:           pd.DataFrame,   # 전체 피처 + 타깃 포함
         feature_cols: list[str],
-        target_col:   str = "open_return_pct",
+    target_col:   str = "open_return_pct",  # open_return_pct | close_return_pct
         date_col:     str = "listing_date",
         model_kwargs: Optional[dict] = None,
     ) -> BacktestResult:
@@ -255,6 +255,7 @@ class WalkForwardBacktester:
             result["error"]      = result["actual"] - result["pred"]
             result["abs_error"]  = result["error"].abs()
             result["window"]     = window_num
+            result["prediction_target"] = target_col
 
             return result, metrics
 

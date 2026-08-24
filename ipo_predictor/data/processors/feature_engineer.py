@@ -111,12 +111,11 @@ class FeatureEngineer:
         df = self._calc_market_momentum(df, kospi_df, "kospi")
         if kosdaq_df is not None:
             df = self._calc_market_momentum(df, kosdaq_df, "kosdaq")
+        # 3. 타깃 변수 계산 (시초가 / 상장일 종가 수익률)
+        df = self._calc_target(df)
         df = self._calc_sector_ipo_temperature(df)
         df = self._calc_valuation_features(df)
         df = self._calc_financial_features(df)
-
-        # 3. 타깃 변수 계산 (시초가 수익률)
-        df = self._calc_target(df)
 
         # 4. 피처만 선택
         available = [f for f in self.feature_names if f in df.columns]
@@ -124,8 +123,10 @@ class FeatureEngineer:
         if missing:
             logger.warning("누락된 피처 %d개: %s", len(missing), missing[:5])
 
-        result = df[available + ["corp_name", "listing_date",
-                                  "offering_price", "open_return_pct"]].copy()
+        result = df[available + [
+            "corp_name", "listing_date", "offering_price",
+            "open_return_pct", "close_return_pct",
+        ]].copy()
         result = result.sort_values("listing_date").reset_index(drop=True)
         logger.info("피처 빌드 완료: %d행 × %d피처", len(result), len(available))
         return result
@@ -472,23 +473,33 @@ class FeatureEngineer:
 
     def _calc_target(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        시초가 수익률 = (상장일 시초가 / 공모가 - 1) × 100
+        두 가지 상장일 타깃을 계산한다.
+          - open_return_pct: (상장일 시초가 / 공모가 - 1) × 100
+          - close_return_pct: (상장일 종가 / 공모가 - 1) × 100
 
-        상한가(+300%) 이상은 스크리닝 오류로 간주하지 않고 유지.
-        실제 한국 IPO에서 시초가 +300%는 가능 (2023년 이전 가격제한 없음).
+        시초가는 09:00 개장 직후 형성된 가격이며, 종가는 상장 첫날 전체
+        매매를 반영한다. 상장 전에는 두 값을 각각 예측하고, 장 마감 후
+        실제값을 확정해 모델 성능을 기록한다.
         """
-        if "open_price" not in df.columns or "offering_price" not in df.columns:
+        if "offering_price" not in df.columns:
             df["open_return_pct"] = np.nan
+            df["close_return_pct"] = np.nan
             return df
 
-        df["open_price"]    = pd.to_numeric(df["open_price"], errors="coerce")
         df["offering_price"] = pd.to_numeric(df["offering_price"], errors="coerce")
-
-        df["open_return_pct"] = np.where(
-            (df["offering_price"] > 0) & df["open_price"].notna(),
-            (df["open_price"] / df["offering_price"] - 1) * 100,
-            np.nan,
-        )
+        for price_col, target_col in [
+            ("open_price", "open_return_pct"),
+            ("close_price", "close_return_pct"),
+        ]:
+            if price_col not in df.columns:
+                df[target_col] = np.nan
+                continue
+            df[price_col] = pd.to_numeric(df[price_col], errors="coerce")
+            df[target_col] = np.where(
+                (df["offering_price"] > 0) & df[price_col].notna(),
+                (df[price_col] / df["offering_price"] - 1) * 100,
+                np.nan,
+            )
 
         # 극단값 리포트 (제거하지 않고 로그만)
         extreme = df[df["open_return_pct"].abs() > 200]
@@ -624,6 +635,13 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
     # 중앙값을 0 근처로 이동시켜 양수/음수 혼재 보장
     signal = signal - signal.mean() + 12.0   # 평균 +12% (실제 통계 근사)
     open_return_pct = signal.clip(-50, 300)
+    intraday_move = (
+        lockup_score * 4 +
+        kospi_5d * 30 -
+        secondary_offering_ratio * 3 +
+        rng.normal(0, 10, n)
+    )
+    close_return_pct = (open_return_pct + intraday_move).clip(-60, 300)
 
     df = pd.DataFrame({
         "corp_name":                    [f"종목_{i:04d}" for i in range(n)],
@@ -643,6 +661,7 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
         "recent_ipo_avg_return_sector": rng.normal(15, 20, n),
         "recent_ipo_avg_return_all":    rng.normal(12, 18, n),
         "open_return_pct":              open_return_pct,
+        "close_return_pct":             close_return_pct,
     })
     if phase in ("phase2", "all"):
         df = df.assign(
