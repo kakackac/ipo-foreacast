@@ -64,9 +64,9 @@ class DARTCollector:
                 data = resp.json()
                 if data.get("status") == "000":
                     return data
-                # status 020 = 조회된 데이터 없음 (정상)
-                if data.get("status") == "020":
-                    return {"status": "020", "list": []}
+                # 013/020 = 조회된 데이터 없음 (정상 결측)
+                if data.get("status") in {"013", "020"}:
+                    return {"status": data.get("status"), "list": []}
                 logger.warning("DART API status=%s msg=%s", data.get("status"), data.get("message"))
                 return data
             except requests.RequestException as e:

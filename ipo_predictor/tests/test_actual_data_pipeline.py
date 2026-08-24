@@ -85,6 +85,17 @@ class _FakeKRX:
 
 
 class ActualDataPipelineTests(unittest.TestCase):
+    def test_dart_no_data_status_is_normalised_to_an_empty_list(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"status": "013", "message": "조회된 데이타가 없습니다."}
+        collector = DARTCollector(api_key="a" * 40)
+        collector.session.get = Mock(return_value=response)
+
+        result = collector._get("fnlttSinglAcntAll", {})
+
+        self.assertEqual(result, {"status": "013", "list": []})
+
     def test_dart_ipo_list_uses_equity_offering_filter_in_three_month_chunks(self):
         response = Mock()
         response.raise_for_status.return_value = None
