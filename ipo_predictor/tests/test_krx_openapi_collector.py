@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import Mock
 
 import pandas as pd
+import requests
 
 from data.collectors.krx_collector import KRXCollector
 
@@ -98,6 +99,19 @@ class KRXOpenAPICollectorTests(unittest.TestCase):
         self.assertEqual(len(frame), 1)
         self.assertEqual(frame.loc[0, "index_code"], "KOSPI")
         self.assertAlmostEqual(frame.loc[0, "close"], 2669.81)
+
+    def test_request_retries_after_transient_connection_error(self):
+        session = Mock()
+        session.get.side_effect = [
+            requests.ConnectionError("connection reset"),
+            _response({"OutBlock_1": []}),
+        ]
+        collector = KRXCollector(api_key="test-key", session=session, request_delay=0)
+
+        records = collector._get_daily_records("idx/kospi_dd_trd", "20200115")
+
+        self.assertEqual(records, [])
+        self.assertEqual(session.get.call_count, 2)
 
 
 if __name__ == "__main__":

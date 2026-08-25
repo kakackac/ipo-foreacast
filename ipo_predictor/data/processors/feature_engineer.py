@@ -519,6 +519,13 @@ class FeatureEngineer:
             return df
 
         df["offering_price"] = pd.to_numeric(df["offering_price"], errors="coerce")
+        invalid_offer_price = (df["offering_price"] < 100) | (df["offering_price"] > 10_000_000)
+        if invalid_offer_price.any():
+            logger.warning(
+                "유효하지 않은 확정 공모가 %d건은 학습 타깃에서 제외합니다.",
+                int(invalid_offer_price.sum()),
+            )
+            df.loc[invalid_offer_price, "offering_price"] = np.nan
         for price_col, target_col in [
             ("open_price", "open_return_pct"),
             ("close_price", "close_return_pct"),

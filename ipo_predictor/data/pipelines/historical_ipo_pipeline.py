@@ -217,14 +217,35 @@ class HistoricalIPOPipeline:
         prices: pd.DataFrame,
         features: pd.DataFrame,
     ) -> dict[str, Any]:
+        offering_price = pd.to_numeric(
+            dart_ipo.get("offering_price", pd.Series(dtype=float)), errors="coerce"
+        )
+        valid_offering_price = offering_price.between(100, 10_000_000)
+        price_band_low = pd.to_numeric(
+            dart_ipo.get("price_band_low", pd.Series(dtype=float)), errors="coerce"
+        )
+        price_band_high = pd.to_numeric(
+            dart_ipo.get("price_band_high", pd.Series(dtype=float)), errors="coerce"
+        )
+        open_return = pd.to_numeric(
+            features.get("open_return_pct", pd.Series(dtype=float)), errors="coerce"
+        )
         return {
             "calendar_rows": len(calendar),
             "dart_matched_rows": len(dart_ipo),
             "listing_price_rows": len(prices),
+            "listing_open_price_rows": int(prices.get("open_price", pd.Series(dtype=float)).notna().sum()),
+            "listing_close_price_rows": int(prices.get("close_price", pd.Series(dtype=float)).notna().sum()),
             "feature_rows": len(features),
             "open_target_rows": int(features.get("open_return_pct", pd.Series(dtype=float)).notna().sum()),
             "close_target_rows": int(features.get("close_return_pct", pd.Series(dtype=float)).notna().sum()),
-            "offering_price_rows": int(dart_ipo.get("offering_price", pd.Series(dtype=float)).notna().sum()),
+            "offering_price_rows": int(offering_price.notna().sum()),
+            "valid_offering_price_rows": int(valid_offering_price.sum()),
+            "invalid_offering_price_rows": int((offering_price.notna() & ~valid_offering_price).sum()),
+            "price_band_rows": int((price_band_low.notna() & price_band_high.notna()).sum()),
             "demand_ratio_rows": int(dart_ipo.get("institutional_demand_ratio", pd.Series(dtype=float)).notna().sum()),
+            "lockup_rows": int(dart_ipo.get("lockup_6m_ratio", pd.Series(dtype=float)).notna().sum()),
+            "financial_revenue_rows": int(dart_ipo.get("revenue", pd.Series(dtype=float)).notna().sum()),
+            "extreme_open_return_rows": int((open_return.abs() > 200).sum()),
             "source": "OpenDART + KRX OpenAPI",
         }

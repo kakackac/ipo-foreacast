@@ -18,6 +18,8 @@ from config import KRX_API_KEY, KRX_OPENAPI_BASE_URL, RAW_DIR
 logger = logging.getLogger(__name__)
 
 REQUEST_DELAY = 0.1
+MAX_RETRIES = 4
+RETRY_BACKOFF_SECONDS = 1.0
 # KRX 일반 인증키의 일일 호출 한도보다 여유를 두고 중단한다.
 MAX_REQUESTS_PER_RUN = 8_000
 
@@ -68,18 +70,35 @@ class KRXCollector:
                 "기간을 나누어 다시 실행하세요."
             )
 
-        try:
-            response = self.session.get(
-                f"{self.base_url}/{endpoint}",
-                params={"basDd": bas_dd},
-                headers={"AUTH_KEY": self.api_key, "Accept": "application/json"},
-                timeout=30,
-            )
-            self.request_count += 1
-            response.raise_for_status()
-            payload = response.json()
-        except (requests.RequestException, ValueError) as exc:
-            raise RuntimeError(f"KRX OpenAPI 요청 실패 ({endpoint}, {bas_dd}): {exc}") from exc
+        payload = None
+        last_error: Exception | None = None
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                response = self.session.get(
+                    f"{self.base_url}/{endpoint}",
+                    params={"basDd": bas_dd},
+                    headers={"AUTH_KEY": self.api_key, "Accept": "application/json"},
+                    timeout=30,
+                )
+                self.request_count += 1
+                response.raise_for_status()
+                payload = response.json()
+                break
+            except (requests.RequestException, ValueError) as exc:
+                last_error = exc
+                if attempt == MAX_RETRIES:
+                    break
+                delay = RETRY_BACKOFF_SECONDS * attempt
+                logger.warning(
+                    "KRX OpenAPI 일시 오류, %.1f초 후 재시도 (%d/%d): %s %s (%s)",
+                    delay, attempt, MAX_RETRIES, endpoint, bas_dd, exc,
+                )
+                time.sleep(delay)
+
+        if payload is None:
+            raise RuntimeError(
+                f"KRX OpenAPI 요청 실패 ({endpoint}, {bas_dd}, {MAX_RETRIES}회 재시도): {last_error}"
+            ) from last_error
 
         if self.request_delay:
             time.sleep(self.request_delay)

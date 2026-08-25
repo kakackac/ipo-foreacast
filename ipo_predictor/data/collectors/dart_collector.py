@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
+MIN_OFFERING_PRICE = 100
 
 
 class DARTCollector:
@@ -403,11 +404,10 @@ class DARTCollector:
             result["price_band_low"]  = int(m.group(1).replace(",", ""))
             result["price_band_high"] = int(m.group(2).replace(",", ""))
 
-        # 확정 공모가
-        final_pattern = r"확정\s*공모가[^0-9]*([0-9,]+)"
-        m = re.search(final_pattern, text)
-        if m:
-            result["offering_price"] = int(m.group(1).replace(",", ""))
+        # 확정 공모가. DART 표 원문은 제목 뒤에 표의 행/열 번호가 먼저
+        # 이어질 수 있으므로, 1·4 같은 번호가 아니라 '원' 단위가 붙은
+        # 금액만 선택한다.
+        result["offering_price"] = self._extract_final_offering_price(text)
 
         # 공모 구조
         result["new_shares"] = self._extract_share_after(text, "신주모집|신주발행|모집주식수")
@@ -482,6 +482,24 @@ class DARTCollector:
         if not m:
             return None
         return DARTCollector._parse_int(m.group(1))
+
+    @staticmethod
+    def _extract_final_offering_price(text: str) -> Optional[int]:
+        """확정 공모가 문맥에서 유효한 원화 금액을 찾는다.
+
+        원문 표를 평문화하면 ``확정 공모가 4 ... 45,000 원``처럼 행 번호가
+        먼저 올 수 있다. 최소 금액과 화폐 단위를 함께 확인해 행 번호나
+        문서 번호를 공모가로 쓰지 않는다.
+        """
+        context_pattern = r"(?:확정\s*공모가(?:액)?|공모가\s*확정)"
+        money_pattern = r"(?<![0-9])([1-9][0-9,]{2,})\s*(?:원|KRW)"
+        for match in re.finditer(context_pattern, text, flags=re.IGNORECASE):
+            context = text[match.end():match.end() + 300]
+            for candidate in re.finditer(money_pattern, context, flags=re.IGNORECASE):
+                value = DARTCollector._parse_int(candidate.group(1))
+                if value is not None and value >= MIN_OFFERING_PRICE:
+                    return value
+        return None
 
     @staticmethod
     def _parse_int(value: str) -> Optional[int]:

@@ -69,6 +69,29 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(parsed["major_shareholder_lockup_months"], 30)
         self.assertEqual(parsed["risk_factor_count"], 3)
 
+    def test_dart_offering_parser_ignores_table_number_before_price(self):
+        html = """
+        확정 공모가 4 제 1 호 45,000 원
+        희망 공모가 40,000 ~ 45,000 원
+        """
+
+        parsed = DARTCollector(api_key="test")._parse_offering_html(html, "20250101000002")
+
+        self.assertEqual(parsed["offering_price"], 45_000)
+
+    def test_invalid_offer_price_is_not_used_for_return_target(self):
+        df = pd.DataFrame({
+            "offering_price": [4],
+            "open_price": [40_000],
+            "close_price": [38_000],
+        })
+
+        result = FeatureEngineer()._calc_target(df)
+
+        self.assertTrue(pd.isna(result.loc[0, "offering_price"]))
+        self.assertTrue(pd.isna(result.loc[0, "open_return_pct"]))
+        self.assertTrue(pd.isna(result.loc[0, "close_return_pct"]))
+
     def test_classifier_fallback_is_preserved_after_load(self):
         df = build_demo_dataset(n=30, seed=13, phase="phase2")
         feature_names = get_phase2_feature_names()
