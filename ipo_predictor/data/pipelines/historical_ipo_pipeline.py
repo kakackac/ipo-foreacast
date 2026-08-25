@@ -148,7 +148,11 @@ class HistoricalIPOPipeline:
             records.append(record)
         if reused:
             logger.info("KRX 상장일 가격 캐시 재사용: %d건", reused)
-        return pd.DataFrame(records).drop_duplicates(["ticker", "listing_date"], keep="last")
+        prices = pd.DataFrame(records)
+        # 캐시 행은 Timestamp, 방금 받은 API 행은 YYYYMMDD 문자열일 수 있다.
+        # Parquet은 같은 열의 혼합 자료형을 저장할 수 없으므로 여기서 통일한다.
+        prices["listing_date"] = pd.to_datetime(prices["listing_date"], errors="coerce")
+        return prices.drop_duplicates(["ticker", "listing_date"], keep="last")
 
     def _collect_index_with_cache(
         self, index_code: str, start_year: int, end_year: int, filename: str

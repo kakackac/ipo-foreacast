@@ -290,6 +290,8 @@ class ActualDataPipelineTests(unittest.TestCase):
 
             self.assertEqual(dart.offering_calls, 1)
             self.assertEqual(krx.price_calls, 1)
+            cached_prices = pd.read_parquet(root / "raw" / "ipo_listing_prices.parquet")
+            self.assertTrue(pd.api.types.is_datetime64_any_dtype(cached_prices["listing_date"]))
 
 
 if __name__ == "__main__":
