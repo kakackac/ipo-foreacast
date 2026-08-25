@@ -14,6 +14,8 @@ from data.processors.feature_engineer import FeatureEngineer
 
 logger = logging.getLogger(__name__)
 
+MAX_FILING_TO_LISTING_DAYS = 400
+
 
 class HistoricalIPOPipeline:
     """실제 원천 데이터 수집부터 ``features_all.parquet`` 생성까지 담당한다."""
@@ -33,6 +35,7 @@ class HistoricalIPOPipeline:
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.processed_dir.mkdir(parents=True, exist_ok=True)
         self.manual_dir.mkdir(parents=True, exist_ok=True)
+        self._document_failures = self._load_cached_frame("dart_document_failures.parquet")
 
     def run(self, start_year: int, end_year: int, feature_set: str = "phase2") -> dict[str, Any]:
         """수집 결과와 데이터 품질 요약을 반환하고 산출물을 디스크에 저장한다."""
@@ -52,12 +55,13 @@ class HistoricalIPOPipeline:
         prices.to_parquet(self.raw_dir / "ipo_listing_prices.parquet", index=False)
         krx_ipo = self._attach_prices(calendar, prices)
 
-        kospi = self.krx.get_index_ohlcv("1", f"{start_year}0101", f"{end_year}1231")
-        kosdaq = self.krx.get_index_ohlcv("2", f"{start_year}0101", f"{end_year}1231")
+        kospi = self._collect_index_with_cache("1", start_year, end_year, "kospi_index.parquet")
+        kosdaq = self._collect_index_with_cache("2", start_year, end_year, "kosdaq_index.parquet")
         kospi.to_parquet(self.raw_dir / "kospi_index.parquet", index=False)
         kosdaq.to_parquet(self.raw_dir / "kosdaq_index.parquet", index=False)
 
         dart_ipo, financials = self._collect_dart_records(calendar, start_year, end_year)
+        self._document_failures.to_parquet(self.raw_dir / "dart_document_failures.parquet", index=False)
         dart_ipo = self._apply_offering_price_overrides(dart_ipo)
         dart_ipo.to_parquet(self.raw_dir / "dart_ipo_raw.parquet", index=False)
         financials.to_parquet(self.raw_dir / "dart_financials.parquet", index=False)
@@ -66,7 +70,12 @@ class HistoricalIPOPipeline:
 
         price_audit = self._build_offering_price_audit(dart_ipo)
         price_audit.to_parquet(self.raw_dir / "dart_offering_price_audit.parquet", index=False)
-        verified_statuses = {"verified_currency_unit", "manual_verified"}
+        verified_statuses = {
+            "verified_currency_unit",
+            "verified_text_and_structured",
+            "verified_structured_api",
+            "manual_verified",
+        }
         review_queue = price_audit[
             ~price_audit["offering_price_review_status"].fillna("missing").isin(verified_statuses)
         ].copy()
@@ -83,29 +92,102 @@ class HistoricalIPOPipeline:
         return summary
 
     def _collect_calendar(self, start_year: int, end_year: int) -> pd.DataFrame:
-        frames = []
+        cached = self._load_cached_frame("krx_ipo_calendar.parquet")
+        if not cached.empty and "listing_date" in cached:
+            cached = cached.copy()
+            cached["listing_date"] = pd.to_datetime(cached["listing_date"], errors="coerce")
+            cached = cached[
+                cached["listing_date"].dt.year.between(start_year, end_year, inclusive="both")
+            ]
+        cached_years = set(cached["listing_date"].dropna().dt.year) if not cached.empty else set()
+        frames = [cached] if not cached.empty else []
         for year in range(start_year, end_year + 1):
+            # 완료된 과거 연도는 불변 이력으로 재사용한다. 마지막 연도는
+            # 신규 상장을 반영하기 위해 매 실행마다 갱신한다.
+            if year < end_year and year in cached_years:
+                continue
             frame = self.krx.get_ipo_calendar(f"{year}0101", f"{year}1231")
             if not frame.empty:
                 frames.append(frame)
         if not frames:
             return pd.DataFrame()
         calendar = pd.concat(frames, ignore_index=True)
+        calendar["listing_date"] = pd.to_datetime(calendar["listing_date"], errors="coerce")
         return calendar.drop_duplicates(subset=["ticker", "listing_date"], keep="last")
 
     def _collect_listing_prices(self, calendar: pd.DataFrame) -> pd.DataFrame:
+        cached = self._load_cached_frame("ipo_listing_prices.parquet")
+        if not cached.empty:
+            cached = cached.copy()
+            cached["listing_date"] = pd.to_datetime(cached["listing_date"], errors="coerce")
+            cached["_cache_key"] = self._listing_key(cached)
+            cached = cached.drop_duplicates("_cache_key", keep="last")
+
+        expected = calendar.copy()
+        expected["listing_date"] = pd.to_datetime(expected["listing_date"], errors="coerce")
+        expected["_cache_key"] = self._listing_key(expected)
+        cached_by_key = cached.set_index("_cache_key") if not cached.empty else pd.DataFrame()
         records = []
-        for row in calendar.itertuples(index=False):
-            listing_date = pd.Timestamp(row.listing_date).strftime("%Y%m%d")
-            ticker = str(row.ticker)
-            isu_cd = getattr(row, "isu_cd", None)
-            market = getattr(row, "market", None)
-            corp_name = getattr(row, "corp_name", None)
+        reused = 0
+        for _, row in expected.iterrows():
+            cache_key = row["_cache_key"]
+            if not cached.empty and cache_key in cached_by_key.index:
+                previous = cached_by_key.loc[cache_key]
+                if pd.notna(previous.get("open_price")) and pd.notna(previous.get("close_price")):
+                    records.append(previous.to_dict())
+                    reused += 1
+                    continue
+            listing_date = pd.Timestamp(row["listing_date"]).strftime("%Y%m%d")
+            ticker = str(row["ticker"])
+            isu_cd = row.get("isu_cd")
+            market = row.get("market")
+            corp_name = row.get("corp_name")
             record = self.krx.get_listing_day_price(
                 ticker, listing_date, isu_cd=isu_cd, market=market, corp_name=corp_name
             )
             records.append(record)
-        return pd.DataFrame(records)
+        if reused:
+            logger.info("KRX 상장일 가격 캐시 재사용: %d건", reused)
+        return pd.DataFrame(records).drop_duplicates(["ticker", "listing_date"], keep="last")
+
+    def _collect_index_with_cache(
+        self, index_code: str, start_year: int, end_year: int, filename: str
+    ) -> pd.DataFrame:
+        cached = self._load_cached_frame(filename)
+        if not cached.empty and "date" in cached:
+            cached = cached.copy()
+            cached["date"] = pd.to_datetime(cached["date"], errors="coerce")
+            cached = cached.dropna(subset=["date"])
+        start = pd.Timestamp(f"{start_year}0101")
+        end = min(pd.Timestamp(f"{end_year}1231"), pd.Timestamp.today().normalize())
+        if not cached.empty:
+            covered = cached[(cached["date"] >= start) & (cached["date"] <= end)]
+            if not covered.empty:
+                next_date = covered["date"].max() + pd.Timedelta(days=1)
+                if next_date > start:
+                    start = next_date
+                logger.info("KRX %s 지수 캐시 재사용: %d건", "KOSPI" if index_code == "1" else "KOSDAQ", len(covered))
+        fresh = self.krx.get_index_ohlcv(index_code, start.strftime("%Y%m%d"), end.strftime("%Y%m%d"))
+        combined = pd.concat([cached, fresh], ignore_index=True) if not cached.empty else fresh
+        if combined.empty:
+            return combined
+        return combined.drop_duplicates("date", keep="last").sort_values("date").reset_index(drop=True)
+
+    def _load_cached_frame(self, filename: str) -> pd.DataFrame:
+        path = self.raw_dir / filename
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            return pd.read_parquet(path)
+        except (OSError, ValueError) as exc:
+            logger.warning("캐시를 읽지 못해 새로 수집합니다 (%s): %s", filename, exc)
+            return pd.DataFrame()
+
+    @staticmethod
+    def _listing_key(frame: pd.DataFrame) -> pd.Series:
+        return frame["ticker"].astype(str).str.strip() + "|" + pd.to_datetime(
+            frame["listing_date"], errors="coerce"
+        ).dt.strftime("%Y%m%d")
 
     @staticmethod
     def _attach_prices(calendar: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
@@ -135,6 +217,13 @@ class HistoricalIPOPipeline:
         filings = pd.concat(disclosures, ignore_index=True)
         filings["corp_name_clean"] = filings["corp_name"].map(self._clean_name)
         filings["is_correction"] = filings["report_nm"].fillna("").str.contains("정정", regex=False)
+        cached_records = self._load_cached_frame("dart_ipo_raw.parquet")
+        cached_by_receipt = {}
+        if not cached_records.empty and "rcept_no" in cached_records:
+            cached_by_receipt = {
+                str(row.rcept_no): row._asdict()
+                for row in cached_records.drop_duplicates("rcept_no", keep="last").itertuples(index=False)
+            }
         calendar = calendar.copy()
         calendar["corp_name_clean"] = calendar["corp_name"].map(self._clean_name)
         calendar["listing_date"] = pd.to_datetime(calendar["listing_date"], errors="coerce")
@@ -144,6 +233,9 @@ class HistoricalIPOPipeline:
         for listing in calendar.itertuples(index=False):
             candidates = filings[filings["corp_name_clean"] == listing.corp_name_clean].copy()
             candidates = candidates[candidates["rcept_dt"] <= listing.listing_date]
+            candidates = candidates[
+                (listing.listing_date - candidates["rcept_dt"]).dt.days.between(0, MAX_FILING_TO_LISTING_DAYS)
+            ]
             if candidates.empty:
                 continue
             # 같은 날짜의 신고서가 여러 개면 정정 신고서를 우선한다. 날짜가
@@ -151,11 +243,35 @@ class HistoricalIPOPipeline:
             filing = candidates.sort_values(
                 ["rcept_dt", "is_correction", "rcept_no"], ascending=[True, True, True]
             ).iloc[-1]
+            cached = cached_by_receipt.get(str(filing.rcept_no))
+            # 구조화 slprc 대조가 끝난 행만 재사용한다. 이전 버전의 캐시는
+            # 이번 한 번 다시 검사해 공모가 검증 근거를 보완한다.
+            if cached is not None and cached.get("structured_price_check") is not None:
+                records.append(cached)
+                continue
+            if str(filing.rcept_no) in set(self._document_failures.get("rcept_no", pd.Series(dtype=str)).astype(str)):
+                logger.info("원문 부재로 기록된 신고서는 다시 호출하지 않습니다: %s", filing.rcept_no)
+                continue
             try:
                 offering = self.dart.get_offering_info(str(filing.rcept_no))
             except RuntimeError as exc:
+                if "<status>014</status>" in str(exc):
+                    self._record_document_failure(filing, "014_file_not_found")
                 logger.warning("신고서 원문 파싱 실패 (%s): %s", filing.corp_name, exc)
                 continue
+
+            structured_prices = self.dart.get_equity_offering_prices(
+                str(filing.corp_code),
+                pd.Timestamp(filing.rcept_dt).strftime("%Y%m%d"),
+                pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
+            )
+            structured = next(
+                (item for item in structured_prices if item["rcept_no"] == str(filing.rcept_no)), None
+            )
+            is_final_price_disclosure = "발행조건확정" in str(filing.report_nm)
+            offering = self._reconcile_structured_offering_price(
+                offering, structured, is_final_price_disclosure
+            )
 
             demand_rcept_no = None
             demand = {}
@@ -182,6 +298,7 @@ class HistoricalIPOPipeline:
                 "rcept_dt": filing.rcept_dt,
                 "filing_report_nm": filing.report_nm,
                 "filing_is_correction": bool(filing.is_correction),
+                "filing_is_final_price_disclosure": is_final_price_disclosure,
                 "filing_candidate_count": len(candidates),
                 "demand_rcept_no": demand_rcept_no,
                 **offering,
@@ -194,6 +311,50 @@ class HistoricalIPOPipeline:
             columns=["corp_code", "listing_date", "year", "account_name_en", "amount"]
         )
         return pd.DataFrame(records), financials
+
+    @staticmethod
+    def _reconcile_structured_offering_price(
+        offering: dict[str, Any], structured: dict[str, Any] | None, is_final_price_disclosure: bool = True
+    ) -> dict[str, Any]:
+        """원문 공모가와 DART 구조화 모집가액을 접수번호 단위로 대조한다."""
+        result = offering.copy()
+        result["dart_structured_offering_price"] = None
+        result["dart_structured_security_type"] = None
+        result["structured_price_check"] = "not_available"
+        if structured is None:
+            return result
+
+        structured_price = structured["offering_price"]
+        result["dart_structured_offering_price"] = structured_price
+        result["dart_structured_security_type"] = structured.get("security_type")
+        if not is_final_price_disclosure:
+            result["structured_price_check"] = "structured_price_unverified_report_type"
+            return result
+        text_price = result.get("offering_price")
+        if text_price is None:
+            result["offering_price"] = structured_price
+            result["offering_price_extracted_amount"] = structured_price
+            result["offering_price_review_status"] = "verified_structured_api"
+            result["offering_price_parse_method"] = "dart_estkRs_slprc"
+            result["structured_price_check"] = "structured_price_used"
+        elif float(text_price) == float(structured_price):
+            result["offering_price_review_status"] = "verified_text_and_structured"
+            result["structured_price_check"] = "matches_structured_price"
+        else:
+            result["offering_price_review_status"] = "needs_review_structured_mismatch"
+            result["structured_price_check"] = "mismatch_with_structured_price"
+        return result
+
+    def _record_document_failure(self, filing: pd.Series, reason: str) -> None:
+        record = pd.DataFrame([{
+            "rcept_no": str(filing.rcept_no),
+            "corp_name": filing.corp_name,
+            "rcept_dt": filing.rcept_dt,
+            "reason": reason,
+            "recorded_at": pd.Timestamp.now(),
+        }])
+        self._document_failures = pd.concat([self._document_failures, record], ignore_index=True)
+        self._document_failures = self._document_failures.drop_duplicates("rcept_no", keep="last")
 
     @staticmethod
     def _compare_offering_sources(offering: dict[str, Any], demand: dict[str, Any]) -> dict[str, Any]:
@@ -273,11 +434,13 @@ class HistoricalIPOPipeline:
     def _build_offering_price_audit(dart_ipo: pd.DataFrame) -> pd.DataFrame:
         columns = [
             "corp_name", "rcept_no", "rcept_dt", "filing_report_nm", "filing_is_correction",
+            "filing_is_final_price_disclosure",
             "filing_candidate_count", "demand_rcept_no", "offering_price",
             "offering_price_extracted_amount", "offering_price_review_status",
             "offering_price_parse_method", "offering_price_range_warning",
             "offering_price_audit_context", "price_band_low", "price_band_high",
-            "price_band_check", "demand_offering_price", "demand_price_check",
+            "price_band_check", "dart_structured_offering_price", "dart_structured_security_type",
+            "structured_price_check", "demand_offering_price", "demand_price_check",
             "demand_offering_price_context",
         ]
         return dart_ipo.reindex(columns=columns).copy()
@@ -329,6 +492,12 @@ class HistoricalIPOPipeline:
         )
         expected_price_range = offering_price.between(100, 10_000_000)
         price_status = dart_ipo.get("offering_price_review_status", pd.Series(dtype=str)).fillna("missing")
+        verified_statuses = {
+            "verified_currency_unit",
+            "verified_text_and_structured",
+            "verified_structured_api",
+            "manual_verified",
+        }
         price_band_low = pd.to_numeric(
             dart_ipo.get("price_band_low", pd.Series(dtype=float)), errors="coerce"
         )
@@ -350,9 +519,7 @@ class HistoricalIPOPipeline:
             "offering_price_rows": int(offering_price.notna().sum()),
             "offering_price_within_expected_range_rows": int(expected_price_range.sum()),
             "offering_price_range_warning_rows": int((offering_price.notna() & ~expected_price_range).sum()),
-            "offering_price_needs_review_rows": int(
-                (~price_status.isin({"verified_currency_unit", "manual_verified"})).sum()
-            ),
+            "offering_price_needs_review_rows": int((~price_status.isin(verified_statuses)).sum()),
             "offering_price_manual_verified_rows": int((price_status == "manual_verified").sum()),
             "price_band_rows": int((price_band_low.notna() & price_band_high.notna()).sum()),
             "demand_ratio_rows": int(dart_ipo.get("institutional_demand_ratio", pd.Series(dtype=float)).notna().sum()),

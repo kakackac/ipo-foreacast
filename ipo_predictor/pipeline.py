@@ -86,7 +86,12 @@ def step_filter_unreviewed_offering_prices(df):
             "공모가 감사 상태가 없는 이전 데이터입니다. collect 모드로 데이터를 다시 수집하세요."
         )
     status = df["offering_price_review_status"].fillna("missing").astype(str)
-    usable = status.isin({"verified_currency_unit", "manual_verified"})
+    usable = status.isin({
+        "verified_currency_unit",
+        "verified_text_and_structured",
+        "verified_structured_api",
+        "manual_verified",
+    })
     quarantined = int((~usable).sum())
     if quarantined:
         logger.warning("원문 검증 필요 공모가 %d건을 학습·백테스트에서 격리합니다.", quarantined)

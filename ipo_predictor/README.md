@@ -96,10 +96,14 @@ python pipeline.py --mode train --phase phase2
 
 공모가를 단순 범위 규칙으로 삭제하지 않습니다. 수집 후 다음 파일을 확인합니다.
 
-- `data/raw/dart_offering_price_audit.parquet`: 회사명, 신고서·수요예측 접수번호, 최신 정정 신고서 선택 여부, 추출 금액, 원문 주변 문구, 희망 공모가 밴드 및 두 원문의 대조 결과
+- `data/raw/dart_offering_price_audit.parquet`: 회사명, 신고서·수요예측 접수번호, 최신 정정 신고서 선택 여부, 원문 추출 금액·주변 문구, OpenDART 구조화 모집가액, 희망 공모가 밴드 및 대조 결과
 - `data/raw/dart_offering_price_review_queue.parquet`: 화폐 단위가 없거나 값이 없거나 DART 원문 간 금액이 일치하지 않아 사람이 확인해야 하는 행
 
-동일 날짜에 원본과 정정 신고서가 함께 있으면 최신 정정 신고서를 우선합니다. `verified_currency_unit`은 확정 공모가 문맥에서 `원` 또는 `KRW` 단위까지 확인된 값입니다. `needs_review_*`와 `missing`은 삭제되지 않고 감사 로그에 남지만, 수동 확인 전에는 학습·백테스트에서 격리됩니다. 희망 밴드 밖의 공모가나 100원 미만 값은 **경고**일 뿐 자동 제외 사유가 아닙니다.
+동일 날짜에 원본과 정정 신고서가 함께 있으면 최신 정정 신고서를 우선합니다. `verified_currency_unit`은 확정 공모가 문맥에서 `원` 또는 `KRW` 단위까지 확인된 값입니다. 원문 추출값이 부족할 때는 동일 접수번호의 OpenDART 지분증권 구조화 모집가액을 대조하고, `[발행조건확정]` 신고서일 때만 `verified_structured_api`로 학습에 포함합니다. 두 값이 다르면 `needs_review_structured_mismatch`로 격리합니다. `needs_review_*`와 `missing`은 삭제되지 않고 감사 로그에 남지만, 수동 확인 전에는 학습·백테스트에서 격리됩니다. 희망 밴드 밖의 공모가나 100원 미만 값은 **경고**일 뿐 자동 제외 사유가 아닙니다.
+
+### 재실행 캐시
+
+첫 전체 수집 뒤에는 `data/raw/`의 KRX 상장 캘린더·상장일 가격·지수 이력과 DART 접수번호별 원문 결과를 재사용합니다. 완료된 과거 연도와 이미 시가·종가가 있는 종목은 다시 호출하지 않으며, 마지막 연도는 새 상장을 반영하도록 갱신합니다. DART 목록은 정정 신고서를 찾기 위해 다시 확인하되, 같은 접수번호의 원문·재무제표와 원문이 존재하지 않는 `014` 접수번호는 재호출하지 않습니다. 검증 규칙이 추가된 버전으로 처음 실행할 때만 기존 DART 행을 한 번 보강합니다.
 
 원문을 확인해 값을 승인할 때는 `data/manual/offering_price_overrides.example.csv`를 참고해 `data/manual/offering_price_overrides.csv`를 만들고, `decision`을 `verified`로 기록합니다. 다음 `collect` 실행에서 해당 값은 `manual_verified` 상태로 학습에 포함됩니다. 실제 검토 파일은 Git에 포함되지 않습니다.
 

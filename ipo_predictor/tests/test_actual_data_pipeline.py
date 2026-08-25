@@ -20,7 +20,7 @@ class _FakeDART:
         return pd.DataFrame([{
             "corp_code": "12345678", "corp_name": "테스트(주)",
             "rcept_no": "20240101000001", "rcept_dt": pd.Timestamp("2024-01-01"),
-            "report_nm": "증권신고서(지분증권)",
+            "report_nm": "[발행조건확정]증권신고서(지분증권)",
         }])
 
     def get_offering_info(self, rcept_no):
@@ -42,6 +42,13 @@ class _FakeDART:
             "lockup_1m_ratio": 0.1, "lockup_15d_ratio": 0.1,
             "parse_success": True,
         }
+
+    def get_equity_offering_prices(self, corp_code, start_date, end_date):
+        return [{
+            "rcept_no": "20240101000001",
+            "offering_price": 12000,
+            "security_type": "보통주",
+        }]
 
     def get_financial_statements(self, corp_code, year):
         amounts = {
@@ -151,6 +158,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertEqual(summary["close_target_rows"], 1)
             self.assertEqual(summary["offering_price_within_expected_range_rows"], 1)
             self.assertEqual(summary["offering_price_range_warning_rows"], 0)
+            self.assertEqual(summary["offering_price_needs_review_rows"], 0)
             self.assertEqual(summary["listing_open_price_rows"], 1)
             self.assertEqual(summary["listing_close_price_rows"], 1)
             self.assertAlmostEqual(features.loc[0, "open_return_pct"], 50.0)
@@ -161,7 +169,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertIn("offering_price_review_status", audit.columns)
             self.assertIn("offering_price_audit_context", audit.columns)
             self.assertIn("filing_is_correction", audit.columns)
-            self.assertEqual(len(review_queue), 1)
+            self.assertEqual(len(review_queue), 0)
             self.assertTrue((root / "processed" / "data_collection_summary.json").exists())
 
     def test_manual_price_override_promotes_audited_record_for_training(self):
@@ -221,6 +229,67 @@ class ActualDataPipelineTests(unittest.TestCase):
 
             self.assertEqual(audit.loc[0, "rcept_no"], "20240101000002")
             self.assertTrue(audit.loc[0, "filing_is_correction"])
+
+    def test_structured_dart_price_is_used_when_text_price_needs_review(self):
+        offering = {
+            "offering_price": None,
+            "offering_price_review_status": "needs_review_no_currency_unit",
+            "offering_price_parse_method": "unverified_numeric_candidate",
+        }
+
+        reconciled = HistoricalIPOPipeline._reconcile_structured_offering_price(
+            offering,
+            {"rcept_no": "20240101000001", "offering_price": 12000, "security_type": "보통주"},
+        )
+
+        self.assertEqual(reconciled["offering_price"], 12000)
+        self.assertEqual(reconciled["offering_price_review_status"], "verified_structured_api")
+        self.assertEqual(reconciled["structured_price_check"], "structured_price_used")
+
+    def test_structured_price_from_non_final_report_stays_in_audit(self):
+        offering = {"offering_price": None, "offering_price_review_status": "missing"}
+
+        reconciled = HistoricalIPOPipeline._reconcile_structured_offering_price(
+            offering,
+            {"rcept_no": "20240101000001", "offering_price": 9000, "security_type": "보통주"},
+            is_final_price_disclosure=False,
+        )
+
+        self.assertIsNone(reconciled["offering_price"])
+        self.assertEqual(reconciled["structured_price_check"], "structured_price_unverified_report_type")
+
+    def test_second_run_reuses_listing_price_and_dart_document_cache(self):
+        class CountingDART(_FakeDART):
+            def __init__(self):
+                self.offering_calls = 0
+
+            def get_offering_info(self, rcept_no):
+                self.offering_calls += 1
+                return super().get_offering_info(rcept_no)
+
+        class CountingKRX(_FakeKRX):
+            def __init__(self):
+                self.price_calls = 0
+
+            def get_listing_day_price(self, *args, **kwargs):
+                self.price_calls += 1
+                return super().get_listing_day_price(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dart = CountingDART()
+            krx = CountingKRX()
+            pipeline = HistoricalIPOPipeline(
+                dart_collector=dart,
+                krx_collector=krx,
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+            )
+            pipeline.run(2024, 2024, feature_set="phase2")
+            pipeline.run(2024, 2024, feature_set="phase2")
+
+            self.assertEqual(dart.offering_calls, 1)
+            self.assertEqual(krx.price_calls, 1)
 
 
 if __name__ == "__main__":

@@ -107,6 +107,16 @@ class Phase2FeatureTests(unittest.TestCase):
 
         self.assertEqual(parsed["demand_offering_price"], 45_000)
 
+    def test_equity_offering_price_flattens_dart_group_response(self):
+        collector = DARTCollector(api_key="test")
+        collector._get = lambda endpoint, params: {
+            "group": [{"list": [{"rcept_no": "20250101000001", "slprc": "45,000", "stksen": "보통주"}]}]
+        }
+
+        prices = collector.get_equity_offering_prices("12345678", "20250101", "20250131")
+
+        self.assertEqual(prices, [{"rcept_no": "20250101000001", "offering_price": 45_000, "security_type": "보통주"}])
+
     def test_unusual_offer_price_is_preserved_for_audit(self):
         df = pd.DataFrame({
             "offering_price": [4],

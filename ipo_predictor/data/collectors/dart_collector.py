@@ -365,6 +365,37 @@ class DARTCollector:
         )
         return filtered[["year", "account_name_en", "amount"]].dropna()
 
+    def get_equity_offering_prices(
+        self,
+        corp_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[dict]:
+        """지분증권 구조화 API의 모집(매출)가액을 접수번호별로 반환한다.
+
+        ``estkRs``의 ``slprc``는 원문 표를 정규식으로 읽는 값이 아니라
+        OpenDART가 구조화해 제공하는 모집(매출)가액이다. 원문 추출값과
+        접수번호가 같은 경우에만 서로 대조한다.
+        """
+        data = self._get("estkRs", {
+            "corp_code": corp_code,
+            "bgn_de": start_date,
+            "end_de": end_date,
+        })
+        records: list[dict] = []
+        for item in self._walk_dicts(data):
+            if "slprc" not in item:
+                continue
+            price = self._parse_money_value(item.get("slprc"))
+            if price is None:
+                continue
+            records.append({
+                "rcept_no": str(item.get("rcept_no", "")),
+                "offering_price": price,
+                "security_type": item.get("stksen"),
+            })
+        return records
+
     # ── 공모가 밴드 수집 ───────────────────────────────────────
 
     def get_offering_info(self, rcept_no: str) -> dict:
@@ -548,6 +579,22 @@ class DARTCollector:
             return int(str(value).replace(",", ""))
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _parse_money_value(value: object) -> Optional[int]:
+        match = re.search(r"([0-9][0-9,]*)", str(value or ""))
+        return DARTCollector._parse_int(match.group(1)) if match else None
+
+    @staticmethod
+    def _walk_dicts(value: object):
+        """OpenDART의 그룹형 JSON 응답을 평탄화한다."""
+        if isinstance(value, dict):
+            yield value
+            for child in value.values():
+                yield from DARTCollector._walk_dicts(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from DARTCollector._walk_dicts(child)
 
     @staticmethod
     def _parse_lockup_months(text: str) -> int:
