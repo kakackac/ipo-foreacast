@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-MIN_OFFERING_PRICE = 100
 
 
 class DARTCollector:
@@ -263,6 +262,8 @@ class DARTCollector:
         result = {
             "corp_code":              corp_code,
             "institutional_demand_ratio": None,
+            "demand_offering_price":  None,
+            "demand_offering_price_context": None,
             "lockup_6m_ratio":        None,
             "lockup_3m_ratio":        None,
             "lockup_1m_ratio":        None,
@@ -274,6 +275,10 @@ class DARTCollector:
         if not html:
             return result
         text = self._normalize_text(html)
+
+        demand_price = self._extract_offering_price_details(text)
+        result["demand_offering_price"] = demand_price["offering_price"]
+        result["demand_offering_price_context"] = demand_price["offering_price_audit_context"]
 
         # 경쟁률 패턴: "XXX : 1" 또는 "XXX대 1"
         ratio_pattern = r"경쟁률[^0-9]*([0-9,]+(?:\.[0-9]+)?)\s*(?::|대)\s*1"
@@ -383,6 +388,11 @@ class DARTCollector:
             "price_band_low":     None,
             "price_band_high":    None,
             "offering_price":     None,
+            "offering_price_extracted_amount": None,
+            "offering_price_review_status": "missing",
+            "offering_price_parse_method": None,
+            "offering_price_audit_context": None,
+            "offering_price_range_warning": False,
             "new_shares":         None,
             "secondary_shares":   None,
             "total_post_listing_shares": None,
@@ -404,10 +414,8 @@ class DARTCollector:
             result["price_band_low"]  = int(m.group(1).replace(",", ""))
             result["price_band_high"] = int(m.group(2).replace(",", ""))
 
-        # 확정 공모가. DART 표 원문은 제목 뒤에 표의 행/열 번호가 먼저
-        # 이어질 수 있으므로, 1·4 같은 번호가 아니라 '원' 단위가 붙은
-        # 금액만 선택한다.
-        result["offering_price"] = self._extract_final_offering_price(text)
+        price_details = self._extract_offering_price_details(text)
+        result.update(price_details)
 
         # 공모 구조
         result["new_shares"] = self._extract_share_after(text, "신주모집|신주발행|모집주식수")
@@ -484,22 +492,55 @@ class DARTCollector:
         return DARTCollector._parse_int(m.group(1))
 
     @staticmethod
-    def _extract_final_offering_price(text: str) -> Optional[int]:
-        """확정 공모가 문맥에서 유효한 원화 금액을 찾는다.
+    def _extract_offering_price_details(text: str) -> dict:
+        """공모가와 추출 근거를 함께 반환한다.
 
-        원문 표를 평문화하면 ``확정 공모가 4 ... 45,000 원``처럼 행 번호가
-        먼저 올 수 있다. 최소 금액과 화폐 단위를 함께 확인해 행 번호나
-        문서 번호를 공모가로 쓰지 않는다.
+        금액 범위는 삭제 기준이 아니다. ``원`` 또는 ``KRW`` 단위까지 있는
+        값만 자동 확인하고, 단위 없는 숫자는 표 번호일 가능성이 있어
+        감사 로그에서 사람이 판단할 수 있도록 ``needs_review``로 격리한다.
         """
-        context_pattern = r"(?:확정\s*공모가(?:액)?|공모가\s*확정)"
-        money_pattern = r"(?<![0-9])([1-9][0-9,]{2,})\s*(?:원|KRW)"
+        result = {
+            "offering_price": None,
+            "offering_price_extracted_amount": None,
+            "offering_price_review_status": "missing",
+            "offering_price_parse_method": None,
+            "offering_price_audit_context": None,
+            "offering_price_range_warning": False,
+        }
+        context_pattern = r"(?:1\s*주당\s*)?(?:확정|최종)\s*공모가(?:액)?|공모가\s*확정"
+        money_pattern = r"(?<![0-9])([1-9][0-9,]*)\s*(?:원|KRW)"
+        numeric_pattern = r"(?<![0-9])([0-9][0-9,]*)(?![0-9])"
         for match in re.finditer(context_pattern, text, flags=re.IGNORECASE):
-            context = text[match.end():match.end() + 300]
-            for candidate in re.finditer(money_pattern, context, flags=re.IGNORECASE):
-                value = DARTCollector._parse_int(candidate.group(1))
-                if value is not None and value >= MIN_OFFERING_PRICE:
-                    return value
-        return None
+            # 확정 공모가 문구 바로 뒤의 좁은 문맥만 사용한다. 멀리 떨어진
+            # 공모총액·발행금액 같은 다른 원화 금액을 가져오는 일을 줄인다.
+            context = text[max(0, match.start() - 80):match.end() + 140]
+            price_context = text[match.end():match.end() + 140]
+            money_match = re.search(money_pattern, price_context, flags=re.IGNORECASE)
+            if money_match:
+                value = DARTCollector._parse_int(money_match.group(1))
+                if value is not None:
+                    result.update({
+                        "offering_price": value,
+                        "offering_price_extracted_amount": value,
+                        "offering_price_review_status": "verified_currency_unit",
+                        "offering_price_parse_method": "final_price_with_currency_unit",
+                        "offering_price_audit_context": context,
+                        "offering_price_range_warning": value < 100 or value > 10_000_000,
+                    })
+                    return result
+
+            numeric_match = re.search(numeric_pattern, price_context)
+            if numeric_match:
+                value = DARTCollector._parse_int(numeric_match.group(1))
+                result.update({
+                    "offering_price_extracted_amount": value,
+                    "offering_price_review_status": "needs_review_no_currency_unit",
+                    "offering_price_parse_method": "unverified_numeric_candidate",
+                    "offering_price_audit_context": context,
+                    "offering_price_range_warning": bool(value is not None and (value < 100 or value > 10_000_000)),
+                })
+                return result
+        return result
 
     @staticmethod
     def _parse_int(value: str) -> Optional[int]:

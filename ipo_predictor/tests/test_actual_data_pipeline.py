@@ -20,6 +20,7 @@ class _FakeDART:
         return pd.DataFrame([{
             "corp_code": "12345678", "corp_name": "테스트(주)",
             "rcept_no": "20240101000001", "rcept_dt": pd.Timestamp("2024-01-01"),
+            "report_nm": "증권신고서(지분증권)",
         }])
 
     def get_offering_info(self, rcept_no):
@@ -148,14 +149,78 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertEqual(summary["feature_rows"], 1)
             self.assertEqual(summary["open_target_rows"], 1)
             self.assertEqual(summary["close_target_rows"], 1)
-            self.assertEqual(summary["valid_offering_price_rows"], 1)
-            self.assertEqual(summary["invalid_offering_price_rows"], 0)
+            self.assertEqual(summary["offering_price_within_expected_range_rows"], 1)
+            self.assertEqual(summary["offering_price_range_warning_rows"], 0)
             self.assertEqual(summary["listing_open_price_rows"], 1)
             self.assertEqual(summary["listing_close_price_rows"], 1)
             self.assertAlmostEqual(features.loc[0, "open_return_pct"], 50.0)
             self.assertAlmostEqual(features.loc[0, "close_return_pct"], 25.0)
             self.assertTrue((root / "raw" / "dart_ipo_raw.parquet").exists())
+            audit = pd.read_parquet(root / "raw" / "dart_offering_price_audit.parquet")
+            review_queue = pd.read_parquet(root / "raw" / "dart_offering_price_review_queue.parquet")
+            self.assertIn("offering_price_review_status", audit.columns)
+            self.assertIn("offering_price_audit_context", audit.columns)
+            self.assertIn("filing_is_correction", audit.columns)
+            self.assertEqual(len(review_queue), 1)
             self.assertTrue((root / "processed" / "data_collection_summary.json").exists())
+
+    def test_manual_price_override_promotes_audited_record_for_training(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manual_dir = root / "manual"
+            manual_dir.mkdir()
+            (manual_dir / "offering_price_overrides.csv").write_text(
+                "rcept_no,offering_price,decision,note\n"
+                "20240101000001,12000,verified,Confirmed against original\n",
+                encoding="utf-8",
+            )
+            pipeline = HistoricalIPOPipeline(
+                dart_collector=_FakeDART(),
+                krx_collector=_FakeKRX(),
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+            )
+
+            summary = pipeline.run(2024, 2024, feature_set="phase2")
+            audit = pd.read_parquet(root / "raw" / "dart_offering_price_audit.parquet")
+
+            self.assertEqual(summary["offering_price_manual_verified_rows"], 1)
+            self.assertEqual(audit.loc[0, "offering_price_review_status"], "manual_verified")
+            self.assertEqual(audit.loc[0, "offering_price"], 12000)
+
+    def test_latest_correction_is_preferred_when_disclosure_dates_match(self):
+        class CorrectionDART(_FakeDART):
+            def get_ipo_disclosure_list(self, start_date, end_date):
+                return pd.DataFrame([
+                    {
+                        "corp_code": "12345678", "corp_name": "테스트(주)",
+                        "rcept_no": "20240101000001", "rcept_dt": pd.Timestamp("2024-01-01"),
+                        "report_nm": "증권신고서(지분증권)",
+                    },
+                    {
+                        "corp_code": "12345678", "corp_name": "테스트(주)",
+                        "rcept_no": "20240101000002", "rcept_dt": pd.Timestamp("2024-01-01"),
+                        "report_nm": "증권신고서(지분증권)(정정)",
+                    },
+                ])
+
+            def get_offering_info(self, rcept_no):
+                result = super().get_offering_info(rcept_no)
+                result["rcept_no"] = rcept_no
+                return result
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            HistoricalIPOPipeline(
+                dart_collector=CorrectionDART(),
+                krx_collector=_FakeKRX(),
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+            ).run(2024, 2024, feature_set="phase2")
+            audit = pd.read_parquet(root / "raw" / "dart_offering_price_audit.parquet")
+
+            self.assertEqual(audit.loc[0, "rcept_no"], "20240101000002")
+            self.assertTrue(audit.loc[0, "filing_is_correction"])
 
 
 if __name__ == "__main__":

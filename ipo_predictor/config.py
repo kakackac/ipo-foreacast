@@ -14,10 +14,11 @@ ROOT_DIR = Path(__file__).parent
 DATA_DIR = ROOT_DIR / "data"
 RAW_DIR  = DATA_DIR / "raw"
 PROC_DIR = DATA_DIR / "processed"
+MANUAL_DATA_DIR = DATA_DIR / "manual"
 MODEL_DIR = ROOT_DIR / "models" / "saved"
 REPORT_DIR = ROOT_DIR / "reports"
 
-for d in [RAW_DIR, PROC_DIR, MODEL_DIR, REPORT_DIR]:
+for d in [RAW_DIR, PROC_DIR, MANUAL_DATA_DIR, MODEL_DIR, REPORT_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 

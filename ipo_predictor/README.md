@@ -92,6 +92,17 @@ python pipeline.py --mode train --phase phase2
 
 수집 결과는 `data/raw/`에 원본별로, 학습용 결과는 `data/processed/features_all.parquet`에 저장됩니다. KRX 수집기는 승인된 KOSPI·KOSDAQ 일별 종목/지수 API를 `AUTH_KEY` 헤더로 호출하며, 웹사이트 로그인 자격증명은 사용하지 않습니다. `data_collection_summary.json`에는 일정·공시·가격·타깃의 행 수와 핵심 피처 충족 현황이 남습니다. API 키가 없거나 원문 파싱에 실패한 종목은 0으로 채우지 않고 결측으로 보존하므로, 이 파일로 데이터 품질을 먼저 확인한 뒤 학습합니다. 처음에는 `2015년부터 실행일`까지 전체를 한 번 수집하고, 이후에는 새 상장분만 해당 연도 범위로 갱신합니다.
 
+### 확정 공모가 감사 절차
+
+공모가를 단순 범위 규칙으로 삭제하지 않습니다. 수집 후 다음 파일을 확인합니다.
+
+- `data/raw/dart_offering_price_audit.parquet`: 회사명, 신고서·수요예측 접수번호, 최신 정정 신고서 선택 여부, 추출 금액, 원문 주변 문구, 희망 공모가 밴드 및 두 원문의 대조 결과
+- `data/raw/dart_offering_price_review_queue.parquet`: 화폐 단위가 없거나 값이 없거나 DART 원문 간 금액이 일치하지 않아 사람이 확인해야 하는 행
+
+동일 날짜에 원본과 정정 신고서가 함께 있으면 최신 정정 신고서를 우선합니다. `verified_currency_unit`은 확정 공모가 문맥에서 `원` 또는 `KRW` 단위까지 확인된 값입니다. `needs_review_*`와 `missing`은 삭제되지 않고 감사 로그에 남지만, 수동 확인 전에는 학습·백테스트에서 격리됩니다. 희망 밴드 밖의 공모가나 100원 미만 값은 **경고**일 뿐 자동 제외 사유가 아닙니다.
+
+원문을 확인해 값을 승인할 때는 `data/manual/offering_price_overrides.example.csv`를 참고해 `data/manual/offering_price_overrides.csv`를 만들고, `decision`을 `verified`로 기록합니다. 다음 `collect` 실행에서 해당 값은 `manual_verified` 상태로 학습에 포함됩니다. 실제 검토 파일은 Git에 포함되지 않습니다.
+
 ---
 
 ## API 서버 실행

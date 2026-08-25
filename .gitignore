@@ -11,5 +11,6 @@ venv/
 
 ipo_predictor/data/raw/
 ipo_predictor/data/processed/
+ipo_predictor/data/manual/offering_price_overrides.csv
 ipo_predictor/models/saved/
 ipo_predictor/reports/

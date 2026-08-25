@@ -29,8 +29,10 @@ class HistoricalIPOPipeline:
         self.krx = krx_collector or KRXCollector()
         self.raw_dir = Path(raw_dir)
         self.processed_dir = Path(processed_dir)
+        self.manual_dir = self.raw_dir.parent / "manual"
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.processed_dir.mkdir(parents=True, exist_ok=True)
+        self.manual_dir.mkdir(parents=True, exist_ok=True)
 
     def run(self, start_year: int, end_year: int, feature_set: str = "phase2") -> dict[str, Any]:
         """수집 결과와 데이터 품질 요약을 반환하고 산출물을 디스크에 저장한다."""
@@ -56,10 +58,19 @@ class HistoricalIPOPipeline:
         kosdaq.to_parquet(self.raw_dir / "kosdaq_index.parquet", index=False)
 
         dart_ipo, financials = self._collect_dart_records(calendar, start_year, end_year)
+        dart_ipo = self._apply_offering_price_overrides(dart_ipo)
         dart_ipo.to_parquet(self.raw_dir / "dart_ipo_raw.parquet", index=False)
         financials.to_parquet(self.raw_dir / "dart_financials.parquet", index=False)
         if dart_ipo.empty:
             raise RuntimeError("KRX 상장 종목과 연결된 DART 증권신고서를 찾지 못했습니다.")
+
+        price_audit = self._build_offering_price_audit(dart_ipo)
+        price_audit.to_parquet(self.raw_dir / "dart_offering_price_audit.parquet", index=False)
+        verified_statuses = {"verified_currency_unit", "manual_verified"}
+        review_queue = price_audit[
+            ~price_audit["offering_price_review_status"].fillna("missing").isin(verified_statuses)
+        ].copy()
+        review_queue.to_parquet(self.raw_dir / "dart_offering_price_review_queue.parquet", index=False)
 
         engineer = FeatureEngineer(feature_set=feature_set)
         features = engineer.build_features(dart_ipo, krx_ipo, kospi, kosdaq)
@@ -123,6 +134,7 @@ class HistoricalIPOPipeline:
 
         filings = pd.concat(disclosures, ignore_index=True)
         filings["corp_name_clean"] = filings["corp_name"].map(self._clean_name)
+        filings["is_correction"] = filings["report_nm"].fillna("").str.contains("정정", regex=False)
         calendar = calendar.copy()
         calendar["corp_name_clean"] = calendar["corp_name"].map(self._clean_name)
         calendar["listing_date"] = pd.to_datetime(calendar["listing_date"], errors="coerce")
@@ -134,7 +146,11 @@ class HistoricalIPOPipeline:
             candidates = candidates[candidates["rcept_dt"] <= listing.listing_date]
             if candidates.empty:
                 continue
-            filing = candidates.sort_values("rcept_dt").iloc[-1]
+            # 같은 날짜의 신고서가 여러 개면 정정 신고서를 우선한다. 날짜가
+            # 더 늦은 신고서는 정정 여부와 관계없이 최신 공시가 우선이다.
+            filing = candidates.sort_values(
+                ["rcept_dt", "is_correction", "rcept_no"], ascending=[True, True, True]
+            ).iloc[-1]
             try:
                 offering = self.dart.get_offering_info(str(filing.rcept_no))
             except RuntimeError as exc:
@@ -164,9 +180,13 @@ class HistoricalIPOPipeline:
                 "corp_code": str(filing.corp_code),
                 "corp_name": filing.corp_name,
                 "rcept_dt": filing.rcept_dt,
+                "filing_report_nm": filing.report_nm,
+                "filing_is_correction": bool(filing.is_correction),
+                "filing_candidate_count": len(candidates),
                 "demand_rcept_no": demand_rcept_no,
                 **offering,
                 **{key: value for key, value in demand.items() if key != "corp_code"},
+                **self._compare_offering_sources(offering, demand),
                 **financial_summary,
             })
 
@@ -174,6 +194,93 @@ class HistoricalIPOPipeline:
             columns=["corp_code", "listing_date", "year", "account_name_en", "amount"]
         )
         return pd.DataFrame(records), financials
+
+    @staticmethod
+    def _compare_offering_sources(offering: dict[str, Any], demand: dict[str, Any]) -> dict[str, Any]:
+        """신고서·희망밴드·수요예측 원문의 공모가를 대조한다."""
+        price = pd.to_numeric(pd.Series([offering.get("offering_price")]), errors="coerce").iloc[0]
+        demand_price = pd.to_numeric(pd.Series([demand.get("demand_offering_price")]), errors="coerce").iloc[0]
+        low = pd.to_numeric(pd.Series([offering.get("price_band_low")]), errors="coerce").iloc[0]
+        high = pd.to_numeric(pd.Series([offering.get("price_band_high")]), errors="coerce").iloc[0]
+
+        if pd.isna(price) or pd.isna(low) or pd.isna(high):
+            band_check = "not_available"
+        elif low <= price <= high:
+            band_check = "within_price_band"
+        elif price > high:
+            band_check = "above_price_band"
+        else:
+            band_check = "below_price_band"
+
+        if pd.isna(price) or pd.isna(demand_price):
+            demand_check = "not_available"
+        elif price == demand_price:
+            demand_check = "matches_demand_disclosure"
+        else:
+            demand_check = "mismatch_with_demand_disclosure"
+
+        status = offering.get("offering_price_review_status", "missing")
+        if status == "verified_currency_unit" and demand_check == "mismatch_with_demand_disclosure":
+            status = "needs_review_source_mismatch"
+        return {
+            "price_band_check": band_check,
+            "demand_price_check": demand_check,
+            "offering_price_review_status": status,
+        }
+
+    def _apply_offering_price_overrides(self, dart_ipo: pd.DataFrame) -> pd.DataFrame:
+        """사람이 원문을 확인해 승인한 공모가만 학습용 값으로 반영한다."""
+        if dart_ipo.empty:
+            return dart_ipo
+        override_path = self.manual_dir / "offering_price_overrides.csv"
+        if not override_path.exists():
+            return dart_ipo
+
+        overrides = pd.read_csv(override_path, dtype={"rcept_no": str})
+        required = {"rcept_no", "offering_price", "decision"}
+        missing = required - set(overrides.columns)
+        if missing:
+            raise RuntimeError(
+                f"공모가 검토 파일에 필요한 열이 없습니다: {', '.join(sorted(missing))}"
+            )
+        overrides["decision"] = overrides["decision"].fillna("").str.strip().str.lower()
+        overrides["offering_price"] = pd.to_numeric(overrides["offering_price"], errors="coerce")
+        approved = overrides[
+            (overrides["decision"] == "verified") & overrides["offering_price"].notna()
+        ].drop_duplicates("rcept_no", keep="last")
+        if approved.empty:
+            return dart_ipo
+
+        result = dart_ipo.copy()
+        result["rcept_no"] = result["rcept_no"].astype(str)
+        approved = approved.set_index("rcept_no")
+        for index, row in result.iterrows():
+            override = approved.loc[row["rcept_no"]] if row["rcept_no"] in approved.index else None
+            if override is None:
+                continue
+            result.at[index, "offering_price"] = override["offering_price"]
+            result.at[index, "offering_price_extracted_amount"] = override["offering_price"]
+            result.at[index, "offering_price_review_status"] = "manual_verified"
+            result.at[index, "offering_price_parse_method"] = "manual_audit_override"
+            result.at[index, "offering_price_audit_context"] = str(override.get("note", "manual verification"))
+            result.at[index, "offering_price_range_warning"] = bool(
+                override["offering_price"] < 100 or override["offering_price"] > 10_000_000
+            )
+        logger.info("원문 검토로 확정 공모가 %d건을 반영했습니다.", len(approved))
+        return result
+
+    @staticmethod
+    def _build_offering_price_audit(dart_ipo: pd.DataFrame) -> pd.DataFrame:
+        columns = [
+            "corp_name", "rcept_no", "rcept_dt", "filing_report_nm", "filing_is_correction",
+            "filing_candidate_count", "demand_rcept_no", "offering_price",
+            "offering_price_extracted_amount", "offering_price_review_status",
+            "offering_price_parse_method", "offering_price_range_warning",
+            "offering_price_audit_context", "price_band_low", "price_band_high",
+            "price_band_check", "demand_offering_price", "demand_price_check",
+            "demand_offering_price_context",
+        ]
+        return dart_ipo.reindex(columns=columns).copy()
 
     def _collect_financials(self, corp_code: str, listing_date: pd.Timestamp) -> tuple[dict[str, Any], pd.DataFrame]:
         frames = []
@@ -220,7 +327,8 @@ class HistoricalIPOPipeline:
         offering_price = pd.to_numeric(
             dart_ipo.get("offering_price", pd.Series(dtype=float)), errors="coerce"
         )
-        valid_offering_price = offering_price.between(100, 10_000_000)
+        expected_price_range = offering_price.between(100, 10_000_000)
+        price_status = dart_ipo.get("offering_price_review_status", pd.Series(dtype=str)).fillna("missing")
         price_band_low = pd.to_numeric(
             dart_ipo.get("price_band_low", pd.Series(dtype=float)), errors="coerce"
         )
@@ -240,8 +348,12 @@ class HistoricalIPOPipeline:
             "open_target_rows": int(features.get("open_return_pct", pd.Series(dtype=float)).notna().sum()),
             "close_target_rows": int(features.get("close_return_pct", pd.Series(dtype=float)).notna().sum()),
             "offering_price_rows": int(offering_price.notna().sum()),
-            "valid_offering_price_rows": int(valid_offering_price.sum()),
-            "invalid_offering_price_rows": int((offering_price.notna() & ~valid_offering_price).sum()),
+            "offering_price_within_expected_range_rows": int(expected_price_range.sum()),
+            "offering_price_range_warning_rows": int((offering_price.notna() & ~expected_price_range).sum()),
+            "offering_price_needs_review_rows": int(
+                (~price_status.isin({"verified_currency_unit", "manual_verified"})).sum()
+            ),
+            "offering_price_manual_verified_rows": int((price_status == "manual_verified").sum()),
             "price_band_rows": int((price_band_low.notna() & price_band_high.notna()).sum()),
             "demand_ratio_rows": int(dart_ipo.get("institutional_demand_ratio", pd.Series(dtype=float)).notna().sum()),
             "lockup_rows": int(dart_ipo.get("lockup_6m_ratio", pd.Series(dtype=float)).notna().sum()),

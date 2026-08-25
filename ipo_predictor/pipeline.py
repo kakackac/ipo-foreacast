@@ -79,6 +79,20 @@ def step_feature_selection(df, phase: str = "core"):
     return available
 
 
+def step_filter_unreviewed_offering_prices(df):
+    """원문 근거가 부족한 공모가는 보존하되 모델 학습·검증에서는 격리한다."""
+    if "offering_price_review_status" not in df.columns:
+        raise RuntimeError(
+            "공모가 감사 상태가 없는 이전 데이터입니다. collect 모드로 데이터를 다시 수집하세요."
+        )
+    status = df["offering_price_review_status"].fillna("missing").astype(str)
+    usable = status.isin({"verified_currency_unit", "manual_verified"})
+    quarantined = int((~usable).sum())
+    if quarantined:
+        logger.warning("원문 검증 필요 공모가 %d건을 학습·백테스트에서 격리합니다.", quarantined)
+    return df[usable].copy().reset_index(drop=True)
+
+
 def step_backtest(df, feature_cols, target_col: str):
     """Walk-forward 백테스트 실행"""
     from models.evaluation.backtester import WalkForwardBacktester
@@ -244,6 +258,7 @@ def run_train(phase: str = "core"):
 
     logger.info("════ IPO 예측 파이프라인 — 학습 모드 (%s) ════", phase)
     df           = step_load_or_build_data(demo=False, phase=phase)
+    df           = step_filter_unreviewed_offering_prices(df)
     feature_cols = step_feature_selection(df, phase=phase)
     results = {}
     model_names = {
@@ -263,6 +278,7 @@ def run_backtest(phase: str = "core"):
     """실제 데이터로 백테스트만 실행"""
     logger.info("════ IPO 예측 파이프라인 — 백테스트 모드 (%s) ════", phase)
     df           = step_load_or_build_data(demo=False, phase=phase)
+    df           = step_filter_unreviewed_offering_prices(df)
     feature_cols = step_feature_selection(df, phase=phase)
     results = {}
     for target_col in ["open_return_pct", "close_return_pct"]:

@@ -78,8 +78,36 @@ class Phase2FeatureTests(unittest.TestCase):
         parsed = DARTCollector(api_key="test")._parse_offering_html(html, "20250101000002")
 
         self.assertEqual(parsed["offering_price"], 45_000)
+        self.assertEqual(parsed["offering_price_review_status"], "verified_currency_unit")
+        self.assertEqual(parsed["offering_price_extracted_amount"], 45_000)
 
-    def test_invalid_offer_price_is_not_used_for_return_target(self):
+    def test_dart_offering_parser_quarantines_number_without_currency_unit(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "확정 공모가 4 제 1 호", "20250101000003"
+        )
+
+        self.assertIsNone(parsed["offering_price"])
+        self.assertEqual(parsed["offering_price_extracted_amount"], 4)
+        self.assertEqual(parsed["offering_price_review_status"], "needs_review_no_currency_unit")
+        self.assertIn("확정 공모가 4", parsed["offering_price_audit_context"])
+
+    def test_currency_unit_price_is_kept_even_when_outside_expected_range(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "확정 공모가 50 원", "20250101000004"
+        )
+
+        self.assertEqual(parsed["offering_price"], 50)
+        self.assertEqual(parsed["offering_price_review_status"], "verified_currency_unit")
+        self.assertTrue(parsed["offering_price_range_warning"])
+
+    def test_demand_forecast_extracts_price_for_source_comparison(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            "최종 공모가 45,000 원 기관 경쟁률 1,200 : 1", "12345678"
+        )
+
+        self.assertEqual(parsed["demand_offering_price"], 45_000)
+
+    def test_unusual_offer_price_is_preserved_for_audit(self):
         df = pd.DataFrame({
             "offering_price": [4],
             "open_price": [40_000],
@@ -88,9 +116,9 @@ class Phase2FeatureTests(unittest.TestCase):
 
         result = FeatureEngineer()._calc_target(df)
 
-        self.assertTrue(pd.isna(result.loc[0, "offering_price"]))
-        self.assertTrue(pd.isna(result.loc[0, "open_return_pct"]))
-        self.assertTrue(pd.isna(result.loc[0, "close_return_pct"]))
+        self.assertEqual(result.loc[0, "offering_price"], 4)
+        self.assertAlmostEqual(result.loc[0, "open_return_pct"], 999900.0)
+        self.assertAlmostEqual(result.loc[0, "close_return_pct"], 949900.0)
 
     def test_classifier_fallback_is_preserved_after_load(self):
         df = build_demo_dataset(n=30, seed=13, phase="phase2")

@@ -100,6 +100,8 @@ class FeatureEngineer:
         """
         # 1. 기본 병합
         df = self._merge_base(dart_df, krx_df)
+        if "offering_price_review_status" not in df.columns:
+            df["offering_price_review_status"] = "needs_review_missing_audit"
 
         # 2. 핵심 파생 피처 계산
         df = self._calc_lockup_features(df)
@@ -125,6 +127,7 @@ class FeatureEngineer:
 
         result = df[available + [
             "corp_name", "listing_date", "offering_price",
+            "offering_price_review_status",
             "open_return_pct", "close_return_pct",
         ]].copy()
         result = result.sort_values("listing_date").reset_index(drop=True)
@@ -519,13 +522,12 @@ class FeatureEngineer:
             return df
 
         df["offering_price"] = pd.to_numeric(df["offering_price"], errors="coerce")
-        invalid_offer_price = (df["offering_price"] < 100) | (df["offering_price"] > 10_000_000)
-        if invalid_offer_price.any():
+        out_of_expected_range = (df["offering_price"] < 100) | (df["offering_price"] > 10_000_000)
+        if out_of_expected_range.any():
             logger.warning(
-                "유효하지 않은 확정 공모가 %d건은 학습 타깃에서 제외합니다.",
-                int(invalid_offer_price.sum()),
+                "예상 공모가 범위를 벗어난 값 %d건을 감사 로그에서 확인하세요. 값은 삭제하지 않습니다.",
+                int(out_of_expected_range.sum()),
             )
-            df.loc[invalid_offer_price, "offering_price"] = np.nan
         for price_col, target_col in [
             ("open_price", "open_return_pct"),
             ("close_price", "close_return_pct"),
@@ -543,8 +545,9 @@ class FeatureEngineer:
         # 극단값 리포트 (제거하지 않고 로그만)
         extreme = df[df["open_return_pct"].abs() > 200]
         if len(extreme):
+            names = extreme["corp_name"].tolist()[:5] if "corp_name" in extreme.columns else []
             logger.info("극단 수익률 종목 %d건 (±200%%+): %s", len(extreme),
-                        extreme["corp_name"].tolist()[:5])
+                        names)
 
         return df
 
