@@ -21,6 +21,7 @@ import zipfile
 from io import BytesIO
 from datetime import date, timedelta
 from html import unescape as html_unescape
+from html.parser import HTMLParser
 from typing import Optional
 
 import requests
@@ -35,6 +36,49 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
+
+FINAL_PRICE_LABEL_PATTERN = (
+    r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
+)
+PRICE_CONTEXT_EXCLUSIONS = r"희망|밴드|액면|총\s*공모|공모\s*총액|모집\s*총액|발행\s*총액|총\s*발행"
+
+
+class _TableRowParser(HTMLParser):
+    """DART 원문 HTML에서 표의 행·셀 경계를 보존한다."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows: list[str] = []
+        self._table_depth = 0
+        self._row: list[str] | None = None
+        self._cell: list[str] | None = None
+
+    def handle_starttag(self, tag: str, attrs):
+        tag = tag.lower()
+        if tag == "table":
+            self._table_depth += 1
+        elif self._table_depth and tag == "tr":
+            self._row = []
+        elif self._table_depth and tag in {"td", "th"} and self._row is not None:
+            self._cell = []
+
+    def handle_endtag(self, tag: str):
+        tag = tag.lower()
+        if self._table_depth and tag in {"td", "th"} and self._cell is not None and self._row is not None:
+            value = re.sub(r"\s+", " ", "".join(self._cell)).strip()
+            if value:
+                self._row.append(value)
+            self._cell = None
+        elif self._table_depth and tag == "tr" and self._row is not None:
+            if self._row:
+                self.rows.append(" | ".join(self._row))
+            self._row = None
+        elif tag == "table" and self._table_depth:
+            self._table_depth -= 1
+
+    def handle_data(self, data: str):
+        if self._cell is not None:
+            self._cell.append(data)
 
 
 class DARTCollector:
@@ -114,7 +158,9 @@ class DARTCollector:
                     except UnicodeDecodeError:
                         continue
 
-        return self._normalize_text(" ".join(fragments))
+        # 후속 파서가 표의 같은 행인지 판단할 수 있도록 HTML/XML 경계는
+        # 보존한다. 텍스트가 필요한 파서는 각자 _normalize_text를 호출한다.
+        return " ".join(fragments)
 
     # ── 공시 목록 수집 ─────────────────────────────────────────
 
@@ -446,7 +492,10 @@ class DARTCollector:
             result["price_band_low"]  = int(m.group(1).replace(",", ""))
             result["price_band_high"] = int(m.group(2).replace(",", ""))
 
-        price_details = self._extract_offering_price_details(text)
+        price_details = self._extract_offering_price_details(
+            text,
+            table_rows=self._extract_table_rows(html),
+        )
         result.update(price_details)
 
         # 공모 구조
@@ -524,7 +573,18 @@ class DARTCollector:
         return DARTCollector._parse_int(m.group(1))
 
     @staticmethod
-    def _extract_offering_price_details(text: str) -> dict:
+    def _extract_table_rows(raw_html: str) -> list[str]:
+        parser = _TableRowParser()
+        try:
+            parser.feed(raw_html)
+            parser.close()
+        except Exception as exc:
+            logger.debug("DART 표 행 파싱을 건너뜁니다: %s", exc)
+            return []
+        return parser.rows
+
+    @staticmethod
+    def _extract_offering_price_details(text: str, table_rows: Optional[list[str]] = None) -> dict:
         """공모가와 추출 근거를 함께 반환한다.
 
         금액 범위는 삭제 기준이 아니다. ``원`` 또는 ``KRW`` 단위까지 있는
@@ -540,17 +600,35 @@ class DARTCollector:
             "offering_price_audit_context": None,
             "offering_price_range_warning": False,
         }
-        context_pattern = r"(?:1\s*주당\s*)?(?:확정|최종)\s*공모가(?:액)?|공모가\s*확정"
-        money_pattern = r"(?<![0-9])([1-9][0-9,]*)\s*(?:원|KRW)"
-        numeric_pattern = r"(?<![0-9])([0-9][0-9,]*)(?![0-9])"
-        for match in re.finditer(context_pattern, text, flags=re.IGNORECASE):
-            # 확정 공모가 문구 바로 뒤의 좁은 문맥만 사용한다. 멀리 떨어진
-            # 공모총액·발행금액 같은 다른 원화 금액을 가져오는 일을 줄인다.
-            context = text[max(0, match.start() - 80):match.end() + 140]
-            price_context = text[match.end():match.end() + 140]
-            # "1주당 확정공모가액을 최종 결정할 예정"은 확정가가 없는
-            # 초기 신고서의 정형 문구다. 뒤의 1을 가격으로 오인하지 않는다.
-            if re.search(r"(?:최종\s*)?결정할\s*예정|정정(?:증권)?신고서.{0,40}?제출할\s*예정", context):
+        sources = [("final_price_table_row", row) for row in (table_rows or [])]
+        sources.extend(("final_price_same_sentence", sentence) for sentence in DARTCollector._split_sentences(text))
+
+        # 자동 승인: 확정가 라벨과 통화 단위 금액이 같은 표 행 또는 같은
+        # 문장에 직접 이어진 경우만 허용한다. 넓은 임의 길이 탐색은 하지 않는다.
+        for method, context in sources:
+            value = DARTCollector._extract_direct_price_with_currency(context)
+            if value is not None:
+                result.update({
+                    "offering_price": value,
+                    "offering_price_extracted_amount": value,
+                    "offering_price_review_status": "verified_currency_unit",
+                    "offering_price_finality": "confirmed_price_language",
+                    "offering_price_parse_method": method,
+                    "offering_price_audit_context": context,
+                    "offering_price_range_warning": value < 100 or value > 10_000_000,
+                })
+                return result
+
+        # 초기 신고서의 정형 문구는 금액 후보를 만들지 않고 별도 상태로 남긴다.
+        for _, context in sources:
+            if re.search(
+                FINAL_PRICE_LABEL_PATTERN
+                + r"[^.!?。;]{0,100}(?:최종\s*)?결정할\s*예정|"
+                + FINAL_PRICE_LABEL_PATTERN
+                + r"[^.!?。;]{0,100}정정(?:증권)?신고서.{0,40}?제출할\s*예정",
+                context,
+                flags=re.IGNORECASE,
+            ):
                 result.update({
                     "offering_price_review_status": "preliminary_price_language",
                     "offering_price_finality": "preliminary_price_language",
@@ -558,39 +636,63 @@ class DARTCollector:
                     "offering_price_audit_context": context,
                 })
                 return result
-            money_match = re.search(money_pattern, price_context, flags=re.IGNORECASE)
-            if money_match:
-                value = DARTCollector._parse_int(money_match.group(1))
-                if value is not None:
-                    result.update({
-                        "offering_price": value,
-                        "offering_price_extracted_amount": value,
-                        "offering_price_review_status": "verified_currency_unit",
-                        "offering_price_finality": "confirmed_price_language",
-                        "offering_price_parse_method": "final_price_with_currency_unit",
-                        "offering_price_audit_context": context,
-                        "offering_price_range_warning": value < 100 or value > 10_000_000,
-                    })
-                    return result
 
-            numeric_match = next(
-                (
-                    item for item in re.finditer(numeric_pattern, price_context)
-                    if not re.match(r"\s*주당", price_context[item.end():])
-                ),
-                None,
-            )
-            if numeric_match is not None:
-                value = DARTCollector._parse_int(numeric_match.group(1))
+        # 단위 없는 직접 연결 숫자는 감사 후보로만 남긴다. 1주당의 "1"과
+        # 희망밴드·액면가·총액 문맥은 후보에서도 제외한다.
+        for _, context in sources:
+            value = DARTCollector._extract_direct_price_without_currency(context)
+            if value is not None:
                 result.update({
                     "offering_price_extracted_amount": value,
                     "offering_price_review_status": "needs_review_no_currency_unit",
-                    "offering_price_parse_method": "unverified_numeric_candidate",
+                    "offering_price_parse_method": "direct_price_without_currency_unit",
                     "offering_price_audit_context": context,
-                    "offering_price_range_warning": bool(value is not None and (value < 100 or value > 10_000_000)),
+                    "offering_price_range_warning": value < 100 or value > 10_000_000,
                 })
                 return result
         return result
+
+    @staticmethod
+    def _split_sentences(text: str) -> list[str]:
+        return [sentence.strip() for sentence in re.split(r"(?<=[.!?。;])", text) if sentence.strip()]
+
+    @staticmethod
+    def _extract_direct_price_with_currency(context: str) -> Optional[int]:
+        pattern = re.compile(
+            FINAL_PRICE_LABEL_PATTERN
+            + r"(?P<bridge>[^.!?。;]{0,28}?)(?P<amount>[1-9][0-9,]*)\s*(?:원|KRW)",
+            flags=re.IGNORECASE,
+        )
+        for match in pattern.finditer(context):
+            bridge = match.group("bridge")
+            if "~" in bridge or "～" in bridge or re.search(PRICE_CONTEXT_EXCLUSIONS, bridge):
+                continue
+            value = DARTCollector._parse_int(match.group("amount"))
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _extract_direct_price_without_currency(context: str) -> Optional[int]:
+        pattern = re.compile(
+            FINAL_PRICE_LABEL_PATTERN
+            + r"(?P<bridge>[^.!?。;]{0,28}?)(?P<amount>[1-9][0-9,]*)(?!\s*(?:원|KRW))",
+            flags=re.IGNORECASE,
+        )
+        for match in pattern.finditer(context):
+            bridge = match.group("bridge")
+            suffix = context[match.end("amount"):]
+            if (
+                "~" in bridge
+                or "～" in bridge
+                or re.search(PRICE_CONTEXT_EXCLUSIONS, bridge)
+                or re.match(r"\s*주당", suffix)
+            ):
+                continue
+            value = DARTCollector._parse_int(match.group("amount"))
+            if value is not None:
+                return value
+        return None
 
     @staticmethod
     def _parse_int(value: str) -> Optional[int]:

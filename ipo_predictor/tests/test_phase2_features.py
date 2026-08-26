@@ -99,6 +99,34 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(parsed["offering_price_review_status"], "verified_currency_unit")
         self.assertEqual(parsed["offering_price_extracted_amount"], 45_000)
 
+    def test_dart_offering_parser_accepts_only_direct_same_sentence_price(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "확정 공모가는 20,000원입니다.", "20250101000005"
+        )
+
+        self.assertEqual(parsed["offering_price"], 20_000)
+        self.assertEqual(parsed["offering_price_parse_method"], "final_price_same_sentence")
+
+    def test_dart_offering_parser_rejects_nearby_face_value_and_price_band(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "확정 공모가 관련 표에는 액면가 500원, 희망 공모가 12,000원 ~ 15,000원 및 "
+            "총공모금액 100억원이 있습니다.",
+            "20250101000006",
+        )
+
+        self.assertIsNone(parsed["offering_price"])
+        self.assertEqual(parsed["offering_price_review_status"], "missing")
+
+    def test_dart_offering_parser_accepts_confirmed_price_in_same_table_row(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "<table><tr><th>확정 공모가</th><td>20,000원</td></tr>"
+            "<tr><th>액면가</th><td>500원</td></tr></table>",
+            "20250101000007",
+        )
+
+        self.assertEqual(parsed["offering_price"], 20_000)
+        self.assertEqual(parsed["offering_price_parse_method"], "final_price_table_row")
+
     def test_dart_offering_parser_quarantines_number_without_currency_unit(self):
         parsed = DARTCollector(api_key="test")._parse_offering_html(
             "확정 공모가 4 제 1 호", "20250101000003"

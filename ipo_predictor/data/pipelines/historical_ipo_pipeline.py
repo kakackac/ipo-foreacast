@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 MAX_FILING_TO_LISTING_DAYS = 400
 STRUCTURED_PRICE_CHECK_VERSION = 3
+OFFERING_PRICE_PARSER_VERSION = 2
 
 
 class HistoricalIPOPipeline:
@@ -251,7 +252,11 @@ class HistoricalIPOPipeline:
             cached = cached_by_receipt.get(str(filing.rcept_no))
             # 구조화 slprc 대조가 끝난 행만 재사용한다. 이전 버전의 캐시는
             # 이번 한 번 다시 검사해 공모가 검증 근거를 보완한다.
-            if cached is not None and cached.get("structured_price_check_version") == STRUCTURED_PRICE_CHECK_VERSION:
+            if (
+                cached is not None
+                and cached.get("structured_price_check_version") == STRUCTURED_PRICE_CHECK_VERSION
+                and cached.get("offering_price_parser_version") == OFFERING_PRICE_PARSER_VERSION
+            ):
                 records.append(cached)
                 continue
             if str(filing.rcept_no) in set(self._document_failures.get("rcept_no", pd.Series(dtype=str)).astype(str)):
@@ -291,6 +296,7 @@ class HistoricalIPOPipeline:
                 structured_record_count=len(structured_prices),
             )
             offering["structured_price_check_version"] = STRUCTURED_PRICE_CHECK_VERSION
+            offering["offering_price_parser_version"] = OFFERING_PRICE_PARSER_VERSION
 
             demand_rcept_no = None
             demand = {}
@@ -468,6 +474,7 @@ class HistoricalIPOPipeline:
             "filing_candidate_count", "demand_rcept_no", "offering_price",
             "offering_price_extracted_amount", "offering_price_review_status",
             "offering_price_finality", "offering_price_parse_method", "offering_price_range_warning",
+            "offering_price_parser_version",
             "offering_price_audit_context", "price_band_low", "price_band_high",
             "price_band_check", "dart_structured_offering_price", "dart_structured_security_type",
             "structured_price_check", "structured_price_record_count", "structured_price_check_version",
