@@ -36,6 +36,15 @@ logger = logging.getLogger("pipeline")
 ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
+MIN_GENERAL_IPO_TARGET_ROWS = 100
+MIN_GENERAL_IPO_YEARS = 3
+MIN_GENERAL_IPOS_PER_YEAR = 5
+MIN_CORE_FEATURE_COMPLETENESS = 0.70
+
+
+class TrainingReadinessError(RuntimeError):
+    """공식 일반 IPO 학습의 최소 데이터 품질 기준이 충족되지 않았을 때 발생한다."""
+
 
 # ── 파이프라인 스텝 ───────────────────────────────────────────
 
@@ -71,12 +80,91 @@ def step_feature_selection(df, phase: str = "core"):
         feat_cols = get_phase2_feature_names()
 
     available = [c for c in feat_cols if c in df.columns]
+    missing_indicators = [f"{column}__missing" for column in available if f"{column}__missing" in df.columns]
+    available = available + missing_indicators
     missing   = [c for c in feat_cols if c not in df.columns]
 
     if missing:
         logger.warning("누락 피처 %d개: %s", len(missing), missing[:5])
     logger.info("사용 피처: %d개 (요청 %d개 중)", len(available), len(feat_cols))
     return available
+
+
+def assess_training_readiness(df: pd.DataFrame, phase: str = "core") -> dict:
+    """일반 IPO만 대상으로 학습 가능 여부와 미달 사유를 계산한다."""
+    from features.definitions import get_core_feature_names
+
+    report: dict[str, object] = {
+        "eligible": False,
+        "reasons": [],
+        "minimum_general_ipo_target_rows": MIN_GENERAL_IPO_TARGET_ROWS,
+        "minimum_years": MIN_GENERAL_IPO_YEARS,
+        "minimum_per_year": MIN_GENERAL_IPOS_PER_YEAR,
+        "minimum_core_feature_completeness": MIN_CORE_FEATURE_COMPLETENESS,
+    }
+    if "event_class" not in df.columns:
+        report["reasons"].append("공식 이벤트 분류(event_class)가 없는 이전 피처 파일입니다.")
+        return report
+    general = df[df["event_class"].eq("general_ipo")].copy()
+    report["general_ipo_rows"] = int(len(general))
+    verified = step_filter_unreviewed_offering_prices(general)
+    report["verified_general_ipo_rows"] = int(len(verified))
+    target_mask = verified.get("open_return_pct", pd.Series(dtype=float)).notna() & verified.get(
+        "close_return_pct", pd.Series(dtype=float)
+    ).notna()
+    candidates = verified.loc[target_mask].copy()
+    report["general_ipo_dual_target_rows"] = int(len(candidates))
+    if len(candidates) < MIN_GENERAL_IPO_TARGET_ROWS:
+        report["reasons"].append(
+            f"일반 IPO의 검증된 시초가·종가 타깃이 {len(candidates)}건으로 최소 {MIN_GENERAL_IPO_TARGET_ROWS}건에 미달합니다."
+        )
+    if "listing_date" not in candidates.columns:
+        report["reasons"].append("상장일이 없어 시간 분할을 검증할 수 없습니다.")
+        return report
+    candidates["listing_date"] = pd.to_datetime(candidates["listing_date"], errors="coerce")
+    yearly = candidates.dropna(subset=["listing_date"]).groupby(candidates["listing_date"].dt.year).size()
+    report["yearly_general_ipo_targets"] = {str(year): int(count) for year, count in yearly.items()}
+    eligible_years = int((yearly >= MIN_GENERAL_IPOS_PER_YEAR).sum())
+    report["years_meeting_minimum"] = eligible_years
+    if eligible_years < MIN_GENERAL_IPO_YEARS:
+        report["reasons"].append(
+            f"연도별 {MIN_GENERAL_IPOS_PER_YEAR}건 이상인 일반 IPO 타깃 연도가 {eligible_years}개뿐입니다."
+        )
+    core_features = [feature for feature in get_core_feature_names() if feature in candidates.columns]
+    if len(core_features) != len(get_core_feature_names()):
+        report["reasons"].append("핵심 피처 열이 완전하지 않습니다.")
+        report["core_feature_completeness"] = 0.0
+    else:
+        completeness = candidates[core_features].notna().mean()
+        report["core_feature_completeness_by_feature"] = {
+            feature: round(float(rate), 4) for feature, rate in completeness.items()
+        }
+        report["core_feature_completeness"] = round(float(completeness.mean()), 4)
+        if float(completeness.mean()) < MIN_CORE_FEATURE_COMPLETENESS:
+            report["reasons"].append(
+                f"핵심 피처 평균 충족률이 {float(completeness.mean()):.1%}로 최소 {MIN_CORE_FEATURE_COMPLETENESS:.0%}에 미달합니다."
+            )
+    if "feature_available_at" not in candidates.columns:
+        report["reasons"].append("피처 공개시각이 없어 미래 정보 누출을 검증할 수 없습니다.")
+    else:
+        available_at = pd.to_datetime(candidates["feature_available_at"], errors="coerce")
+        violations = available_at.notna() & candidates["listing_date"].notna() & (available_at > candidates["listing_date"])
+        report["future_information_violations"] = int(violations.sum())
+        if violations.any():
+            report["reasons"].append(f"상장일 이후에 공개된 피처 행이 {int(violations.sum())}건 있습니다.")
+    report["eligible"] = not report["reasons"]
+    return report
+
+
+def require_training_ready(df: pd.DataFrame, phase: str = "core") -> pd.DataFrame:
+    """학습 안전장치를 적용하고, 통과한 일반 IPO 행만 반환한다."""
+    report = assess_training_readiness(df, phase=phase)
+    if not report["eligible"]:
+        details = " | ".join(report["reasons"])
+        raise TrainingReadinessError(f"학습·성능평가 차단: {details}")
+    return step_filter_unreviewed_offering_prices(
+        df[df["event_class"].eq("general_ipo")].copy()
+    ).reset_index(drop=True)
 
 
 def step_filter_unreviewed_offering_prices(df):
@@ -125,13 +213,18 @@ def step_train_final_model(df, feature_cols, target_col: str, model_name: str):
     df_clean = df[valid].reset_index(drop=True)
 
     available = [c for c in feature_cols if c in df_clean.columns]
-    X = df_clean[available].fillna(0)
-    y = df_clean[target_col]
-
     # 최근 15%를 Conformal 보정셋으로 분리
-    cal_size = max(10, int(len(X) * 0.15))
-    X_tr, X_cal = X.iloc[:-cal_size], X.iloc[-cal_size:]
+    cal_size = max(10, int(len(df_clean) * 0.15))
+    X = df_clean[available]
+    y = df_clean[target_col]
+    X_tr, X_cal = X.iloc[:-cal_size].copy(), X.iloc[-cal_size:].copy()
     y_tr, y_cal = y.iloc[:-cal_size], y.iloc[-cal_size:]
+    fill_values = X_tr.median(numeric_only=True)
+    if fill_values.isna().any():
+        missing = fill_values[fill_values.isna()].index.tolist()
+        raise TrainingReadinessError(f"훈련 구간에서 전부 결측인 피처가 있습니다: {missing}")
+    X_tr = X_tr.fillna(fill_values)
+    X_cal = X_cal.fillna(fill_values)
 
     model = IPOPriceModel(n_estimators=300, max_depth=5)
     model.fit(X_tr, y_tr, X_cal, y_cal)
@@ -263,7 +356,7 @@ def run_train(phase: str = "core"):
 
     logger.info("════ IPO 예측 파이프라인 — 학습 모드 (%s) ════", phase)
     df           = step_load_or_build_data(demo=False, phase=phase)
-    df           = step_filter_unreviewed_offering_prices(df)
+    df           = require_training_ready(df, phase=phase)
     feature_cols = step_feature_selection(df, phase=phase)
     results = {}
     model_names = {
@@ -283,7 +376,7 @@ def run_backtest(phase: str = "core"):
     """실제 데이터로 백테스트만 실행"""
     logger.info("════ IPO 예측 파이프라인 — 백테스트 모드 (%s) ════", phase)
     df           = step_load_or_build_data(demo=False, phase=phase)
-    df           = step_filter_unreviewed_offering_prices(df)
+    df           = require_training_ready(df, phase=phase)
     feature_cols = step_feature_selection(df, phase=phase)
     results = {}
     for target_col in ["open_return_pct", "close_return_pct"]:
@@ -324,15 +417,42 @@ def run_collect(start_year: int, end_year: int, phase: str = "phase2"):
     return summary
 
 
+def run_collect_events(start_year: int, end_year: int, force_refresh: bool = False):
+    """DART·가격 API 없이 KRX 공식 신규상장 이벤트 마스터만 갱신한다."""
+    from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline
+
+    logger.info("════ KRX 공식 신규상장 이벤트 수집 (%d~%d) ════", start_year, end_year)
+    calendar, manifest = HistoricalIPOPipeline().collect_official_event_master(
+        start_year, end_year, force_refresh=force_refresh
+    )
+    logger.info("공식 이벤트 저장 완료 | %d건 | 실행 매니페스트 %s", len(calendar), manifest["path"])
+    return calendar, manifest
+
+
+def run_audit_dart_failures():
+    """저장된 DART 원문 실패를 접수번호별로 다시 감사한다."""
+    from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline
+
+    audit = HistoricalIPOPipeline().audit_document_failures()
+    counts = audit["failure_classification"].value_counts(dropna=False).to_dict() if not audit.empty else {}
+    logger.info("DART 원문 실패 재감사 완료 | %d행 | %s", len(audit), counts)
+    return audit
+
+
 if __name__ == "__main__":
     import pandas as pd
 
     parser = argparse.ArgumentParser(description="IPO 예측 파이프라인")
     parser.add_argument(
         "--mode",
-        choices=["train", "backtest", "analyze", "demo", "collect"],
+        choices=["train", "backtest", "analyze", "demo", "collect", "collect-events", "audit-dart-failures"],
         default="demo",
         help="실행 모드",
+    )
+    parser.add_argument(
+        "--refresh-events",
+        action="store_true",
+        help="KRX 공식 이벤트 캐시를 무시하고 요청 기간을 다시 수집",
     )
     parser.add_argument(
         "--phase",
@@ -362,6 +482,18 @@ if __name__ == "__main__":
             run_collect(args.start_year, args.end_year, phase=args.phase)
         except RuntimeError as exc:
             logger.error("실제 데이터 수집 중단: %s", exc)
+            sys.exit(2)
+    elif args.mode == "collect-events":
+        try:
+            run_collect_events(args.start_year, args.end_year, force_refresh=args.refresh_events)
+        except RuntimeError as exc:
+            logger.error("KRX 공식 이벤트 수집 중단: %s", exc)
+            sys.exit(2)
+    elif args.mode == "audit-dart-failures":
+        try:
+            run_audit_dart_failures()
+        except RuntimeError as exc:
+            logger.error("DART 원문 실패 재감사 중단: %s", exc)
             sys.exit(2)
     else:
         logger.error("지원하지 않는 모드: %s", args.mode)

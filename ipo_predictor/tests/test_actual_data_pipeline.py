@@ -69,6 +69,27 @@ class _FakeDART:
 
 
 class _FakeKRX:
+    official_listing_requests = []
+
+    def get_official_listing_events(self, start_date, end_date):
+        if not start_date.startswith("2024"):
+            return pd.DataFrame()
+        return pd.DataFrame([{
+            "event_id": "krx_kind|123456|20240510|테스트",
+            "ticker": "123456", "krx_standard_code": None, "corp_name": "테스트㈜",
+            "listing_date": pd.Timestamp("2024-05-10"), "market": "KOSDAQ",
+            "security_type": "주권", "stock_type": None, "listing_type": "신규상장",
+            "offering_price": 12000, "offering_shares": 1_000_000,
+            "lead_underwriter": "테스트증권", "industry_name": "소프트웨어",
+            "industry_code": None, "country": "대한민국", "face_value": 500,
+            "offering_amount": 12_000_000, "event_class": "general_ipo",
+            "classification_reason": "test", "classification_confidence": "high",
+            "classification_review_required": False, "source_name": "KRX_KIND_new_listing_company",
+            "source_url": "https://kind.krx.co.kr", "source_request_id": "test",
+            "collected_at": pd.Timestamp("2024-05-01", tz="Asia/Seoul"),
+            "verification_status": "official_source", "listing_segment": None,
+        }])
+
     def get_ipo_calendar(self, start_date, end_date):
         if not start_date.startswith("2024"):
             return pd.DataFrame()
@@ -165,6 +186,8 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertAlmostEqual(features.loc[0, "open_return_pct"], 50.0)
             self.assertAlmostEqual(features.loc[0, "close_return_pct"], 25.0)
             self.assertTrue((root / "raw" / "dart_ipo_raw.parquet").exists())
+            self.assertTrue((root / "processed" / "feature_observations.parquet").exists())
+            self.assertTrue((root / "processed" / "feature_time_validation.parquet").exists())
             audit = pd.read_parquet(root / "raw" / "dart_offering_price_audit.parquet")
             review_queue = pd.read_parquet(root / "raw" / "dart_offering_price_review_queue.parquet")
             self.assertIn("offering_price_review_status", audit.columns)
@@ -172,6 +195,62 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertIn("filing_is_correction", audit.columns)
             self.assertEqual(len(review_queue), 0)
             self.assertTrue((root / "processed" / "data_collection_summary.json").exists())
+
+            observations = pd.read_parquet(root / "processed" / "feature_observations.parquet")
+            retail = observations[observations["feature_name"] == "retail_subscription_ratio"].iloc[0]
+            self.assertTrue(retail["is_missing"])
+            self.assertEqual(retail["missing_reason"], "official_underwriter_notice_not_collected")
+            self.assertTrue(retail["human_review_required"])
+
+    def test_document_014_tries_another_receipt_in_the_same_lineage(self):
+        class FallbackDART(_FakeDART):
+            def get_ipo_disclosure_list(self, start_date, end_date):
+                return pd.DataFrame([
+                    {
+                        "corp_code": "12345678", "corp_name": "테스트(주)",
+                        "rcept_no": "20240101000002", "rcept_dt": pd.Timestamp("2024-02-01"),
+                        "report_nm": "[발행조건확정]증권신고서(지분증권)",
+                    },
+                    {
+                        "corp_code": "12345678", "corp_name": "테스트(주)",
+                        "rcept_no": "20240101000001", "rcept_dt": pd.Timestamp("2024-01-01"),
+                        "report_nm": "증권신고서(지분증권)",
+                    },
+                ])
+
+            def get_offering_info(self, rcept_no):
+                if rcept_no == "20240101000002":
+                    raise RuntimeError("DART 원문 ZIP 응답이 아닙니다: <status>014</status>")
+                return super().get_offering_info(rcept_no)
+
+            def get_equity_offering_prices(self, corp_code, start_date, end_date):
+                return []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            HistoricalIPOPipeline(
+                dart_collector=FallbackDART(),
+                krx_collector=_FakeKRX(),
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+            ).run(2024, 2024, feature_set="phase2")
+
+            audit = pd.read_parquet(root / "raw" / "dart_document_failure_audit.parquet")
+            raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
+            self.assertIn("zip_file_missing_retry_required", set(audit["failure_classification"]))
+            self.assertEqual(raw.loc[0, "rcept_no"], "20240101000001")
+
+    def test_feature_time_audit_blocks_post_listing_feature(self):
+        features = pd.DataFrame({
+            "event_id": ["a", "b"],
+            "corp_name": ["전", "후"],
+            "listing_date": ["2024-01-10", "2024-01-10"],
+            "feature_available_at": ["2024-01-09", "2024-01-11"],
+        })
+        audit = HistoricalIPOPipeline._build_feature_time_audit(features)
+
+        self.assertEqual(audit["is_future_information"].tolist(), [False, True])
+        self.assertEqual(audit.loc[1, "time_validation_status"], "future_information_blocked")
 
     def test_manual_price_override_promotes_audited_record_for_training(self):
         with tempfile.TemporaryDirectory() as temp_dir:

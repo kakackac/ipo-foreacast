@@ -223,17 +223,22 @@ class WalkForwardBacktester:
             y_train = train_df[target_col]
             y_val   = val_df[target_col]
 
-            # 결측값 처리 (학습셋 중앙값으로)
-            fill_vals = X_train.median()
-            X_train = X_train.fillna(fill_vals)
-            X_val   = X_val.fillna(fill_vals)
-
             # 학습셋의 20%를 Conformal 보정셋으로 분리
             cal_size = max(5, int(len(X_train) * 0.15))
-            X_cal   = X_train.iloc[-cal_size:]
+            X_cal   = X_train.iloc[-cal_size:].copy()
             y_cal   = y_train.iloc[-cal_size:]
-            X_tr    = X_train.iloc[:-cal_size]
+            X_tr    = X_train.iloc[:-cal_size].copy()
             y_tr    = y_train.iloc[:-cal_size]
+
+            # 결측값 보정 통계는 검증·보정셋보다 앞선 순수 훈련 구간에서만
+            # 계산한다. 값이 전부 비어 있는 피처는 모델에 넘기지 않는다.
+            fill_vals = X_tr.median(numeric_only=True)
+            empty_features = fill_vals[fill_vals.isna()].index.tolist()
+            if empty_features:
+                raise ValueError(f"훈련 구간 전체 결측 피처: {empty_features}")
+            X_tr = X_tr.fillna(fill_vals)
+            X_cal = X_cal.fillna(fill_vals)
+            X_val = X_val.fillna(fill_vals)
 
             model = IPOPriceModel(**model_kwargs)
             model.fit(X_tr, y_tr, X_cal, y_cal)

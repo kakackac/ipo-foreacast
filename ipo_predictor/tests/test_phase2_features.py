@@ -7,6 +7,7 @@ import pandas as pd
 from data.collectors.dart_collector import DARTCollector
 from data.processors.feature_engineer import FeatureEngineer, build_demo_dataset
 from features.definitions import get_phase2_feature_names
+from pipeline import assess_training_readiness
 import models.baseline.gradient_boost_model as gradient_boost_model
 from models.baseline.gradient_boost_model import IPOPriceModel
 
@@ -39,6 +40,39 @@ class Phase2FeatureTests(unittest.TestCase):
 
         self.assertAlmostEqual(result.loc[0, "open_return_pct"], 20.0)
         self.assertAlmostEqual(result.loc[0, "close_return_pct"], 10.0)
+
+    def test_missing_band_and_supply_values_are_not_changed_to_zero(self):
+        engineer = FeatureEngineer(feature_set="phase2")
+        base = pd.DataFrame({
+            "offering_price": [None],
+            "price_band_low": [None],
+            "price_band_high": [None],
+            "new_shares": [None],
+            "secondary_shares": [None],
+            "total_post_listing_shares": [None],
+        })
+        result = engineer._calc_band_position(base.copy())
+        result = engineer._calc_supply_structure_features(result)
+
+        self.assertTrue(pd.isna(result.loc[0, "offering_price_band_position"]))
+        self.assertTrue(pd.isna(result.loc[0, "band_exceeded"]))
+        self.assertTrue(pd.isna(result.loc[0, "secondary_offering_ratio"]))
+        self.assertTrue(pd.isna(result.loc[0, "float_share_ratio"]))
+
+    def test_training_readiness_rejects_small_general_ipo_population(self):
+        df = pd.DataFrame({
+            "event_class": ["general_ipo"] * 46,
+            "offering_price_review_status": ["verified_currency_unit"] * 46,
+            "listing_date": pd.date_range("2024-01-01", periods=46, freq="7D"),
+            "feature_available_at": pd.date_range("2023-12-01", periods=46, freq="7D"),
+            "open_return_pct": [1.0] * 46,
+            "close_return_pct": [1.0] * 46,
+        })
+        readiness = assess_training_readiness(df, phase="phase2")
+
+        self.assertFalse(readiness["eligible"])
+        self.assertEqual(readiness["general_ipo_dual_target_rows"], 46)
+        self.assertTrue(any("최소 100건" in reason for reason in readiness["reasons"]))
 
     def test_merge_excludes_market_transfer_with_different_listing_date(self):
         dart = pd.DataFrame({

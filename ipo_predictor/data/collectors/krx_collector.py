@@ -8,6 +8,7 @@ import logging
 import re
 import time
 from datetime import date, datetime, timedelta
+from io import StringIO
 from typing import Any, Optional
 
 import pandas as pd
@@ -22,6 +23,10 @@ MAX_RETRIES = 4
 RETRY_BACKOFF_SECONDS = 1.0
 # KRX 일반 인증키의 일일 호출 한도보다 여유를 두고 중단한다.
 MAX_REQUESTS_PER_RUN = 8_000
+KIND_LISTING_URL = "https://kind.krx.co.kr/listinvstg/listingcompany.do"
+KIND_LISTING_PAGE_URL = (
+    "https://kind.krx.co.kr/listinvstg/listingcompany.do?method=searchListingTypeMain"
+)
 
 MARKETS = {
     "KOSPI": {
@@ -54,6 +59,7 @@ class KRXCollector:
         self.session = session or requests.Session()
         self.request_delay = request_delay
         self.request_count = 0
+        self.official_listing_requests: list[dict[str, Any]] = []
 
     @property
     def is_configured(self) -> bool:
@@ -210,13 +216,13 @@ class KRXCollector:
         index_code = "1" if index.upper() == "KOSPI" else "2"
         frame = self.get_index_ohlcv(index_code, self._as_bas_dd(start), self._as_bas_dd(end))
         if frame.empty:
-            return {f"{index.lower()}_momentum_{window}d": 0.0 for window in windows}
+            return {f"{index.lower()}_momentum_{window}d": None for window in windows}
 
         closes = frame["close"].to_numpy()
         result = {}
         for window in windows:
             result[f"{index.lower()}_momentum_{window}d"] = (
-                round(closes[-1] / closes[-1 - window] - 1, 6) if len(closes) > window else 0.0
+                round(closes[-1] / closes[-1 - window] - 1, 6) if len(closes) > window else None
             )
         return result
 
@@ -300,12 +306,12 @@ class KRXCollector:
             "volume": self._to_number(row.get("ACC_TRDVOL")),
         }
 
-    def get_ipo_calendar(self, start_date: str, end_date: str) -> pd.DataFrame:
-        """기간 내 신규 상장 종목을 KRX 종목기본정보에서 찾는다.
+    def get_legacy_list_dd_candidates(self, start_date: str, end_date: str) -> pd.DataFrame:
+        """종목기본정보 ``LIST_DD`` 기반의 이전 후보 목록을 반환한다.
 
-        이 API는 기준일 시점의 상장 종목을 돌려준다. 따라서 파이프라인은
-        연도별 마지막 유효 기준일을 조회하고 ``LIST_DD``로 해당 연도 IPO를
-        추린 뒤, DART 증권신고서와 정합해 비공모 상장을 제거한다.
+        이것은 공식 IPO 모집단이 아니다. 기준일 시점 상장 종목만 포함하므로
+        상장폐지 이력 누락 가능성이 있다. 새 이벤트 마스터와의 행 단위 비교를
+        위한 ``legacy_list_dd_candidate`` 원천으로만 보존한다.
         """
         start = pd.Timestamp(start_date)
         end = min(pd.Timestamp(end_date), pd.Timestamp.today().normalize())
@@ -340,11 +346,180 @@ class KRXCollector:
 
         counts = frame.groupby("listing_date").size().rename("same_day_ipo_count")
         frame = frame.merge(counts, on="listing_date", how="left")
-        columns = ["ticker", "isu_cd", "corp_name", "listing_date", "market", "sector", "same_day_ipo_count"]
+        frame["legacy_source"] = "krx_openapi_issue_master_list_dd"
+        frame["legacy_candidate_type"] = "legacy_list_dd_candidate"
+        columns = [
+            "ticker", "isu_cd", "corp_name", "listing_date", "market", "sector",
+            "same_day_ipo_count", "legacy_source", "legacy_candidate_type",
+        ]
         return frame.reindex(columns=columns).drop_duplicates(["ticker", "listing_date"]).reset_index(drop=True)
 
-    def get_sector_info(self, ticker: str, as_of_date: str | None = None) -> dict[str, Any]:
-        """현재 또는 지정 기준일의 종목 업종 정보를 반환한다."""
+    # 이전 호출부와의 호환성은 유지하되, 파이프라인은 이 메서드를 사용하지 않는다.
+    def get_ipo_calendar(self, start_date: str, end_date: str) -> pd.DataFrame:
+        return self.get_legacy_list_dd_candidates(start_date, end_date)
+
+    @staticmethod
+    def _kind_text(value: object) -> str | None:
+        if value is None or pd.isna(value):
+            return None
+        text = re.sub(r"\s+", " ", str(value)).strip()
+        return text if text and text not in {"-", "nan", "None"} else None
+
+    @classmethod
+    def _classify_official_listing_event(cls, row: pd.Series) -> dict[str, str | bool]:
+        """KIND의 공식 상장유형·증권구분을 우선해 보수적으로 분류한다."""
+        name = cls._kind_text(row.get("corp_name")) or ""
+        listing_type = cls._kind_text(row.get("listing_type")) or ""
+        security_type = cls._kind_text(row.get("security_type")) or ""
+        stock_type = cls._kind_text(row.get("stock_type")) or ""
+        country = cls._kind_text(row.get("country")) or ""
+        normalized = re.sub(r"\s+", "", name).upper()
+        security_text = " ".join([security_type, stock_type]).upper()
+
+        def result(category: str, reason: str, confidence: str, review: bool = False) -> dict[str, str | bool]:
+            return {
+                "event_class": category,
+                "classification_reason": reason,
+                "classification_confidence": confidence,
+                "classification_review_required": review,
+            }
+
+        if "재상장" in listing_type:
+            return result("relisting", f"KIND 상장유형={listing_type}", "high")
+        if "이전상장" in listing_type:
+            # KIND 공개 목록은 이전 시장을 항상 주지 않으므로 KONEX 여부를 추측하지 않는다.
+            return result("unclassified_review", "KIND 이전상장; 이전 시장 미확인", "medium", True)
+        if any(token in security_text for token in ("ETF", "ETN", "수익증권", "펀드", "ELW")):
+            return result("ineligible_product", f"KIND 증권구분/주식종류={security_text}", "high")
+        # '메리츠'처럼 '리츠'를 포함하는 일반·스팩 종목을 리츠로 오인하지 않도록
+        # 스팩 판정을 리츠 문자열보다 먼저 한다.
+        if "스팩" in name or "SPAC" in normalized:
+            return result("spac_ipo", "종목명 스팩/SPAC 단서", "high")
+        if "리츠" in normalized or "REIT" in normalized or "부동산투자회사" in security_text:
+            return result("ineligible_product", "리츠·부동산투자회사", "high")
+        if re.search(r"(?:우|우B|우C|우선)$", normalized) or "우선" in stock_type:
+            return result("preferred_or_class_share", "종목명 또는 주식종류의 우선·종류주 단서", "medium", True)
+        if country and country not in {"대한민국", "국내"}:
+            return result("foreign_listing", f"KIND 국적={country}", "high")
+        if listing_type == "신규상장" and security_type in {"주권", "일반주권", ""}:
+            return result("general_ipo", "KIND 신규상장·주권; 추가 공시 정합 대기", "medium", True)
+        return result("unclassified_review", "공식 분류 필드가 부족하거나 규칙 미포함", "low", True)
+
+    @staticmethod
+    def _kind_column(frame: pd.DataFrame, *candidates: str) -> pd.Series:
+        for candidate in candidates:
+            if candidate in frame.columns:
+                return frame[candidate]
+        return pd.Series([None] * len(frame), index=frame.index)
+
+    def get_official_listing_events(self, start_date: str, end_date: str) -> pd.DataFrame:
+        """KIND 공식 신규상장기업현황을 이벤트 마스터 원천으로 수집한다.
+
+        KIND는 KRX가 운영하는 공식 상장공시 채널이다. 이 공개 결과는
+        상장유형·증권구분·업종·국적·상장주선인을 제공하며, 종목기본정보의
+        현재 스냅샷을 과거 IPO 모집단으로 쓰는 문제를 피한다.
+        """
+        start = pd.Timestamp(start_date).normalize()
+        end = min(pd.Timestamp(end_date).normalize(), pd.Timestamp.today().normalize())
+        columns = [
+            "event_id", "ticker", "krx_standard_code", "corp_name", "market", "listing_date",
+            "security_type", "stock_type", "listing_type", "offering_price", "offering_shares",
+            "lead_underwriter", "industry_name", "industry_code", "country", "face_value",
+            "offering_amount", "event_class", "classification_reason", "classification_confidence",
+            "classification_review_required", "source_name", "source_url", "source_request_id",
+            "collected_at", "verification_status", "listing_segment",
+        ]
+        if start > end:
+            return pd.DataFrame(columns=columns)
+
+        payload = {
+            "method": "searchListingTypeSub",
+            "forward": "listingtype_down",
+            "currentPageSize": "3000",
+            "pageIndex": "1",
+            "marketType": "",
+            "country": "",
+            "industry": "",
+            "listTypeArrStr": "01|02|03|04|05",
+            "secuGrpArrStr": "ST|FS|MF|SC|RT|IF|DR",
+            "choicTypeArrStr": "01|02|03|05",
+            "fromDate": start.strftime("%Y-%m-%d"),
+            "toDate": end.strftime("%Y-%m-%d"),
+        }
+        request_id = f"kind_listing_{start:%Y%m%d}_{end:%Y%m%d}"
+        attempt = {
+            "request_id": request_id,
+            "source": "KIND_official_listing_company",
+            "start_date": start.isoformat(),
+            "end_date": end.isoformat(),
+            "cache_used": False,
+            "status": "started",
+            "response_rows": 0,
+        }
+        try:
+            response = self.session.post(KIND_LISTING_URL, data=payload, timeout=30)
+            response.raise_for_status()
+            html = response.content.decode("euc-kr", errors="replace")
+            tables = pd.read_html(StringIO(html))
+            table = next((item for item in tables if "회사명" in item.columns and "상장일" in item.columns), None)
+            if table is None:
+                raise RuntimeError("KIND 신규상장 결과 표를 찾지 못했습니다.")
+            frame = table.copy()
+            result = pd.DataFrame({
+                "corp_name": self._kind_column(frame, "회사명").map(self._kind_text),
+                "ticker": self._kind_column(frame, "종목코드").map(self._kind_text),
+                "listing_date": pd.to_datetime(self._kind_column(frame, "상장일"), errors="coerce"),
+                "listing_type": self._kind_column(frame, "상장유형").map(self._kind_text),
+                "security_type": self._kind_column(frame, "증권구분").map(self._kind_text),
+                "stock_type": self._kind_column(frame, "주식종류").map(self._kind_text),
+                "industry_name": self._kind_column(frame, "업종", "업종명").map(self._kind_text),
+                "country": self._kind_column(frame, "국적").map(self._kind_text),
+                "lead_underwriter": self._kind_column(
+                    frame,
+                    "상장주선인/지정자문인",
+                    "상장주선인/ 지정자문인",
+                    "상장주선인(지정자문인)",
+                    "상장주선인",
+                ).map(self._kind_text),
+                "face_value": self._kind_column(frame, "액면가 (원)", "최초 액면가").map(self._to_number),
+                "offering_price": self._kind_column(frame, "공모가 (원)", "공모가").map(self._to_number),
+                "offering_amount": self._kind_column(frame, "공모금액 (천원)", "공모금액").map(self._to_number),
+                "offering_shares": self._kind_column(frame, "최초상장주식수 (주)", "공모주식수").map(self._to_number),
+            })
+            result = result.dropna(subset=["corp_name", "listing_date"]).copy()
+            result["ticker"] = result["ticker"].fillna("").astype(str).str.strip()
+            result["krx_standard_code"] = None
+            result["market"] = None
+            result["industry_code"] = None
+            result["listing_segment"] = None
+            classified = result.apply(self._classify_official_listing_event, axis=1, result_type="expand")
+            result = pd.concat([result, classified], axis=1)
+            result["source_name"] = "KRX_KIND_new_listing_company"
+            result["source_url"] = KIND_LISTING_PAGE_URL
+            result["source_request_id"] = request_id
+            result["collected_at"] = pd.Timestamp.now(tz="Asia/Seoul")
+            result["verification_status"] = "official_source_pending_krx_code_enrichment"
+            result["event_id"] = (
+                "krx_kind|" + result["ticker"].fillna("") + "|" +
+                result["listing_date"].dt.strftime("%Y%m%d") + "|" + result["corp_name"].fillna("")
+            )
+            result = result.drop_duplicates("event_id", keep="last").sort_values("listing_date")
+            attempt.update(status="success", response_rows=int(len(result)))
+            return result.reindex(columns=columns).reset_index(drop=True)
+        except (requests.RequestException, ValueError, RuntimeError) as exc:
+            attempt.update(status="failed", error_type=type(exc).__name__, error_message=str(exc)[:500])
+            raise RuntimeError(f"KIND 공식 신규상장 수집 실패 ({start:%Y-%m-%d}~{end:%Y-%m-%d}): {exc}") from exc
+        finally:
+            attempt["finished_at"] = pd.Timestamp.now(tz="Asia/Seoul").isoformat()
+            self.official_listing_requests.append(attempt)
+
+    def get_listing_segment_info(self, ticker: str, as_of_date: str | None = None) -> dict[str, Any]:
+        """종목기본정보의 소속부 값을 반환한다.
+
+        ``SECT_TP_*``는 실제 산업 분류가 아니라 코스닥 소속부 성격의 값이므로
+        ``industry_*`` 필드로 사용하지 않는다. 산업명은 KIND 신규상장 원천의
+        별도 ``업종`` 열에서 보존한다.
+        """
         bas_dd = self._as_bas_dd(as_of_date or date.today())
         normalized_ticker = self._normalise_ticker(ticker)
         for market, metadata in MARKETS.items():
@@ -353,10 +528,14 @@ class KRXCollector:
                     return {
                         "ticker": ticker,
                         "market": market,
-                        "sector_code": row.get("SECT_TP_CD"),
-                        "sector_name": row.get("SECT_TP_NM"),
+                        "listing_segment_code": row.get("SECT_TP_CD"),
+                        "listing_segment": row.get("SECT_TP_NM"),
                     }
-        return {"ticker": ticker, "sector_code": None, "sector_name": None}
+        return {"ticker": ticker, "listing_segment_code": None, "listing_segment": None}
+
+    # 외부 호출 호환성만 유지한다. 새 파이프라인은 이 값을 산업으로 해석하지 않는다.
+    def get_sector_info(self, ticker: str, as_of_date: str | None = None) -> dict[str, Any]:
+        return self.get_listing_segment_info(ticker, as_of_date)
 
     # ── 저장용 편의 메서드 ──────────────────────────────────────
 

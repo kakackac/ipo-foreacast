@@ -14,6 +14,13 @@ def _response(payload):
     return response
 
 
+def _html_response(content: str):
+    response = Mock()
+    response.content = content.encode("euc-kr")
+    response.raise_for_status.return_value = None
+    return response
+
+
 class KRXOpenAPICollectorTests(unittest.TestCase):
     def test_listing_price_uses_auth_header_and_full_issue_code(self):
         session = Mock()
@@ -67,6 +74,32 @@ class KRXOpenAPICollectorTests(unittest.TestCase):
         self.assertEqual(set(calendar["market"]), {"KOSPI", "KOSDAQ"})
         self.assertTrue((calendar["same_day_ipo_count"] == 2).all())
         self.assertTrue(pd.api.types.is_datetime64_any_dtype(calendar["listing_date"]))
+
+    def test_official_kind_listing_events_include_source_and_conservative_classification(self):
+        session = Mock()
+        session.post.return_value = _html_response("""
+            <table>
+              <tr><th>회사명</th><th>종목코드</th><th>상장일</th><th>상장유형</th>
+                  <th>증권구분</th><th>업종</th><th>국적</th><th>상장주선인/지정자문인</th>
+                  <th>액면가 (원)</th><th>공모가 (원)</th><th>공모금액 (천원)</th><th>최초상장주식수 (주)</th></tr>
+              <tr><td>테스트기업</td><td>123456</td><td>2026-08-24</td><td>신규상장</td>
+                  <td>주권</td><td>소프트웨어 개발 및 공급업</td><td>대한민국</td><td>테스트증권(주)</td>
+                  <td>500</td><td>12000</td><td>1200000</td><td>1000000</td></tr>
+              <tr><td>메리츠제2호스팩</td><td>000001</td><td>2026-08-25</td><td>신규상장</td>
+                  <td>주권</td><td>금융업</td><td>대한민국</td><td>테스트증권(주)</td>
+                  <td>100</td><td>2000</td><td>1000000</td><td>5000000</td></tr>
+            </table>
+        """)
+        collector = KRXCollector(session=session, request_delay=0)
+
+        events = collector.get_official_listing_events("20260101", "20260827")
+
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events.loc[0, "event_class"], "general_ipo")
+        self.assertEqual(events.loc[1, "event_class"], "spac_ipo")
+        self.assertEqual(events.loc[0, "industry_name"], "소프트웨어 개발 및 공급업")
+        self.assertEqual(events.loc[0, "source_name"], "KRX_KIND_new_listing_company")
+        self.assertEqual(collector.official_listing_requests[-1]["status"], "success")
 
     def test_foreign_listing_uses_company_name_after_code_match_fails(self):
         session = Mock()

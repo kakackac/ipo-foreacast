@@ -124,14 +124,23 @@ class FeatureEngineer:
         missing   = [f for f in self.feature_names if f not in df.columns]
         if missing:
             logger.warning("누락된 피처 %d개: %s", len(missing), missing[:5])
+            for feature in missing:
+                df[feature] = np.nan
 
-        result = df[available + [
-            "corp_name", "listing_date", "offering_price",
-            "offering_price_review_status",
-            "open_return_pct", "close_return_pct",
-        ]].copy()
+        identity_columns = [
+            "event_id", "corp_name", "listing_date", "event_class", "industry_name", "listing_segment",
+            "offering_price", "offering_price_review_status", "open_return_pct", "close_return_pct",
+            "rcept_no", "corp_code", "feature_available_at", "event_source_url",
+            "verification_status", "lineage_validation_status",
+        ]
+        for column in identity_columns:
+            if column not in df.columns:
+                df[column] = np.nan
+        result = df[self.feature_names + identity_columns].copy()
+        for feature in self.feature_names:
+            result[f"{feature}__missing"] = result[feature].isna()
         result = result.sort_values("listing_date").reset_index(drop=True)
-        logger.info("피처 빌드 완료: %d행 × %d피처", len(result), len(available))
+        logger.info("피처 빌드 완료: %d행 × %d피처", len(result), len(self.feature_names))
         return result
 
     # ── 병합 ──────────────────────────────────────────────────
@@ -178,9 +187,18 @@ class FeatureEngineer:
         canonical_sources = {
             "corp_name": ["corp_name_krx", "corp_name_dart"],
             "listing_date": ["listing_date_krx", "listing_date", "listing_date_dart"],
+            # KRX 공식 공모가는 DART 원문 승인값을 교차검증하는 보조 원천이다.
+            # 타깃 계산에는 감사 상태가 함께 있는 DART 값을 우선 사용한다.
+            "offering_price": ["offering_price_dart", "offering_price", "offering_price_krx"],
             "ticker": ["ticker", "ticker_krx", "ticker_dart"],
-            "sector_name": ["sector_name", "sector_krx", "sector", "sector_dart"],
+            "event_id": ["event_id_krx", "event_id_dart", "event_id"],
+            "event_class": ["event_class_krx", "event_class_dart", "event_class"],
+            "industry_name": ["industry_name_krx", "industry_name_dart", "industry_name"],
+            "listing_segment": ["listing_segment_krx", "listing_segment_dart", "sector_krx", "sector"],
             "market": ["market", "market_krx", "market_dart"],
+            "event_source_url": ["source_url", "source_url_krx", "event_source_url"],
+            "verification_status": ["verification_status", "verification_status_krx"],
+            "lineage_validation_status": ["lineage_validation_status", "lineage_validation_status_dart"],
             "same_day_ipo_count": ["same_day_ipo_count", "same_day_ipo_count_krx"],
             "open_price": ["open_price", "open_price_krx"],
             "close_price": ["close_price", "close_price_krx"],
@@ -205,15 +223,19 @@ class FeatureEngineer:
         """의무보유확약 가중 점수 계산"""
         for col in ["lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio"]:
             if col not in df.columns:
-                df[col] = 0.0
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).clip(0, 1)
+                df[col] = np.nan
+            df[col] = pd.to_numeric(df[col], errors="coerce").clip(0, 1)
 
-        df["lockup_weighted_score"] = (
-            df["lockup_6m_ratio"]  * 1.00 +
-            df["lockup_3m_ratio"]  * 0.75 +
-            df["lockup_1m_ratio"]  * 0.50 +
-            df["lockup_15d_ratio"] * 0.25
-        )
+        weighted = pd.concat([
+            df["lockup_6m_ratio"] * 1.00,
+            df["lockup_3m_ratio"] * 0.75,
+            df["lockup_1m_ratio"] * 0.50,
+            df["lockup_15d_ratio"] * 0.25,
+        ], axis=1)
+        df["lockup_weighted_score"] = weighted.sum(axis=1, min_count=1)
+        df["lockup_components_missing"] = df[
+            ["lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio"]
+        ].isna().any(axis=1)
         return df
 
     # ── 공모가 밴드 위치 ───────────────────────────────────────
@@ -230,18 +252,28 @@ class FeatureEngineer:
         for col in required:
             if col not in df.columns:
                 df["offering_price_band_position"] = np.nan
-                df["band_exceeded"] = False
+                df["band_exceeded"] = np.nan
                 return df
 
         band_range = df["price_band_high"] - df["price_band_low"]
 
+        valid_band = (
+            (band_range > 0)
+            & df["offering_price"].notna()
+            & df["price_band_low"].notna()
+            & df["price_band_high"].notna()
+        )
         df["offering_price_band_position"] = np.where(
-            band_range > 0,
+            valid_band,
             (df["offering_price"] - df["price_band_low"]) / band_range,
-            0.5  # 밴드 정보 없으면 중간값
+            np.nan,
         )
         df["offering_price_band_position"] = df["offering_price_band_position"].clip(-0.5, 2.0)
-        df["band_exceeded"] = (df["offering_price_band_position"] > 1.0).astype(int)
+        df["band_exceeded"] = np.where(
+            df["offering_price_band_position"].notna(),
+            (df["offering_price_band_position"] > 1.0).astype(float),
+            np.nan,
+        )
         return df
 
     # ── 공모 구조 / 수급 피처 ─────────────────────────────────
@@ -261,10 +293,10 @@ class FeatureEngineer:
         if "secondary_offering_ratio" not in df.columns:
             new_shares = df.get("new_shares", pd.Series(np.nan, index=df.index))
             secondary_shares = df.get("secondary_shares", pd.Series(np.nan, index=df.index))
-            offered_shares = new_shares.fillna(0) + secondary_shares.fillna(0)
+            offered_shares = new_shares + secondary_shares
             df["secondary_offering_ratio"] = np.where(
-                offered_shares > 0,
-                secondary_shares.fillna(0) / offered_shares,
+                new_shares.notna() & secondary_shares.notna() & (offered_shares > 0),
+                secondary_shares / offered_shares,
                 np.nan,
             )
         df["secondary_offering_ratio"] = pd.to_numeric(
@@ -278,10 +310,10 @@ class FeatureEngineer:
             else:
                 new_shares = df.get("new_shares", pd.Series(np.nan, index=df.index))
                 secondary_shares = df.get("secondary_shares", pd.Series(np.nan, index=df.index))
-                float_shares = new_shares.fillna(0) + secondary_shares.fillna(0)
+                float_shares = new_shares + secondary_shares
 
             df["float_share_ratio"] = np.where(
-                total_shares > 0,
+                total_shares.notna() & float_shares.notna() & (total_shares > 0),
                 float_shares / total_shares,
                 np.nan,
             )
@@ -303,7 +335,7 @@ class FeatureEngineer:
             return df
 
         listing_dates = pd.to_datetime(df["listing_date"], errors="coerce")
-        df["same_day_ipo_count"] = listing_dates.map(listing_dates.value_counts()).fillna(0).astype(int)
+        df["same_day_ipo_count"] = listing_dates.map(listing_dates.value_counts()).astype("Float64")
         return df
 
     def _calc_underwriter_tier(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -391,7 +423,7 @@ class FeatureEngineer:
                 if len(past) > window:
                     ret = past.iloc[-1] / past.iloc[-1 - window] - 1
                 else:
-                    ret = 0.0
+                    ret = np.nan
                 returns.append(round(ret, 6))
 
             df[col_name] = returns
@@ -420,8 +452,9 @@ class FeatureEngineer:
         sector_temps = []
         all_temps    = []
 
-        for i, row in df.iterrows():
-            past = df.loc[:i-1]  # 현재 행 이전 데이터만 사용
+        for _, row in df.iterrows():
+            # 같은 상장일의 다른 종목 수익률도 아직 장 마감 전에는 알 수 없으므로 제외한다.
+            past = df.loc[df["listing_date"] < row["listing_date"]]
 
             # 전체 최근 N개
             past_valid = past["open_return_pct"].dropna()
@@ -429,9 +462,9 @@ class FeatureEngineer:
             all_temps.append(all_temp)
 
             # 섹터별
-            if "sector_name" in df.columns:
-                sect = row.get("sector_name")
-                past_sect = past[past["sector_name"] == sect]["open_return_pct"].dropna()
+            if "industry_name" in df.columns:
+                sect = row.get("industry_name")
+                past_sect = past[past["industry_name"] == sect]["open_return_pct"].dropna()
                 sect_temp = past_sect.tail(n_sector).mean() if len(past_sect) > 0 else all_temp
             else:
                 sect_temp = all_temp
@@ -446,7 +479,8 @@ class FeatureEngineer:
     def _calc_valuation_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         PER 및 섹터 대비 PER 계산.
-        EPS가 없는 종목(적자 등)은 섹터 중앙값으로 대체.
+        EPS가 없는 종목(적자 등)은 결측으로 남긴다. 이 값의 보정은 학습
+        분할 이후 훈련 데이터 통계로만 수행한다.
         """
         if "eps" not in df.columns or "offering_price" not in df.columns:
             df["offering_per"] = np.nan
@@ -462,17 +496,18 @@ class FeatureEngineer:
         )
         df["offering_per"] = df["offering_per"].clip(0, 500)
 
-        # 섹터별 PER 중앙값 대비 (적자 기업 패널티 반영)
-        if "sector_name" in df.columns:
-            sector_median_per = df.groupby("sector_name")["offering_per"].transform("median")
-            df["per_vs_sector_median"] = np.where(
-                sector_median_per > 0,
-                df["offering_per"] / sector_median_per,
-                np.nan,
-            )
-        else:
-            overall_median = df["offering_per"].median()
-            df["per_vs_sector_median"] = df["offering_per"] / overall_median if overall_median else np.nan
+        # 전체 기간 중앙값은 미래 IPO의 값을 과거 행에 섞는다. 동일 상장일도
+        # 제외하고, 실제 산업 업종의 엄격히 이전 행만으로 중앙값을 만든다.
+        df["per_vs_sector_median"] = np.nan
+        if "industry_name" in df.columns:
+            for index, row in df.iterrows():
+                prior = df[
+                    (df["listing_date"] < row["listing_date"])
+                    & (df["industry_name"] == row["industry_name"])
+                ]
+                median = prior["offering_per"].dropna().median()
+                if pd.notna(median) and median > 0 and pd.notna(row["offering_per"]):
+                    df.at[index, "per_vs_sector_median"] = row["offering_per"] / median
 
         return df
 
@@ -569,7 +604,7 @@ class FeatureEngineer:
         """학습 데이터에서 결측값 대체 통계 계산"""
         for feat_name in self.feature_names:
             if feat_name not in df.columns:
-                self.fill_values[feat_name] = 0.0
+                self.fill_values[feat_name] = np.nan
                 continue
             strategy = fill_na_strategy(feat_name)
             col = pd.to_numeric(df[feat_name], errors="coerce")
@@ -581,13 +616,8 @@ class FeatureEngineer:
                 fill_value = 0.0
             else:
                 fill_value = 0.0
-            if pd.isna(fill_value):
-                feat_def = FEATURE_MAP.get(feat_name)
-                if strategy == "median" and feat_def and feat_def.clip and feat_def.clip[0] > 0:
-                    lo, hi = feat_def.clip
-                    fill_value = (lo + hi) / 2
-                else:
-                    fill_value = 0.0
+            # 원시 피처가 전부 비어 있으면 임의의 0 또는 구간 중간값을 만들지
+            # 않는다. 학습 적격성 검사에서 해당 데이터셋을 차단한다.
             self.fill_values[feat_name] = float(fill_value)
         self._fitted = True
         logger.info("FeatureEngineer fit 완료: %d개 피처 통계 계산", len(self.fill_values))
@@ -613,7 +643,7 @@ class FeatureEngineer:
                 col = col.clip(lo, hi)
 
             # 결측값 대체
-            col = col.fillna(self.fill_values.get(feat_name, 0.0))
+            col = col.fillna(self.fill_values.get(feat_name, np.nan))
             if feat_def and feat_def.clip:
                 lo, hi = feat_def.clip
                 col = col.clip(lo, hi)
@@ -623,6 +653,75 @@ class FeatureEngineer:
 
     def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
         return self.fit(df).transform(df)
+
+    def build_feature_observations(self, features: pd.DataFrame) -> pd.DataFrame:
+        """원시 피처별 값·결측·출처·검증 정보를 long 형식으로 보존한다.
+
+        ``features_all``은 모델 입력 표이고, 이 표는 감사와 사람 검토를 위한
+        관측 원장이다. 결측은 수치 0으로 바꾸지 않고 원인과 원천을 함께 남긴다.
+        """
+        source_by_group = {
+            FeatureGroup.MARKET: "KRX_KIND_or_KRX_OpenAPI",
+            FeatureGroup.SUBSCRIPTION: "DART_or_official_underwriter_notice",
+            FeatureGroup.SUPPLY: "DART_disclosure",
+            FeatureGroup.IPO_STRUCTURE: "DART_disclosure",
+            FeatureGroup.VALUATION: "DART_disclosure",
+            FeatureGroup.FINANCIAL: "OpenDART_financial_statement",
+        }
+        records: list[dict[str, object]] = []
+        for row in features.itertuples(index=False):
+            values = row._asdict()
+            for feature_name in self.feature_names:
+                if feature_name not in features.columns:
+                    continue
+                value = values.get(feature_name)
+                missing = pd.isna(value)
+                feature = FEATURE_MAP[feature_name]
+                source = source_by_group[feature.group]
+                if feature_name == "retail_subscription_ratio":
+                    missing_reason = (
+                        "official_underwriter_notice_not_collected" if missing else None
+                    )
+                elif feature.group == FeatureGroup.FINANCIAL and missing:
+                    missing_reason = "financial_publication_time_unverified"
+                elif missing:
+                    missing_reason = "official_source_field_unavailable_or_unverified"
+                else:
+                    missing_reason = None
+                source_ref = values.get("rcept_no")
+                if source.startswith("KRX"):
+                    event_source_url = values.get("event_source_url")
+                    source_ref = (
+                        event_source_url if pd.notna(event_source_url)
+                        else "KRX_KIND_new_listing_company"
+                    )
+                validation = values.get("offering_price_review_status")
+                if pd.isna(validation) or str(validation).strip() == "":
+                    validation = values.get("verification_status")
+                if pd.isna(validation) or str(validation).strip() == "":
+                    validation = values.get("lineage_validation_status")
+                if pd.isna(validation) or str(validation).strip() == "":
+                    validation = "needs_review"
+                validation = str(validation)
+                records.append({
+                    "event_id": values.get("event_id"),
+                    "corp_name": values.get("corp_name"),
+                    "listing_date": values.get("listing_date"),
+                    "feature_name": feature_name,
+                    "raw_value": value,
+                    "is_missing": bool(missing),
+                    "missing_reason": missing_reason,
+                    "source": source,
+                    "source_reference": source_ref,
+                    "collected_at": pd.Timestamp.now(tz="Asia/Seoul"),
+                    "validation_status": validation,
+                    "human_review_required": bool(missing or validation not in {
+                        "verified_currency_unit", "verified_text_and_structured",
+                        "verified_structured_api", "manual_verified",
+                        "official_source_krx_code_enriched", "official_source_collected",
+                    }),
+                })
+        return pd.DataFrame(records)
 
     # ── 피처 요약 ─────────────────────────────────────────────
 
