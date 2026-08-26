@@ -252,6 +252,36 @@ class ActualDataPipelineTests(unittest.TestCase):
         self.assertEqual(audit["is_future_information"].tolist(), [False, True])
         self.assertEqual(audit.loc[1, "time_validation_status"], "future_information_blocked")
 
+    def test_demand_document_014_is_cached_for_the_retry_window(self):
+        class DemandZipMissingDART(_FakeDART):
+            demand_calls = 0
+
+            def get_demand_forecast(self, corp_code, rcept_no):
+                type(self).demand_calls += 1
+                raise RuntimeError("DART 원문 ZIP 응답이 아닙니다: <status>014</status>")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            first = HistoricalIPOPipeline(
+                dart_collector=DemandZipMissingDART(),
+                krx_collector=_FakeKRX(),
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+            )
+            first.run(2024, 2024, feature_set="phase2")
+            second = HistoricalIPOPipeline(
+                dart_collector=DemandZipMissingDART(),
+                krx_collector=_FakeKRX(),
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+            )
+            second.run(2024, 2024, feature_set="phase2")
+
+            demand_failures = pd.read_parquet(root / "raw" / "dart_demand_document_failures.parquet")
+            self.assertEqual(DemandZipMissingDART.demand_calls, 1)
+            self.assertEqual(len(demand_failures), 1)
+            self.assertEqual(demand_failures.loc[0, "reason"], "zip_file_missing_retry_required")
+
     def test_manual_price_override_promotes_audited_record_for_training(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -41,6 +41,7 @@ class HistoricalIPOPipeline:
         self.processed_dir.mkdir(parents=True, exist_ok=True)
         self.manual_dir.mkdir(parents=True, exist_ok=True)
         self._document_failures = self._load_cached_frame("dart_document_failures.parquet")
+        self._demand_document_failures = self._load_cached_frame("dart_demand_document_failures.parquet")
         self._lineage_rows: list[dict[str, Any]] = []
 
     def run(self, start_year: int, end_year: int, feature_set: str = "phase2") -> dict[str, Any]:
@@ -70,6 +71,9 @@ class HistoricalIPOPipeline:
 
         dart_ipo, financials = self._collect_dart_records(calendar, start_year, end_year)
         self._document_failures.to_parquet(self.raw_dir / "dart_document_failures.parquet", index=False)
+        self._demand_document_failures.to_parquet(
+            self.raw_dir / "dart_demand_document_failures.parquet", index=False
+        )
         lineage = pd.DataFrame(self._lineage_rows)
         lineage.to_parquet(self.raw_dir / "dart_disclosure_lineage.parquet", index=False)
         self._build_document_failure_audit().to_parquet(
@@ -519,8 +523,22 @@ class HistoricalIPOPipeline:
                     pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
                 )
                 if demand_rcept_no:
-                    demand = self.dart.get_demand_forecast(str(filing.corp_code), demand_rcept_no)
+                    if self._should_retry_demand_document(demand_rcept_no):
+                        demand = self.dart.get_demand_forecast(str(filing.corp_code), demand_rcept_no)
+                    else:
+                        logger.info(
+                            "수요예측 원문 재시도 보류 (%s, %s)", filing.corp_name, demand_rcept_no
+                        )
             except RuntimeError as exc:
+                if demand_rcept_no:
+                    self._record_demand_document_failure(
+                        rcept_no=demand_rcept_no,
+                        corp_code=str(filing.corp_code),
+                        corp_name=filing.corp_name,
+                        event_id=event_id,
+                        listing_date=listing.listing_date,
+                        error=exc,
+                    )
                 logger.warning("수요예측 원문 파싱 실패 (%s): %s", filing.corp_name, exc)
 
             financial_summary, collected_financials = self._collect_financials(
@@ -673,7 +691,9 @@ class HistoricalIPOPipeline:
         failures.loc[legacy, "failure_classification"] = "recheck_required_legacy_metadata_incomplete"
         if "retriable" not in failures:
             failures["retriable"] = True
-        failures["retriable"] = failures["retriable"].fillna(True)
+        failures["retriable"] = failures["retriable"].map(
+            lambda value: True if pd.isna(value) else bool(value)
+        ).astype(bool)
         failures["audit_status"] = failures["failure_classification"].map({
             "structured_value_zip_missing": "recoverable_via_structured_lineage_review",
             "zip_file_missing_retry_required": "retry_or_alternate_candidate_required",
@@ -685,6 +705,50 @@ class HistoricalIPOPipeline:
             "recheck_required_legacy_metadata_incomplete": "re_audit_required",
         }).fillna("review_required")
         return failures
+
+    def _should_retry_demand_document(self, rcept_no: str) -> bool:
+        """수요예측 원문도 014를 영구 제외하지 않고 접수번호별로 재시도한다."""
+        failures = self._demand_document_failures
+        if failures.empty or "rcept_no" not in failures:
+            return True
+        prior = failures[failures["rcept_no"].astype(str) == str(rcept_no)].copy()
+        if prior.empty:
+            return True
+        recorded_at = pd.to_datetime(prior["recorded_at"], errors="coerce").max()
+        if pd.isna(recorded_at):
+            return True
+        if recorded_at.tzinfo is None:
+            recorded_at = recorded_at.tz_localize("Asia/Seoul")
+        return pd.Timestamp.now(tz="Asia/Seoul") - recorded_at >= pd.Timedelta(days=DOCUMENT_RETRY_AFTER_DAYS)
+
+    def _record_demand_document_failure(
+        self,
+        *,
+        rcept_no: str,
+        corp_code: str,
+        corp_name: str,
+        event_id: str,
+        listing_date: object,
+        error: RuntimeError,
+    ) -> None:
+        """수요예측 원문 실패를 별도 이력으로 저장한다."""
+        is_zip_missing = "<status>014</status>" in str(error)
+        prior = self._demand_document_failures
+        attempts = 0
+        if not prior.empty and "rcept_no" in prior:
+            attempts = int((prior["rcept_no"].astype(str) == str(rcept_no)).sum())
+        record = pd.DataFrame([{
+            "rcept_no": str(rcept_no),
+            "corp_code": corp_code,
+            "corp_name": corp_name,
+            "event_id": event_id,
+            "listing_date": listing_date,
+            "reason": "zip_file_missing_retry_required" if is_zip_missing else "document_request_retry_required",
+            "retriable": True,
+            "attempt_number": attempts + 1,
+            "recorded_at": pd.Timestamp.now(tz="Asia/Seoul"),
+        }])
+        self._demand_document_failures = pd.concat([prior, record], ignore_index=True)
 
     def audit_document_failures(self) -> pd.DataFrame:
         """기존 원문 실패 접수번호를 접수번호 단위로 다시 감사한다.
