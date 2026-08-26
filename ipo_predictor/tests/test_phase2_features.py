@@ -40,6 +40,24 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertAlmostEqual(result.loc[0, "open_return_pct"], 20.0)
         self.assertAlmostEqual(result.loc[0, "close_return_pct"], 10.0)
 
+    def test_merge_excludes_market_transfer_with_different_listing_date(self):
+        dart = pd.DataFrame({
+            "corp_name": ["테스트기업"],
+            "listing_date": ["2020-01-10"],
+            "offering_price": [10_000],
+        })
+        krx = pd.DataFrame({
+            "corp_name": ["테스트기업", "테스트기업"],
+            "listing_date": ["2020-01-10", "2022-03-15"],
+            "open_price": [12_000, 15_000],
+            "close_price": [11_000, 14_000],
+        })
+
+        merged = FeatureEngineer()._merge_base(dart, krx)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged.loc[0, "listing_date"], pd.Timestamp("2020-01-10"))
+
     def test_dart_offering_parser_extracts_phase2_fields(self):
         html = """
         <html><body>

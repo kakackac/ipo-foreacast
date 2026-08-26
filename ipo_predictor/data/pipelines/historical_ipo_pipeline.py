@@ -15,7 +15,7 @@ from data.processors.feature_engineer import FeatureEngineer
 logger = logging.getLogger(__name__)
 
 MAX_FILING_TO_LISTING_DAYS = 400
-STRUCTURED_PRICE_CHECK_VERSION = 2
+STRUCTURED_PRICE_CHECK_VERSION = 3
 
 
 class HistoricalIPOPipeline:
@@ -322,6 +322,10 @@ class HistoricalIPOPipeline:
                 "filing_candidate_count": len(candidates),
                 "demand_rcept_no": demand_rcept_no,
                 **offering,
+                # 이 행은 현재 KRX 상장 이벤트에 맞춰 수집한 공시다. 원문에
+                # 기재된 상장예정일은 별도 보존하고, 병합 키는 실제 상장일을 쓴다.
+                "disclosed_listing_date": offering.get("listing_date"),
+                "listing_date": listing.listing_date,
                 **{key: value for key, value in demand.items() if key != "corp_code"},
                 **self._compare_offering_sources(offering, demand),
                 **financial_summary,

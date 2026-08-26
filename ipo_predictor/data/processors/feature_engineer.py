@@ -161,6 +161,18 @@ class FeatureEngineer:
             suffixes=("_dart", "_krx"),
         )
 
+        # 동일 회사가 KOSDAQ 최초 상장 후 KOSPI로 이전 상장한 경우처럼,
+        # 이름만 같은 다른 상장 이벤트가 붙는 일을 막는다. 수집 파이프라인이
+        # 기록한 DART 연결 상장일이 있을 때만 엄격하게 비교해 기존 입력 호환성은
+        # 유지한다.
+        if {"listing_date_dart", "listing_date_krx"}.issubset(merged.columns):
+            dart_listing = pd.to_datetime(merged["listing_date_dart"], errors="coerce")
+            krx_listing = pd.to_datetime(merged["listing_date_krx"], errors="coerce")
+            mismatched_listing = dart_listing.notna() & krx_listing.notna() & (dart_listing != krx_listing)
+            if mismatched_listing.any():
+                logger.info("DART 연결 상장일과 다른 KRX 이벤트 %d건을 제외했습니다.", int(mismatched_listing.sum()))
+                merged = merged.loc[~mismatched_listing].copy()
+
         # 병합 뒤 suffix가 생긴 공통 컬럼을 후속 계산의 표준 이름으로
         # 되돌린다. KRX 상장일/가격을 우선하고, DART 공시 값은 보완용이다.
         canonical_sources = {
