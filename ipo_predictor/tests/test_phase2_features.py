@@ -117,6 +117,17 @@ class Phase2FeatureTests(unittest.TestCase):
 
         self.assertEqual(prices, [{"rcept_no": "20250101000001", "offering_price": 45_000, "security_type": "보통주"}])
 
+    def test_preliminary_price_statement_does_not_treat_one_share_as_offer_price(self):
+        parsed = DARTCollector._extract_offering_price_details(
+            "모집가액의 확정은 수요예측 결과를 반영하여 1주당 확정공모가액을 최종 결정할 예정이며 "
+            "모집가액 확정시 정정신고서를 제출할 예정입니다."
+        )
+
+        self.assertIsNone(parsed["offering_price"])
+        self.assertIsNone(parsed["offering_price_extracted_amount"])
+        self.assertEqual(parsed["offering_price_review_status"], "preliminary_price_language")
+        self.assertEqual(parsed["offering_price_finality"], "preliminary_price_language")
+
     def test_unusual_offer_price_is_preserved_for_audit(self):
         df = pd.DataFrame({
             "offering_price": [4],

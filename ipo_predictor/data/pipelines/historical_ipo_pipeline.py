@@ -15,6 +15,7 @@ from data.processors.feature_engineer import FeatureEngineer
 logger = logging.getLogger(__name__)
 
 MAX_FILING_TO_LISTING_DAYS = 400
+STRUCTURED_PRICE_CHECK_VERSION = 2
 
 
 class HistoricalIPOPipeline:
@@ -250,7 +251,7 @@ class HistoricalIPOPipeline:
             cached = cached_by_receipt.get(str(filing.rcept_no))
             # 구조화 slprc 대조가 끝난 행만 재사용한다. 이전 버전의 캐시는
             # 이번 한 번 다시 검사해 공모가 검증 근거를 보완한다.
-            if cached is not None and cached.get("structured_price_check") is not None:
+            if cached is not None and cached.get("structured_price_check_version") == STRUCTURED_PRICE_CHECK_VERSION:
                 records.append(cached)
                 continue
             if str(filing.rcept_no) in set(self._document_failures.get("rcept_no", pd.Series(dtype=str)).astype(str)):
@@ -264,18 +265,32 @@ class HistoricalIPOPipeline:
                 logger.warning("신고서 원문 파싱 실패 (%s): %s", filing.corp_name, exc)
                 continue
 
+            # estkRs의 날짜 기준은 해당 신고서의 "최초접수일"이다. 발행조건
+            # 확정본의 접수일만 시작점으로 쓰면 초기 신고서로 묶인 구조화 값을
+            # 놓칠 수 있으므로 IPO 연결 허용 구간 전체를 조회한다.
+            structured_start = pd.Timestamp(listing.listing_date) - pd.Timedelta(
+                days=MAX_FILING_TO_LISTING_DAYS
+            )
             structured_prices = self.dart.get_equity_offering_prices(
                 str(filing.corp_code),
-                pd.Timestamp(filing.rcept_dt).strftime("%Y%m%d"),
+                structured_start.strftime("%Y%m%d"),
                 pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
             )
             structured = next(
                 (item for item in structured_prices if item["rcept_no"] == str(filing.rcept_no)), None
             )
-            is_final_price_disclosure = "발행조건확정" in str(filing.report_nm)
-            offering = self._reconcile_structured_offering_price(
-                offering, structured, is_final_price_disclosure
+            is_final_price_report = "발행조건확정" in str(filing.report_nm)
+            is_final_price_disclosure = bool(
+                is_final_price_report
+                and offering.get("offering_price_finality") == "confirmed_price_language"
             )
+            offering = self._reconcile_structured_offering_price(
+                offering,
+                structured,
+                is_final_price_disclosure,
+                structured_record_count=len(structured_prices),
+            )
+            offering["structured_price_check_version"] = STRUCTURED_PRICE_CHECK_VERSION
 
             demand_rcept_no = None
             demand = {}
@@ -302,6 +317,7 @@ class HistoricalIPOPipeline:
                 "rcept_dt": filing.rcept_dt,
                 "filing_report_nm": filing.report_nm,
                 "filing_is_correction": bool(filing.is_correction),
+                "filing_is_final_price_report": is_final_price_report,
                 "filing_is_final_price_disclosure": is_final_price_disclosure,
                 "filing_candidate_count": len(candidates),
                 "demand_rcept_no": demand_rcept_no,
@@ -318,13 +334,19 @@ class HistoricalIPOPipeline:
 
     @staticmethod
     def _reconcile_structured_offering_price(
-        offering: dict[str, Any], structured: dict[str, Any] | None, is_final_price_disclosure: bool = True
+        offering: dict[str, Any],
+        structured: dict[str, Any] | None,
+        is_final_price_disclosure: bool = True,
+        structured_record_count: int = 0,
     ) -> dict[str, Any]:
         """원문 공모가와 DART 구조화 모집가액을 접수번호 단위로 대조한다."""
         result = offering.copy()
         result["dart_structured_offering_price"] = None
         result["dart_structured_security_type"] = None
-        result["structured_price_check"] = "not_available"
+        result["structured_price_record_count"] = structured_record_count
+        result["structured_price_check"] = (
+            "source_no_result" if structured_record_count == 0 else "no_matching_receipt"
+        )
         if structured is None:
             return result
 
@@ -438,13 +460,14 @@ class HistoricalIPOPipeline:
     def _build_offering_price_audit(dart_ipo: pd.DataFrame) -> pd.DataFrame:
         columns = [
             "corp_name", "rcept_no", "rcept_dt", "filing_report_nm", "filing_is_correction",
-            "filing_is_final_price_disclosure",
+            "filing_is_final_price_report", "filing_is_final_price_disclosure",
             "filing_candidate_count", "demand_rcept_no", "offering_price",
             "offering_price_extracted_amount", "offering_price_review_status",
-            "offering_price_parse_method", "offering_price_range_warning",
+            "offering_price_finality", "offering_price_parse_method", "offering_price_range_warning",
             "offering_price_audit_context", "price_band_low", "price_band_high",
             "price_band_check", "dart_structured_offering_price", "dart_structured_security_type",
-            "structured_price_check", "demand_offering_price", "demand_price_check",
+            "structured_price_check", "structured_price_record_count", "structured_price_check_version",
+            "demand_offering_price", "demand_price_check",
             "demand_offering_price_context",
         ]
         return dart_ipo.reindex(columns=columns).copy()

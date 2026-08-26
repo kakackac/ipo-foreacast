@@ -421,6 +421,7 @@ class DARTCollector:
             "offering_price":     None,
             "offering_price_extracted_amount": None,
             "offering_price_review_status": "missing",
+            "offering_price_finality": "unknown",
             "offering_price_parse_method": None,
             "offering_price_audit_context": None,
             "offering_price_range_warning": False,
@@ -534,6 +535,7 @@ class DARTCollector:
             "offering_price": None,
             "offering_price_extracted_amount": None,
             "offering_price_review_status": "missing",
+            "offering_price_finality": "unknown",
             "offering_price_parse_method": None,
             "offering_price_audit_context": None,
             "offering_price_range_warning": False,
@@ -546,6 +548,16 @@ class DARTCollector:
             # 공모총액·발행금액 같은 다른 원화 금액을 가져오는 일을 줄인다.
             context = text[max(0, match.start() - 80):match.end() + 140]
             price_context = text[match.end():match.end() + 140]
+            # "1주당 확정공모가액을 최종 결정할 예정"은 확정가가 없는
+            # 초기 신고서의 정형 문구다. 뒤의 1을 가격으로 오인하지 않는다.
+            if re.search(r"(?:최종\s*)?결정할\s*예정|정정(?:증권)?신고서.{0,40}?제출할\s*예정", context):
+                result.update({
+                    "offering_price_review_status": "preliminary_price_language",
+                    "offering_price_finality": "preliminary_price_language",
+                    "offering_price_parse_method": "preliminary_price_statement",
+                    "offering_price_audit_context": context,
+                })
+                return result
             money_match = re.search(money_pattern, price_context, flags=re.IGNORECASE)
             if money_match:
                 value = DARTCollector._parse_int(money_match.group(1))
@@ -554,14 +566,21 @@ class DARTCollector:
                         "offering_price": value,
                         "offering_price_extracted_amount": value,
                         "offering_price_review_status": "verified_currency_unit",
+                        "offering_price_finality": "confirmed_price_language",
                         "offering_price_parse_method": "final_price_with_currency_unit",
                         "offering_price_audit_context": context,
                         "offering_price_range_warning": value < 100 or value > 10_000_000,
                     })
                     return result
 
-            numeric_match = re.search(numeric_pattern, price_context)
-            if numeric_match:
+            numeric_match = next(
+                (
+                    item for item in re.finditer(numeric_pattern, price_context)
+                    if not re.match(r"\s*주당", price_context[item.end():])
+                ),
+                None,
+            )
+            if numeric_match is not None:
                 value = DARTCollector._parse_int(numeric_match.group(1))
                 result.update({
                     "offering_price_extracted_amount": value,

@@ -29,6 +29,7 @@ class _FakeDART:
             "offering_price": 12000, "new_shares": 1000000, "secondary_shares": 200000,
             "total_post_listing_shares": 5000000, "lead_underwriter": "한국투자증권",
             "major_shareholder_lockup_months": 24, "risk_factor_count": 5,
+            "offering_price_finality": "confirmed_price_language",
             "parse_success": True,
         }
 
