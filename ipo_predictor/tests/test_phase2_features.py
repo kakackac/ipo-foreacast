@@ -59,6 +59,17 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertTrue(pd.isna(result.loc[0, "secondary_offering_ratio"]))
         self.assertTrue(pd.isna(result.loc[0, "float_share_ratio"]))
 
+    def test_partial_lockup_periods_do_not_create_a_weighted_score(self):
+        result = FeatureEngineer()._calc_lockup_features(pd.DataFrame({
+            "lockup_6m_ratio": [0.2],
+            "lockup_3m_ratio": [0.1],
+            "lockup_1m_ratio": [0.1],
+            "lockup_15d_ratio": [None],
+        }))
+
+        self.assertTrue(result.loc[0, "lockup_components_missing"])
+        self.assertTrue(pd.isna(result.loc[0, "lockup_weighted_score"]))
+
     def test_training_readiness_rejects_small_general_ipo_population(self):
         df = pd.DataFrame({
             "event_class": ["general_ipo"] * 46,
@@ -73,6 +84,7 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertFalse(readiness["eligible"])
         self.assertEqual(readiness["general_ipo_dual_target_rows"], 46)
         self.assertTrue(any("최소 100건" in reason for reason in readiness["reasons"]))
+        self.assertEqual(readiness["source_time_validated_core_complete_rows"], 0)
 
     def test_merge_excludes_market_transfer_with_different_listing_date(self):
         dart = pd.DataFrame({

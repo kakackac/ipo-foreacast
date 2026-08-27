@@ -40,6 +40,12 @@ MIN_GENERAL_IPO_TARGET_ROWS = 100
 MIN_GENERAL_IPO_YEARS = 3
 MIN_GENERAL_IPOS_PER_YEAR = 5
 MIN_CORE_FEATURE_COMPLETENESS = 0.70
+MIN_CRITICAL_FEATURE_COMPLETENESS = 0.60
+CRITICAL_SOURCE_VALIDATED_FEATURES = (
+    "institutional_demand_ratio",
+    "retail_subscription_ratio",
+    "offering_price_band_position",
+)
 
 
 class TrainingReadinessError(RuntimeError):
@@ -101,6 +107,7 @@ def assess_training_readiness(df: pd.DataFrame, phase: str = "core") -> dict:
         "minimum_years": MIN_GENERAL_IPO_YEARS,
         "minimum_per_year": MIN_GENERAL_IPOS_PER_YEAR,
         "minimum_core_feature_completeness": MIN_CORE_FEATURE_COMPLETENESS,
+        "minimum_critical_feature_completeness": MIN_CRITICAL_FEATURE_COMPLETENESS,
     }
     if "event_class" not in df.columns:
         report["reasons"].append("공식 이벤트 분류(event_class)가 없는 이전 피처 파일입니다.")
@@ -134,16 +141,30 @@ def assess_training_readiness(df: pd.DataFrame, phase: str = "core") -> dict:
     if len(core_features) != len(get_core_feature_names()):
         report["reasons"].append("핵심 피처 열이 완전하지 않습니다.")
         report["core_feature_completeness"] = 0.0
+        report["source_time_validated_core_complete_rows"] = 0
+        report["source_time_validated_core_complete_rate"] = 0.0
     else:
         completeness = candidates[core_features].notna().mean()
+        strict_complete = candidates[core_features].notna().all(axis=1)
         report["core_feature_completeness_by_feature"] = {
             feature: round(float(rate), 4) for feature, rate in completeness.items()
         }
         report["core_feature_completeness"] = round(float(completeness.mean()), 4)
+        report["source_time_validated_core_complete_rows"] = int(strict_complete.sum())
+        report["source_time_validated_core_complete_rate"] = round(float(strict_complete.mean()), 4)
         if float(completeness.mean()) < MIN_CORE_FEATURE_COMPLETENESS:
             report["reasons"].append(
                 f"핵심 피처 평균 충족률이 {float(completeness.mean()):.1%}로 최소 {MIN_CORE_FEATURE_COMPLETENESS:.0%}에 미달합니다."
             )
+        for feature in CRITICAL_SOURCE_VALIDATED_FEATURES:
+            if feature not in completeness:
+                continue
+            rate = float(completeness[feature])
+            if rate < MIN_CRITICAL_FEATURE_COMPLETENESS:
+                report["reasons"].append(
+                    f"핵심 원천 피처 {feature} 충족률이 {rate:.1%}로 최소 "
+                    f"{MIN_CRITICAL_FEATURE_COMPLETENESS:.0%}에 미달합니다."
+                )
     if "feature_available_at" not in candidates.columns:
         report["reasons"].append("피처 공개시각이 없어 미래 정보 누출을 검증할 수 없습니다.")
     else:

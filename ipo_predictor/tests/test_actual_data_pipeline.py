@@ -126,6 +126,14 @@ class ActualDataPipelineTests(unittest.TestCase):
 
         self.assertEqual(result, {"status": "013", "list": []})
 
+    def test_demand_parser_does_not_treat_any_competition_ratio_as_institutional(self):
+        collector = DARTCollector(api_key="a" * 40)
+        result = collector._parse_demand_forecast_html(
+            "비례배정 경쟁률 1,364.23 : 1", "12345678"
+        )
+
+        self.assertIsNone(result["institutional_demand_ratio"])
+
     def test_dart_ipo_list_uses_equity_offering_filter_in_three_month_chunks(self):
         response = Mock()
         response.raise_for_status.return_value = None

@@ -131,7 +131,8 @@ class FeatureEngineer:
             "event_id", "corp_name", "listing_date", "event_class", "industry_name", "listing_segment",
             "offering_price", "offering_price_review_status", "open_return_pct", "close_return_pct",
             "rcept_no", "corp_code", "feature_available_at", "event_source_url",
-            "verification_status", "lineage_validation_status",
+            "verification_status", "lineage_validation_status", "retail_source_url",
+            "retail_validation_status", "retail_collected_at",
         ]
         for column in identity_columns:
             if column not in df.columns:
@@ -199,6 +200,9 @@ class FeatureEngineer:
             "event_source_url": ["source_url", "source_url_krx", "event_source_url"],
             "verification_status": ["verification_status", "verification_status_krx"],
             "lineage_validation_status": ["lineage_validation_status", "lineage_validation_status_dart"],
+            "retail_source_url": ["retail_source_url", "retail_source_url_dart"],
+            "retail_validation_status": ["retail_validation_status", "retail_validation_status_dart"],
+            "retail_collected_at": ["retail_collected_at", "retail_collected_at_dart"],
             "same_day_ipo_count": ["same_day_ipo_count", "same_day_ipo_count_krx"],
             "open_price": ["open_price", "open_price_krx"],
             "close_price": ["close_price", "close_price_krx"],
@@ -232,10 +236,11 @@ class FeatureEngineer:
             df["lockup_1m_ratio"] * 0.50,
             df["lockup_15d_ratio"] * 0.25,
         ], axis=1)
-        df["lockup_weighted_score"] = weighted.sum(axis=1, min_count=1)
         df["lockup_components_missing"] = df[
             ["lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio"]
         ].isna().any(axis=1)
+        # 부분 기간만 찾은 경우를 완전한 확약 점수처럼 쓰지 않는다.
+        df["lockup_weighted_score"] = weighted.sum(axis=1, min_count=4)
         return df
 
     # ── 공모가 밴드 위치 ───────────────────────────────────────
@@ -689,6 +694,8 @@ class FeatureEngineer:
                 else:
                     missing_reason = None
                 source_ref = values.get("rcept_no")
+                if feature_name == "retail_subscription_ratio" and pd.notna(values.get("retail_source_url")):
+                    source_ref = values.get("retail_source_url")
                 if source.startswith("KRX"):
                     event_source_url = values.get("event_source_url")
                     source_ref = (
@@ -696,6 +703,8 @@ class FeatureEngineer:
                         else "KRX_KIND_new_listing_company"
                     )
                 validation = values.get("offering_price_review_status")
+                if feature_name == "retail_subscription_ratio":
+                    validation = values.get("retail_validation_status")
                 if pd.isna(validation) or str(validation).strip() == "":
                     validation = values.get("verification_status")
                 if pd.isna(validation) or str(validation).strip() == "":

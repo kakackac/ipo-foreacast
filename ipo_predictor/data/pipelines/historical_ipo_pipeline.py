@@ -11,6 +11,7 @@ import pandas as pd
 from config import PROC_DIR, RAW_DIR
 from data.collectors.dart_collector import DARTCollector
 from data.collectors.krx_collector import KRXCollector
+from data.collectors.underwriter_collector import OfficialUnderwriterCollector, RESULT_COLUMNS
 from data.processors.feature_engineer import FeatureEngineer
 
 logger = logging.getLogger(__name__)
@@ -70,6 +71,11 @@ class HistoricalIPOPipeline:
         kosdaq.to_parquet(self.raw_dir / "kosdaq_index.parquet", index=False)
 
         dart_ipo, financials = self._collect_dart_records(calendar, start_year, end_year)
+        underwriter_results = self._collect_official_underwriter_results()
+        underwriter_results.to_parquet(
+            self.raw_dir / "official_underwriter_notice_results.parquet", index=False
+        )
+        dart_ipo = self._merge_official_underwriter_results(dart_ipo, underwriter_results)
         self._document_failures.to_parquet(self.raw_dir / "dart_document_failures.parquet", index=False)
         self._demand_document_failures.to_parquet(
             self.raw_dir / "dart_demand_document_failures.parquet", index=False
@@ -117,10 +123,90 @@ class HistoricalIPOPipeline:
         summary["event_master_manifest"] = event_manifest["path"]
         summary["future_information_violations"] = int(time_audit["is_future_information"].sum())
         summary["feature_time_validation_rows"] = int(len(time_audit))
+        summary["official_underwriter_notice_rows"] = int(len(underwriter_results))
+        summary["official_underwriter_integrated_retail_rows"] = int(
+            (underwriter_results.get("validation_status", pd.Series(dtype=str)) ==
+             "official_notice_integrated_retail_ratio").sum()
+        )
         with open(self.processed_dir / "data_collection_summary.json", "w", encoding="utf-8") as file:
             json.dump(summary, file, ensure_ascii=False, indent=2, default=str)
         logger.info("실제 데이터 파이프라인 완료: %d개 학습 행", len(features))
         return summary
+
+    def _collect_official_underwriter_results(self) -> pd.DataFrame:
+        """승인된 공식 주관사 공지 URL을 수집한다.
+
+        입력 파일은 사람이 임의 값을 입력하는 곳이 아니라 KRX 이벤트 ID와
+        주관사 공개 공지 URL의 연결 원장이다. 파일이 없으면 결측을 유지한다.
+        """
+        source_path = self.manual_dir / "underwriter_notice_sources.csv"
+        if not source_path.exists():
+            return pd.DataFrame(columns=RESULT_COLUMNS)
+        sources = pd.read_csv(source_path, dtype=str).fillna("")
+        if sources.empty:
+            return pd.DataFrame(columns=RESULT_COLUMNS)
+        collector = OfficialUnderwriterCollector()
+        cached = self._load_cached_frame("official_underwriter_notice_results.parquet")
+        requested_ids = sources.apply(
+            lambda row: collector.notice_id(str(row["event_id"]), str(row["notice_url"])), axis=1
+        )
+        reusable_statuses = {
+            "official_notice_integrated_retail_ratio",
+            "official_notice_value_requires_scope_review",
+            "official_notice_no_supported_value",
+            "source_document_type_not_supported",
+        }
+        if cached.empty or not {"notice_id", "validation_status"}.issubset(cached.columns):
+            reusable = pd.DataFrame(columns=RESULT_COLUMNS)
+        else:
+            reusable = cached[
+                cached["notice_id"].astype(str).isin(set(requested_ids))
+                & cached["validation_status"].isin(reusable_statuses)
+            ]
+        reusable_ids = set(reusable.get("notice_id", pd.Series(dtype=str)).astype(str))
+        pending = sources.loc[~requested_ids.isin(reusable_ids)].copy()
+        fresh = collector.collect_sources(pending) if not pending.empty else pd.DataFrame(columns=RESULT_COLUMNS)
+        result = pd.concat([reusable, fresh], ignore_index=True)
+        return result.reindex(columns=RESULT_COLUMNS).drop_duplicates("notice_id", keep="last")
+
+    @staticmethod
+    def _merge_official_underwriter_results(
+        dart_ipo: pd.DataFrame, underwriter_results: pd.DataFrame
+    ) -> pd.DataFrame:
+        """전체 통합 경쟁률로 검증된 공식 주관사 값만 피처 후보로 반영한다."""
+        if dart_ipo.empty:
+            return dart_ipo
+        result = dart_ipo.copy()
+        # 개인 청약 경쟁률은 DART의 비표준/기존 값이 아니라, 아래 공식
+        # 주관사 통합 경쟁률 승인 경로를 통과한 값만 사용할 수 있다.
+        result["retail_subscription_ratio"] = float("nan")
+        if underwriter_results.empty:
+            return result
+        approved = underwriter_results[
+            (underwriter_results["validation_status"] == "official_notice_integrated_retail_ratio")
+            & underwriter_results["retail_subscription_ratio"].notna()
+        ].copy()
+        if approved.empty:
+            return result
+        duplicate_values = approved.groupby("event_id")["retail_subscription_ratio"].nunique()
+        approved = approved[approved["event_id"].isin(duplicate_values[duplicate_values == 1].index)]
+        approved = approved.sort_values("collected_at").drop_duplicates("event_id", keep="last")
+        approved = approved.rename(columns={
+            "retail_subscription_ratio": "retail_subscription_ratio_official",
+            "notice_url": "retail_source_url",
+            "validation_status": "retail_validation_status",
+            "collected_at": "retail_collected_at",
+        })
+        result = result.merge(
+            approved[[
+                "event_id", "retail_subscription_ratio_official", "retail_source_url",
+                "retail_validation_status", "retail_collected_at",
+            ]],
+            on="event_id", how="left",
+        )
+        official = pd.to_numeric(result["retail_subscription_ratio_official"], errors="coerce")
+        result["retail_subscription_ratio"] = official
+        return result.drop(columns=["retail_subscription_ratio_official"])
 
     def collect_official_event_master(
         self, start_year: int, end_year: int, force_refresh: bool = False

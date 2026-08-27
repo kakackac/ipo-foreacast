@@ -326,11 +326,16 @@ class DARTCollector:
         result["demand_offering_price"] = demand_price["offering_price"]
         result["demand_offering_price_context"] = demand_price["offering_price_audit_context"]
 
-        # 경쟁률 패턴: "XXX : 1" 또는 "XXX대 1"
-        ratio_pattern = r"경쟁률[^0-9]*([0-9,]+(?:\.[0-9]+)?)\s*(?::|대)\s*1"
-        m = re.search(ratio_pattern, text)
-        if m:
-            result["institutional_demand_ratio"] = float(m.group(1).replace(",", ""))
+        # "경쟁률"만으로는 일반 청약·비례배정 경쟁률을 잘못 잡을 수 있다.
+        # 기관/수요예측 라벨과 숫자가 직접 연결된 경우에만 승인 후보로 만든다.
+        for label in ("기관투자자 경쟁률", "기관 수요예측 경쟁률", "수요예측 경쟁률"):
+            match = re.search(
+                rf"{label}\s*(?:은|는|:|：)?\s*([0-9,]+(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b",
+                text,
+            )
+            if match:
+                result["institutional_demand_ratio"] = float(match.group(1).replace(",", ""))
+                break
 
         # 확약 비율 파싱 — 각 행의 신청주식수를 추출해 합계 대비 비율 계산
         total_shares = self._extract_share_after(text, "합계")
