@@ -7,6 +7,7 @@ import pandas as pd
 from data.collectors.dart_collector import DARTCollector
 from data.processors.feature_engineer import FeatureEngineer, build_demo_dataset
 from features.definitions import get_phase2_feature_names
+from features.model_profiles import get_model_profile
 from pipeline import assess_training_readiness
 import models.baseline.gradient_boost_model as gradient_boost_model
 from models.baseline.gradient_boost_model import IPOPriceModel
@@ -85,6 +86,16 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(readiness["general_ipo_dual_target_rows"], 46)
         self.assertTrue(any("최소 100건" in reason for reason in readiness["reasons"]))
         self.assertEqual(readiness["source_time_validated_core_complete_rows"], 0)
+
+    def test_prediction_profiles_keep_retail_out_before_general_subscription_closes(self):
+        pre_demand = get_model_profile("pre_demand")
+        post_demand = get_model_profile("post_demand")
+        post_retail = get_model_profile("post_retail")
+
+        self.assertNotIn("retail_subscription_ratio", pre_demand.feature_names)
+        self.assertNotIn("retail_subscription_ratio", post_demand.feature_names)
+        self.assertIn("retail_subscription_ratio", post_retail.feature_names)
+        self.assertIn("institutional_demand_ratio", post_demand.feature_names)
 
     def test_merge_excludes_market_transfer_with_different_listing_date(self):
         dart = pd.DataFrame({

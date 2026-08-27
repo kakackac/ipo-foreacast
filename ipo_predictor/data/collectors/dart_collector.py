@@ -257,6 +257,16 @@ class DARTCollector:
         end_date: str,
     ) -> Optional[str]:
         """수요예측 숫자를 포함할 가능성이 가장 큰 공시 접수번호를 찾는다."""
+        record = self.find_demand_forecast_disclosure_record(corp_code, start_date, end_date)
+        return None if record is None else str(record["rcept_no"])
+
+    def find_demand_forecast_disclosure_record(
+        self,
+        corp_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> Optional[dict]:
+        """수요예측 후보의 접수번호와 공개 시각을 함께 반환한다."""
         disclosures = self.get_company_disclosure_list(corp_code, start_date, end_date)
         if disclosures.empty:
             return None
@@ -272,7 +282,13 @@ class DARTCollector:
         best = candidates.iloc[0]
         # 단순 증권신고서만 있는 경우에는 같은 원문을 수요예측 결과로 오인하지
         # 않는다. 수요예측 또는 투자설명서 단서가 있는 경우만 원문 파싱한다.
-        return str(best["rcept_no"]) if int(best["_score"]) >= 2 else None
+        if int(best["_score"]) < 2:
+            return None
+        return {
+            "rcept_no": str(best["rcept_no"]),
+            "rcept_dt": best["rcept_dt"],
+            "report_nm": best["report_nm"],
+        }
 
     # ── 수요예측 결과 파싱 ─────────────────────────────────────
 

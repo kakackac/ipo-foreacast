@@ -12,6 +12,7 @@ from config import PROC_DIR, RAW_DIR
 from data.collectors.dart_collector import DARTCollector
 from data.collectors.krx_collector import KRXCollector
 from data.collectors.underwriter_collector import OfficialUnderwriterCollector, RESULT_COLUMNS
+from data.collectors.underwriter_registry import build_underwriter_priorities
 from data.processors.feature_engineer import FeatureEngineer
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,10 @@ STRUCTURED_PRICE_CHECK_VERSION = 3
 OFFERING_PRICE_PARSER_VERSION = 2
 DART_LINEAGE_VERSION = 1
 DOCUMENT_RETRY_AFTER_DAYS = 7
+OFFICIAL_SOURCE_RESOLUTION_COLUMNS = [
+    "event_id", "feature_name", "resolution_status", "checked_at", "checked_sources",
+    "reviewed_by", "note",
+]
 
 
 class HistoricalIPOPipeline:
@@ -64,6 +69,10 @@ class HistoricalIPOPipeline:
         # 상장일 가격 조회에서 확인된 KRX 표준코드·시장 정보를 이벤트 마스터에
         # 되돌려 다음 실행의 이벤트 식별과 정합에 재사용한다.
         krx_ipo.to_parquet(self.raw_dir / "krx_official_event_master.parquet", index=False)
+        underwriter_priorities = build_underwriter_priorities(krx_ipo)
+        underwriter_priorities.to_parquet(
+            self.raw_dir / "official_underwriter_priorities.parquet", index=False
+        )
 
         kospi = self._collect_index_with_cache("1", start_year, end_year, "kospi_index.parquet")
         kosdaq = self._collect_index_with_cache("2", start_year, end_year, "kosdaq_index.parquet")
@@ -71,7 +80,7 @@ class HistoricalIPOPipeline:
         kosdaq.to_parquet(self.raw_dir / "kosdaq_index.parquet", index=False)
 
         dart_ipo, financials = self._collect_dart_records(calendar, start_year, end_year)
-        underwriter_results = self._collect_official_underwriter_results()
+        underwriter_results = self._collect_official_underwriter_results(krx_ipo)
         underwriter_results.to_parquet(
             self.raw_dir / "official_underwriter_notice_results.parquet", index=False
         )
@@ -107,10 +116,14 @@ class HistoricalIPOPipeline:
         engineer = FeatureEngineer(feature_set=feature_set)
         features = engineer.build_features(dart_ipo, krx_ipo, kospi, kosdaq)
         features.to_parquet(self.processed_dir / "features_all.parquet", index=False)
-        engineer.build_feature_observations(features).to_parquet(
+        observations = engineer.build_feature_observations(features)
+        source_resolutions = self._load_official_source_resolutions()
+        source_resolutions.to_parquet(self.raw_dir / "official_source_resolutions.parquet", index=False)
+        observations = self._apply_official_source_resolutions(observations, source_resolutions)
+        observations.to_parquet(
             self.processed_dir / "feature_observations.parquet", index=False
         )
-        time_audit = self._build_feature_time_audit(features)
+        time_audit = self._build_feature_time_audit(features, observations)
         time_audit.to_parquet(self.processed_dir / "feature_time_validation.parquet", index=False)
 
         summary = self._build_summary(calendar, dart_ipo, prices, features)
@@ -128,12 +141,16 @@ class HistoricalIPOPipeline:
             (underwriter_results.get("validation_status", pd.Series(dtype=str)) ==
              "official_notice_integrated_retail_ratio").sum()
         )
+        summary["official_underwriter_priority_rows"] = int(len(underwriter_priorities))
+        summary["official_underwriter_priority_coverage"] = round(
+            float(underwriter_priorities.get("coverage_ratio", pd.Series(dtype=float)).sum()), 4
+        )
         with open(self.processed_dir / "data_collection_summary.json", "w", encoding="utf-8") as file:
             json.dump(summary, file, ensure_ascii=False, indent=2, default=str)
         logger.info("실제 데이터 파이프라인 완료: %d개 학습 행", len(features))
         return summary
 
-    def _collect_official_underwriter_results(self) -> pd.DataFrame:
+    def _collect_official_underwriter_results(self, events: pd.DataFrame) -> pd.DataFrame:
         """승인된 공식 주관사 공지 URL을 수집한다.
 
         입력 파일은 사람이 임의 값을 입력하는 곳이 아니라 KRX 이벤트 ID와
@@ -148,7 +165,9 @@ class HistoricalIPOPipeline:
         collector = OfficialUnderwriterCollector()
         cached = self._load_cached_frame("official_underwriter_notice_results.parquet")
         requested_ids = sources.apply(
-            lambda row: collector.notice_id(str(row["event_id"]), str(row["notice_url"])), axis=1
+            lambda row: collector.notice_id(
+                str(row["event_id"]), str(row["notice_url"]), str(row.get("source_version", "initial"))
+            ), axis=1
         )
         reusable_statuses = {
             "official_notice_integrated_retail_ratio",
@@ -156,7 +175,11 @@ class HistoricalIPOPipeline:
             "official_notice_no_supported_value",
             "source_document_type_not_supported",
         }
-        if cached.empty or not {"notice_id", "validation_status"}.issubset(cached.columns):
+        required_cached_columns = {
+            "notice_id", "validation_status", "event_context_validation_status",
+            "source_document_sha256", "available_at",
+        }
+        if cached.empty or not required_cached_columns.issubset(cached.columns):
             reusable = pd.DataFrame(columns=RESULT_COLUMNS)
         else:
             reusable = cached[
@@ -165,9 +188,67 @@ class HistoricalIPOPipeline:
             ]
         reusable_ids = set(reusable.get("notice_id", pd.Series(dtype=str)).astype(str))
         pending = sources.loc[~requested_ids.isin(reusable_ids)].copy()
-        fresh = collector.collect_sources(pending) if not pending.empty else pd.DataFrame(columns=RESULT_COLUMNS)
+        event_contexts = {
+            str(row.event_id): row._asdict()
+            for row in events.itertuples(index=False)
+            if pd.notna(getattr(row, "event_id", None))
+        }
+        fresh = (
+            collector.collect_sources(pending, event_contexts=event_contexts)
+            if not pending.empty else pd.DataFrame(columns=RESULT_COLUMNS)
+        )
         result = pd.concat([reusable, fresh], ignore_index=True)
         return result.reindex(columns=RESULT_COLUMNS).drop_duplicates("notice_id", keep="last")
+
+    def _load_official_source_resolutions(self) -> pd.DataFrame:
+        """공식 원천을 확인한 뒤 확정한 결측 사유만 관측 원장에 반영한다."""
+        path = self.manual_dir / "official_source_resolutions.csv"
+        if not path.exists():
+            return pd.DataFrame(columns=OFFICIAL_SOURCE_RESOLUTION_COLUMNS)
+        resolutions = pd.read_csv(path, dtype=str).fillna("")
+        missing = {"event_id", "feature_name", "resolution_status", "checked_at"} - set(resolutions.columns)
+        if missing:
+            raise ValueError(f"공식 원천 결측 원장에 필요한 열이 없습니다: {', '.join(sorted(missing))}")
+        allowed = {
+            "official_source_not_published", "not_yet_published", "parser_failed", "source_access_failed",
+        }
+        invalid = set(resolutions["resolution_status"]) - allowed
+        if invalid:
+            raise ValueError(f"지원하지 않는 공식 원천 결측 상태입니다: {', '.join(sorted(invalid))}")
+        return resolutions.reindex(columns=OFFICIAL_SOURCE_RESOLUTION_COLUMNS)
+
+    @staticmethod
+    def _apply_official_source_resolutions(
+        observations: pd.DataFrame, resolutions: pd.DataFrame
+    ) -> pd.DataFrame:
+        """값을 만들지 않고, 확인된 결측 사유의 근거만 피처 관측에 붙인다."""
+        if observations.empty or resolutions.empty:
+            return observations
+        latest = resolutions.copy()
+        latest["checked_at"] = pd.to_datetime(latest["checked_at"], errors="coerce")
+        latest = latest.sort_values("checked_at").drop_duplicates(["event_id", "feature_name"], keep="last")
+        latest = latest.rename(columns={
+            "resolution_status": "resolved_missing_reason",
+            "checked_sources": "resolution_source_reference",
+            "checked_at": "resolution_checked_at",
+        })
+        result = observations.merge(
+            latest[[
+                "event_id", "feature_name", "resolved_missing_reason",
+                "resolution_source_reference", "resolution_checked_at",
+            ]],
+            on=["event_id", "feature_name"], how="left",
+        )
+        mask = result["is_missing"] & result["resolved_missing_reason"].notna()
+        result.loc[mask, "missing_reason"] = result.loc[mask, "resolved_missing_reason"]
+        source_reference = result["resolution_source_reference"].replace("", pd.NA)
+        result.loc[mask & source_reference.notna(), "source_reference"] = source_reference[mask & source_reference.notna()]
+        result.loc[mask, "collected_at"] = result.loc[mask, "resolution_checked_at"]
+        result.loc[mask, "validation_status"] = result.loc[mask, "resolved_missing_reason"]
+        result.loc[mask, "human_review_required"] = True
+        return result.drop(columns=[
+            "resolved_missing_reason", "resolution_source_reference", "resolution_checked_at",
+        ])
 
     @staticmethod
     def _merge_official_underwriter_results(
@@ -182,10 +263,18 @@ class HistoricalIPOPipeline:
         result["retail_subscription_ratio"] = float("nan")
         if underwriter_results.empty:
             return result
+        underwriter_results = underwriter_results.copy()
+        has_event_context_status = "event_context_validation_status" in underwriter_results.columns
+        for column in ("available_at", "collected_at", "notice_url", "event_context_validation_status"):
+            if column not in underwriter_results.columns:
+                underwriter_results[column] = pd.NA
         approved = underwriter_results[
             (underwriter_results["validation_status"] == "official_notice_integrated_retail_ratio")
             & underwriter_results["retail_subscription_ratio"].notna()
         ].copy()
+        if not has_event_context_status:
+            return result
+        approved = approved[approved["event_context_validation_status"].eq("verified_event_context")]
         if approved.empty:
             return result
         duplicate_values = approved.groupby("event_id")["retail_subscription_ratio"].nunique()
@@ -195,12 +284,13 @@ class HistoricalIPOPipeline:
             "retail_subscription_ratio": "retail_subscription_ratio_official",
             "notice_url": "retail_source_url",
             "validation_status": "retail_validation_status",
+            "available_at": "retail_available_at",
             "collected_at": "retail_collected_at",
         })
         result = result.merge(
             approved[[
                 "event_id", "retail_subscription_ratio_official", "retail_source_url",
-                "retail_validation_status", "retail_collected_at",
+                "retail_validation_status", "retail_available_at", "retail_collected_at",
             ]],
             on="event_id", how="left",
         )
@@ -601,13 +691,25 @@ class HistoricalIPOPipeline:
             offering["offering_price_parser_version"] = OFFERING_PRICE_PARSER_VERSION
 
             demand_rcept_no = None
+            demand_rcept_dt = None
             demand = {}
             try:
-                demand_rcept_no = self.dart.find_demand_forecast_disclosure(
-                    str(filing.corp_code),
-                    pd.Timestamp(filing.rcept_dt).strftime("%Y%m%d"),
-                    pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
-                )
+                demand_record_method = getattr(self.dart, "find_demand_forecast_disclosure_record", None)
+                if callable(demand_record_method):
+                    demand_record = demand_record_method(
+                        str(filing.corp_code),
+                        pd.Timestamp(filing.rcept_dt).strftime("%Y%m%d"),
+                        pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
+                    )
+                    if demand_record:
+                        demand_rcept_no = str(demand_record["rcept_no"])
+                        demand_rcept_dt = demand_record.get("rcept_dt")
+                else:
+                    demand_rcept_no = self.dart.find_demand_forecast_disclosure(
+                        str(filing.corp_code),
+                        pd.Timestamp(filing.rcept_dt).strftime("%Y%m%d"),
+                        pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
+                    )
                 if demand_rcept_no:
                     if self._should_retry_demand_document(demand_rcept_no):
                         demand = self.dart.get_demand_forecast(str(filing.corp_code), demand_rcept_no)
@@ -656,6 +758,20 @@ class HistoricalIPOPipeline:
                 "lineage_version": DART_LINEAGE_VERSION,
                 "feature_available_at": filing.rcept_dt,
                 "demand_rcept_no": demand_rcept_no,
+                "demand_rcept_dt": demand_rcept_dt,
+                "institutional_available_at": demand_rcept_dt,
+                "lockup_available_at": demand_rcept_dt,
+                "institutional_validation_status": (
+                    "dart_demand_document_parsed" if demand.get("institutional_demand_ratio") is not None
+                    else "needs_review_missing_demand_value"
+                ),
+                "lockup_validation_status": (
+                    "dart_demand_document_parsed" if any(
+                        demand.get(field) is not None for field in (
+                            "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
+                        )
+                    ) else "needs_review_missing_demand_value"
+                ),
                 **offering,
                 # 이 행은 현재 KRX 상장 이벤트에 맞춰 수집한 공시다. 원문에
                 # 기재된 상장예정일은 별도 보존하고, 병합 키는 실제 상장일을 쓴다.
@@ -893,15 +1009,23 @@ class HistoricalIPOPipeline:
         return audit
 
     @staticmethod
-    def _build_feature_time_audit(features: pd.DataFrame) -> pd.DataFrame:
-        """상장 전 정보만 피처로 사용했는지 행 단위로 검사한다."""
-        columns = [
-            "event_id", "corp_name", "listing_date", "feature_available_at",
-            "is_future_information", "time_validation_status",
-        ]
-        audit = features.reindex(columns=columns[:-2]).copy()
+    def _build_feature_time_audit(
+        features: pd.DataFrame, observations: pd.DataFrame | None = None
+    ) -> pd.DataFrame:
+        """각 피처의 실제 공개 시각이 상장 전인지 검사한다."""
+        if observations is None or observations.empty:
+            audit = features.reindex(columns=[
+                "event_id", "corp_name", "listing_date", "feature_available_at",
+            ]).copy()
+            audit["feature_name"] = "all_features_legacy"
+            audit["available_at"] = audit["feature_available_at"]
+        else:
+            audit = observations.reindex(columns=[
+                "event_id", "corp_name", "listing_date", "feature_name", "available_at",
+            ]).copy()
+            audit["feature_available_at"] = audit["available_at"]
         listing_date = pd.to_datetime(audit["listing_date"], errors="coerce")
-        available_at = pd.to_datetime(audit["feature_available_at"], errors="coerce")
+        available_at = pd.to_datetime(audit["available_at"], errors="coerce")
         audit["is_future_information"] = (
             available_at.notna() & listing_date.notna() & (available_at > listing_date)
         )

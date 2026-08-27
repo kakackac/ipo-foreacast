@@ -41,11 +41,6 @@ MIN_GENERAL_IPO_YEARS = 3
 MIN_GENERAL_IPOS_PER_YEAR = 5
 MIN_CORE_FEATURE_COMPLETENESS = 0.70
 MIN_CRITICAL_FEATURE_COMPLETENESS = 0.60
-CRITICAL_SOURCE_VALIDATED_FEATURES = (
-    "institutional_demand_ratio",
-    "retail_subscription_ratio",
-    "offering_price_band_position",
-)
 
 
 class TrainingReadinessError(RuntimeError):
@@ -76,15 +71,12 @@ def step_load_or_build_data(demo: bool = False, phase: str = "core"):
     return df
 
 
-def step_feature_selection(df, phase: str = "core"):
+def step_feature_selection(df, phase: str = "core", prediction_stage: str = "post_retail"):
     """사용할 피처 컬럼 선택"""
-    from features.definitions import get_core_feature_names, get_phase2_feature_names
+    from features.model_profiles import get_model_profile
 
-    if phase == "core":
-        feat_cols = get_core_feature_names()
-    else:
-        feat_cols = get_phase2_feature_names()
-
+    profile = get_model_profile(prediction_stage)
+    feat_cols = list(profile.feature_names)
     available = [c for c in feat_cols if c in df.columns]
     missing_indicators = [f"{column}__missing" for column in available if f"{column}__missing" in df.columns]
     available = available + missing_indicators
@@ -92,13 +84,17 @@ def step_feature_selection(df, phase: str = "core"):
 
     if missing:
         logger.warning("누락 피처 %d개: %s", len(missing), missing[:5])
-    logger.info("사용 피처: %d개 (요청 %d개 중)", len(available), len(feat_cols))
+    logger.info("사용 피처: %d개 (요청 %d개 중, %s)", len(available), len(feat_cols), prediction_stage)
     return available
 
 
-def assess_training_readiness(df: pd.DataFrame, phase: str = "core") -> dict:
+def assess_training_readiness(
+    df: pd.DataFrame, phase: str = "core", prediction_stage: str = "post_retail"
+) -> dict:
     """일반 IPO만 대상으로 학습 가능 여부와 미달 사유를 계산한다."""
-    from features.definitions import get_core_feature_names
+    from features.model_profiles import get_model_profile
+
+    profile = get_model_profile(prediction_stage)
 
     report: dict[str, object] = {
         "eligible": False,
@@ -108,6 +104,8 @@ def assess_training_readiness(df: pd.DataFrame, phase: str = "core") -> dict:
         "minimum_per_year": MIN_GENERAL_IPOS_PER_YEAR,
         "minimum_core_feature_completeness": MIN_CORE_FEATURE_COMPLETENESS,
         "minimum_critical_feature_completeness": MIN_CRITICAL_FEATURE_COMPLETENESS,
+        "prediction_stage": profile.name,
+        "prediction_stage_description": profile.description,
     }
     if "event_class" not in df.columns:
         report["reasons"].append("공식 이벤트 분류(event_class)가 없는 이전 피처 파일입니다.")
@@ -137,9 +135,10 @@ def assess_training_readiness(df: pd.DataFrame, phase: str = "core") -> dict:
         report["reasons"].append(
             f"연도별 {MIN_GENERAL_IPOS_PER_YEAR}건 이상인 일반 IPO 타깃 연도가 {eligible_years}개뿐입니다."
         )
-    core_features = [feature for feature in get_core_feature_names() if feature in candidates.columns]
-    if len(core_features) != len(get_core_feature_names()):
-        report["reasons"].append("핵심 피처 열이 완전하지 않습니다.")
+    core_features = [feature for feature in profile.feature_names if feature in candidates.columns]
+    if len(core_features) != len(profile.feature_names):
+        missing = sorted(set(profile.feature_names) - set(core_features))
+        report["reasons"].append(f"{profile.name} 모델의 피처 열이 완전하지 않습니다: {', '.join(missing)}")
         report["core_feature_completeness"] = 0.0
         report["source_time_validated_core_complete_rows"] = 0
         report["source_time_validated_core_complete_rate"] = 0.0
@@ -156,7 +155,7 @@ def assess_training_readiness(df: pd.DataFrame, phase: str = "core") -> dict:
             report["reasons"].append(
                 f"핵심 피처 평균 충족률이 {float(completeness.mean()):.1%}로 최소 {MIN_CORE_FEATURE_COMPLETENESS:.0%}에 미달합니다."
             )
-        for feature in CRITICAL_SOURCE_VALIDATED_FEATURES:
+        for feature in profile.critical_features:
             if feature not in completeness:
                 continue
             rate = float(completeness[feature])
@@ -177,9 +176,11 @@ def assess_training_readiness(df: pd.DataFrame, phase: str = "core") -> dict:
     return report
 
 
-def require_training_ready(df: pd.DataFrame, phase: str = "core") -> pd.DataFrame:
+def require_training_ready(
+    df: pd.DataFrame, phase: str = "core", prediction_stage: str = "post_retail"
+) -> pd.DataFrame:
     """학습 안전장치를 적용하고, 통과한 일반 IPO 행만 반환한다."""
-    report = assess_training_readiness(df, phase=phase)
+    report = assess_training_readiness(df, phase=phase, prediction_stage=prediction_stage)
     if not report["eligible"]:
         details = " | ".join(report["reasons"])
         raise TrainingReadinessError(f"학습·성능평가 차단: {details}")
@@ -371,14 +372,14 @@ def run_demo(phase: str = "core"):
     return summary
 
 
-def run_train(phase: str = "core"):
+def run_train(phase: str = "core", prediction_stage: str = "post_retail"):
     """실제 데이터 학습 모드"""
     import pandas as pd
 
-    logger.info("════ IPO 예측 파이프라인 — 학습 모드 (%s) ════", phase)
+    logger.info("════ IPO 예측 파이프라인 — 학습 모드 (%s, %s) ════", phase, prediction_stage)
     df           = step_load_or_build_data(demo=False, phase=phase)
-    df           = require_training_ready(df, phase=phase)
-    feature_cols = step_feature_selection(df, phase=phase)
+    df           = require_training_ready(df, phase=phase, prediction_stage=prediction_stage)
+    feature_cols = step_feature_selection(df, phase=phase, prediction_stage=prediction_stage)
     results = {}
     model_names = {
         "open_return_pct": "baseline_open_v1",
@@ -393,12 +394,12 @@ def run_train(phase: str = "core"):
     step_save_results(results)
 
 
-def run_backtest(phase: str = "core"):
+def run_backtest(phase: str = "core", prediction_stage: str = "post_retail"):
     """실제 데이터로 백테스트만 실행"""
-    logger.info("════ IPO 예측 파이프라인 — 백테스트 모드 (%s) ════", phase)
+    logger.info("════ IPO 예측 파이프라인 — 백테스트 모드 (%s, %s) ════", phase, prediction_stage)
     df           = step_load_or_build_data(demo=False, phase=phase)
-    df           = require_training_ready(df, phase=phase)
-    feature_cols = step_feature_selection(df, phase=phase)
+    df           = require_training_ready(df, phase=phase, prediction_stage=prediction_stage)
+    feature_cols = step_feature_selection(df, phase=phase, prediction_stage=prediction_stage)
     results = {}
     for target_col in ["open_return_pct", "close_return_pct"]:
         bt_result = step_backtest(df, feature_cols, target_col)
@@ -481,6 +482,12 @@ if __name__ == "__main__":
         default="core",
         help="피처 세트",
     )
+    parser.add_argument(
+        "--prediction-stage",
+        choices=["pre_demand", "post_demand", "post_retail"],
+        default="post_retail",
+        help="예측 기준 공개 단계. 실제 학습은 해당 단계의 품질 기준을 통과한 경우에만 허용",
+    )
     parser.add_argument("--start-year", type=int, default=2015, help="실제 수집 시작 연도")
     parser.add_argument(
         "--end-year",
@@ -493,11 +500,11 @@ if __name__ == "__main__":
     if args.mode == "demo":
         run_demo(phase=args.phase)
     elif args.mode == "train":
-        run_train(phase=args.phase)
+        run_train(phase=args.phase, prediction_stage=args.prediction_stage)
     elif args.mode == "analyze":
         run_analyze()
     elif args.mode == "backtest":
-        run_backtest(phase=args.phase)
+        run_backtest(phase=args.phase, prediction_stage=args.prediction_stage)
     elif args.mode == "collect":
         try:
             run_collect(args.start_year, args.end_year, phase=args.phase)

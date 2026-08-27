@@ -1,2 +1,2 @@
-event_id,corp_name,lead_underwriter,notice_url,source_type,published_at
-krx_kind|000000|YYYYMMDD|회사명,회사명,주관사명,https://official-underwriter.example/public-notice,public_notice,YYYY-MM-DD
+event_id,corp_name,lead_underwriter,notice_url,source_type,published_at,source_version,revision_of_notice_id,is_correction,notice_title,source_offering_price,subscription_start,subscription_end
+krx_kind|000000|YYYYMMDD|회사명,회사명,주관사명,https://official-underwriter.example/public-notice,public_notice,YYYY-MM-DD,initial,,false,공모주 청약 결과,10000,YYYY-MM-DD,YYYY-MM-DD

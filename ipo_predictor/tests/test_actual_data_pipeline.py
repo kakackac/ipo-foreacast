@@ -159,6 +159,18 @@ class ActualDataPipelineTests(unittest.TestCase):
         self.assertEqual((first_params["bgn_de"], first_params["end_de"]), ("20240101", "20240330"))
         self.assertEqual((second_params["bgn_de"], second_params["end_de"]), ("20240331", "20240430"))
 
+    def test_demand_forecast_candidate_keeps_receipt_date(self):
+        collector = DARTCollector(api_key="a" * 40)
+        collector.get_company_disclosure_list = Mock(return_value=pd.DataFrame([{
+            "rcept_no": "20240201000001", "rcept_dt": pd.Timestamp("2024-02-01"),
+            "report_nm": "수요예측결과", "corp_code": "12345678",
+        }]))
+
+        record = collector.find_demand_forecast_disclosure_record("12345678", "20240101", "20240501")
+
+        self.assertEqual(record["rcept_no"], "20240201000001")
+        self.assertEqual(record["rcept_dt"], pd.Timestamp("2024-02-01"))
+
     def test_document_zip_is_converted_to_plain_text(self):
         content = io.BytesIO()
         with zipfile.ZipFile(content, "w") as archive:
@@ -410,6 +422,39 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertEqual(krx.price_calls, 1)
             cached_prices = pd.read_parquet(root / "raw" / "ipo_listing_prices.parquet")
             self.assertTrue(pd.api.types.is_datetime64_any_dtype(cached_prices["listing_date"]))
+
+    def test_official_source_resolution_preserves_null_and_records_reason(self):
+        observations = pd.DataFrame([{
+            "event_id": "event-1", "feature_name": "retail_subscription_ratio", "is_missing": True,
+            "missing_reason": "official_underwriter_notice_not_collected", "source_reference": None,
+            "collected_at": pd.NaT, "validation_status": "needs_review", "human_review_required": True,
+        }])
+        resolutions = pd.DataFrame([{
+            "event_id": "event-1", "feature_name": "retail_subscription_ratio",
+            "resolution_status": "official_source_not_published", "checked_at": "2026-01-10",
+            "checked_sources": "DART;KRX;official_notice", "reviewed_by": "reviewer", "note": "checked",
+        }])
+
+        result = HistoricalIPOPipeline._apply_official_source_resolutions(observations, resolutions)
+
+        self.assertTrue(result.loc[0, "is_missing"])
+        self.assertEqual(result.loc[0, "missing_reason"], "official_source_not_published")
+        self.assertEqual(result.loc[0, "source_reference"], "DART;KRX;official_notice")
+
+    def test_feature_time_audit_uses_each_feature_available_at(self):
+        features = pd.DataFrame({
+            "event_id": ["event-1"], "corp_name": ["테스트"], "listing_date": ["2026-01-20"],
+            "feature_available_at": ["2026-01-10"],
+        })
+        observations = pd.DataFrame({
+            "event_id": ["event-1"], "corp_name": ["테스트"], "listing_date": ["2026-01-20"],
+            "feature_name": ["retail_subscription_ratio"], "available_at": ["2026-01-21"],
+        })
+
+        audit = HistoricalIPOPipeline._build_feature_time_audit(features, observations)
+
+        self.assertTrue(audit.loc[0, "is_future_information"])
+        self.assertEqual(audit.loc[0, "time_validation_status"], "future_information_blocked")
 
 
 if __name__ == "__main__":

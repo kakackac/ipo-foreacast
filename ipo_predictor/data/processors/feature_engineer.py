@@ -132,7 +132,9 @@ class FeatureEngineer:
             "offering_price", "offering_price_review_status", "open_return_pct", "close_return_pct",
             "rcept_no", "corp_code", "feature_available_at", "event_source_url",
             "verification_status", "lineage_validation_status", "retail_source_url",
-            "retail_validation_status", "retail_collected_at",
+            "retail_validation_status", "retail_available_at", "retail_collected_at",
+            "demand_rcept_no", "institutional_available_at", "lockup_available_at",
+            "institutional_validation_status", "lockup_validation_status",
         ]
         for column in identity_columns:
             if column not in df.columns:
@@ -202,7 +204,15 @@ class FeatureEngineer:
             "lineage_validation_status": ["lineage_validation_status", "lineage_validation_status_dart"],
             "retail_source_url": ["retail_source_url", "retail_source_url_dart"],
             "retail_validation_status": ["retail_validation_status", "retail_validation_status_dart"],
+            "retail_available_at": ["retail_available_at", "retail_available_at_dart"],
             "retail_collected_at": ["retail_collected_at", "retail_collected_at_dart"],
+            "demand_rcept_no": ["demand_rcept_no", "demand_rcept_no_dart"],
+            "institutional_available_at": ["institutional_available_at", "institutional_available_at_dart"],
+            "lockup_available_at": ["lockup_available_at", "lockup_available_at_dart"],
+            "institutional_validation_status": [
+                "institutional_validation_status", "institutional_validation_status_dart",
+            ],
+            "lockup_validation_status": ["lockup_validation_status", "lockup_validation_status_dart"],
             "same_day_ipo_count": ["same_day_ipo_count", "same_day_ipo_count_krx"],
             "open_price": ["open_price", "open_price_krx"],
             "close_price": ["close_price", "close_price_krx"],
@@ -694,8 +704,16 @@ class FeatureEngineer:
                 else:
                     missing_reason = None
                 source_ref = values.get("rcept_no")
+                available_at = values.get("feature_available_at")
+                if feature_name == "institutional_demand_ratio":
+                    source_ref = values.get("demand_rcept_no")
+                    available_at = values.get("institutional_available_at")
+                if feature_name.startswith("lockup_"):
+                    source_ref = values.get("demand_rcept_no")
+                    available_at = values.get("lockup_available_at")
                 if feature_name == "retail_subscription_ratio" and pd.notna(values.get("retail_source_url")):
                     source_ref = values.get("retail_source_url")
+                    available_at = values.get("retail_available_at")
                 if source.startswith("KRX"):
                     event_source_url = values.get("event_source_url")
                     source_ref = (
@@ -705,6 +723,10 @@ class FeatureEngineer:
                 validation = values.get("offering_price_review_status")
                 if feature_name == "retail_subscription_ratio":
                     validation = values.get("retail_validation_status")
+                elif feature_name == "institutional_demand_ratio":
+                    validation = values.get("institutional_validation_status")
+                elif feature_name.startswith("lockup_"):
+                    validation = values.get("lockup_validation_status")
                 if pd.isna(validation) or str(validation).strip() == "":
                     validation = values.get("verification_status")
                 if pd.isna(validation) or str(validation).strip() == "":
@@ -722,6 +744,7 @@ class FeatureEngineer:
                     "missing_reason": missing_reason,
                     "source": source,
                     "source_reference": source_ref,
+                    "available_at": available_at,
                     "collected_at": pd.Timestamp.now(tz="Asia/Seoul"),
                     "validation_status": validation,
                     "human_review_required": bool(missing or validation not in {
