@@ -16,7 +16,7 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
         session = Mock()
         response = Mock()
         response.content = (
-            b"<html><body>\xed\x86\xb5\xed\x95\xa9\xea\xb2\xbd\xec\x9f\x81\xeb\xa5\xa0 587.00 : 1 "
+            b"<html><body>\xec\xa0\x84\xec\xb2\xb4 \xec\xb0\xb8\xec\x97\xac \xec\xa6\x9d\xea\xb6\x8c\xec\x82\xac \xed\x86\xb5\xed\x95\xa9\xea\xb2\xbd\xec\x9f\x81\xeb\xa5\xa0 587.00 : 1 "
             b"\xea\xb8\xb0\xea\xb4\x80\xed\x88\xac\xec\x9e\x90\xec\x9e\x90 \xea\xb2\xbd\xec\x9f\x81\xeb\xa5\xa0 1,200 : 1</body></html>"
         )
         response.headers = {"Content-Type": "text/html; charset=utf-8"}
@@ -30,7 +30,7 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
         ))
 
         self.assertEqual(record["retail_subscription_ratio"], 587.0)
-        self.assertEqual(record["retail_ratio_scope"], "integrated")
+        self.assertEqual(record["retail_ratio_scope"], "integrated_all_participants")
         self.assertEqual(record["institutional_demand_ratio"], 1200.0)
         self.assertEqual(record["validation_status"], "official_notice_integrated_retail_ratio")
         self.assertFalse(record["human_review_required"])
@@ -95,7 +95,7 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
         response.raise_for_status.return_value = None
         session.get.return_value = response
         page = Mock()
-        page.extract_text.return_value = "통합경쟁률 587.00:1"
+        page.extract_text.return_value = "전체 참여 증권사 통합경쟁률 587.00:1"
         reader = Mock()
         reader.pages = [page]
 
@@ -107,6 +107,23 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
 
         self.assertEqual(record["retail_subscription_ratio"], 587.0)
         self.assertEqual(record["validation_status"], "official_notice_integrated_retail_ratio")
+
+    def test_integrated_word_without_all_participant_scope_stays_out_of_auto_approval(self):
+        session = Mock()
+        response = Mock()
+        response.content = b"<html><body>\xed\x86\xb5\xed\x95\xa9\xea\xb2\xbd\xec\x9f\x81\xeb\xa5\xa0 587.00 : 1</body></html>"
+        response.headers = {"Content-Type": "text/html; charset=utf-8"}
+        response.raise_for_status.return_value = None
+        session.get.return_value = response
+
+        record = OfficialUnderwriterCollector(session=session).collect_notice(OfficialNoticeSource(
+            event_id="event-1", corp_name="테스트", lead_underwriter="KB증권",
+            notice_url="https://www.kbsec.com/notice/1",
+        ))
+
+        self.assertEqual(record["retail_subscription_ratio"], 587.0)
+        self.assertEqual(record["retail_ratio_scope"], "underwriter_only_or_unknown")
+        self.assertEqual(record["validation_status"], "official_notice_value_requires_scope_review")
 
     def test_non_official_host_is_rejected_without_request(self):
         session = Mock()
@@ -121,7 +138,7 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
     def test_event_context_mismatch_prevents_auto_approval(self):
         session = Mock()
         response = Mock()
-        response.content = b"<html><body>\xed\x86\xb5\xed\x95\xa9\xea\xb2\xbd\xec\x9f\x81\xeb\xa5\xa0 587 : 1</body></html>"
+        response.content = b"<html><body>\xec\xa0\x84\xec\xb2\xb4 \xec\xa6\x9d\xea\xb6\x8c\xec\x82\xac \xed\x86\xb5\xed\x95\xa9\xea\xb2\xbd\xec\x9f\x81\xeb\xa5\xa0 587 : 1</body></html>"
         response.headers = {"Content-Type": "text/html; charset=utf-8"}
         response.raise_for_status.return_value = None
         session.get.return_value = response
@@ -144,7 +161,7 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
     def test_complete_event_context_allows_integrated_retail_approval(self):
         session = Mock()
         response = Mock()
-        response.content = b"<html><body>\xed\x86\xb5\xed\x95\xa9\xea\xb2\xbd\xec\x9f\x81\xeb\xa5\xa0 587 : 1</body></html>"
+        response.content = b"<html><body>\xec\xa0\x84\xec\xb2\xb4 \xec\xb0\xb8\xec\x97\xac \xec\xa6\x9d\xea\xb6\x8c\xec\x82\xac \xed\x86\xb5\xed\x95\xa9\xea\xb2\xbd\xec\x9f\x81\xeb\xa5\xa0 587 : 1</body></html>"
         response.headers = {"Content-Type": "text/html; charset=utf-8"}
         response.raise_for_status.return_value = None
         session.get.return_value = response
@@ -179,6 +196,7 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
             "한국투자증권", "미래에셋증권", "NH투자증권", "KB증권",
         ])
         self.assertEqual(priorities["priority"].tolist(), [1, 2, 3, 4])
+        self.assertTrue(priorities["collection_policy"].str.startswith("manual_url_only").all())
 
     def test_pipeline_merges_only_unambiguous_integrated_result(self):
         dart = pd.DataFrame({

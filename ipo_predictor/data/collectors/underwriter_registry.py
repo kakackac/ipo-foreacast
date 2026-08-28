@@ -14,6 +14,7 @@ OFFICIAL_UNDERWRITER_REGISTRY = {
         "public_discovery_url": "https://securities.koreainvestment.com/pro_help/7327.html",
         "document_formats": "public_html",
         "automatic_url_discovery": False,
+        "collection_policy": "manual_url_only_current_or_authenticated_ratio_screen",
     },
     "미래에셋증권": {
         "aliases": ("미래에셋증권", "미래에셋"),
@@ -21,6 +22,7 @@ OFFICIAL_UNDERWRITER_REGISTRY = {
         "public_discovery_url": "https://securities.miraeasset.com/public/mw/guide/html/notice01.html",
         "document_formats": "public_html_or_pdf",
         "automatic_url_discovery": False,
+        "collection_policy": "manual_url_only_current_or_authenticated_ratio_screen",
     },
     "NH투자증권": {
         "aliases": ("NH투자증권", "엔에이치투자증권", "NH"),
@@ -28,6 +30,7 @@ OFFICIAL_UNDERWRITER_REGISTRY = {
         "public_discovery_url": "https://www.nhqv.com/",
         "document_formats": "public_html_or_pdf",
         "automatic_url_discovery": False,
+        "collection_policy": "manual_url_only_public_result_route_not_yet_verified",
     },
     "KB증권": {
         "aliases": ("KB증권", "KB"),
@@ -35,6 +38,7 @@ OFFICIAL_UNDERWRITER_REGISTRY = {
         "public_discovery_url": "https://www.kbsec.com/go.able?linkcd=m02070000",
         "document_formats": "public_html_or_pdf",
         "automatic_url_discovery": False,
+        "collection_policy": "manual_url_only_public_notice_pdf_scope_review_required",
     },
 }
 
@@ -67,7 +71,7 @@ def build_underwriter_priorities(events: pd.DataFrame, top_n: int = 5) -> pd.Dat
     """일반 IPO 이벤트 비중으로 공식 수집 확대 순서를 만든다."""
     columns = [
         "priority", "lead_underwriter", "general_ipo_event_count", "coverage_ratio",
-        "public_discovery_url", "document_formats", "automatic_url_discovery", "supported",
+        "public_discovery_url", "document_formats", "automatic_url_discovery", "collection_policy", "supported",
     ]
     if events.empty or "lead_underwriter" not in events.columns:
         return pd.DataFrame(columns=columns)
@@ -92,6 +96,7 @@ def build_underwriter_priorities(events: pd.DataFrame, top_n: int = 5) -> pd.Dat
             "public_discovery_url": config["public_discovery_url"],
             "document_formats": config["document_formats"],
             "automatic_url_discovery": bool(config["automatic_url_discovery"]),
+            "collection_policy": config["collection_policy"],
             "supported": True,
         })
     result = pd.DataFrame(records, columns=columns[1:])

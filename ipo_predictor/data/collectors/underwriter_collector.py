@@ -96,6 +96,30 @@ class OfficialUnderwriterCollector:
         return None, None
 
     @staticmethod
+    def _retail_ratio_scope(blocks: list[str], evidence: str | None) -> str | None:
+        """전체 참여 증권사 범위가 원문에서 명시된 경우만 통합값으로 인정한다.
+
+        ``통합경쟁률``은 한 주관사 내부의 균등·비례 청약을 합친 의미로도
+        쓰일 수 있다. 따라서 단어 자체가 아니라 같은 행/문단의 전체 참여사
+        범위 문구까지 확인해야 모델 입력으로 안전하다.
+        """
+        if not evidence or "통합" not in evidence:
+            return None
+        all_participant_patterns = (
+            r"(?:전체|모든)\s*(?:참여\s*)?(?:증권사|주관사|청약\s*취급처)",
+            r"(?:공동\s*주관사|대표\s*주관사).{0,40}(?:합산|합계|전체)",
+            r"(?:합산|합계).{0,40}(?:전체|모든)\s*(?:증권사|주관사|청약\s*취급처)",
+        )
+        normalized_evidence = re.sub(r"\s+", " ", evidence).strip()
+        for block in blocks:
+            normalized_block = re.sub(r"\s+", " ", block).strip()
+            if normalized_evidence not in normalized_block:
+                continue
+            if any(re.search(pattern, normalized_block, flags=re.IGNORECASE) for pattern in all_participant_patterns):
+                return "integrated_all_participants"
+        return None
+
+    @staticmethod
     def _as_blocks(content: bytes, content_type: str) -> tuple[list[str] | None, str | None]:
         """HTML 또는 공개 PDF에서 원문 구조를 최대한 보존한 텍스트 블록을 만든다."""
         content_type = content_type.lower()
@@ -268,7 +292,7 @@ class OfficialUnderwriterCollector:
             blocks, ("의무보유확약 비율", "의무보유 확약 비율", "확약비율")
         )
         evidence = retail_evidence or institutional_evidence or lockup_evidence
-        scope = "integrated" if retail_evidence and "통합" in retail_evidence else None
+        scope = self._retail_ratio_scope(blocks, retail_evidence)
         if retail is not None and scope is None:
             scope = "underwriter_only_or_unknown"
         record.update(
@@ -279,9 +303,9 @@ class OfficialUnderwriterCollector:
             parse_evidence=evidence,
         )
         context_is_valid = context_status in {"verified_event_context", "not_checked_no_event_context"}
-        if retail is not None and scope == "integrated" and context_is_valid:
+        if retail is not None and scope == "integrated_all_participants" and context_is_valid:
             record.update(validation_status="official_notice_integrated_retail_ratio", human_review_required=False)
-        elif retail is not None and scope == "integrated":
+        elif retail is not None and scope == "integrated_all_participants":
             record.update(validation_status="official_notice_event_link_review_required")
         elif any(value is not None for value in (retail, institutional, lockup)):
             record.update(validation_status="official_notice_value_requires_scope_review")
