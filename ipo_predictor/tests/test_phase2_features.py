@@ -247,6 +247,26 @@ class Phase2FeatureTests(unittest.TestCase):
 
         self.assertEqual(parsed["demand_offering_price"], 45_000)
 
+    def test_dart_offering_result_approves_only_explicit_total_general_subscription_ratio(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_result_html(
+            "<table><tr><th>전체 일반청약 경쟁률</th><td>1,234.56 : 1</td></tr></table>",
+            "12345678",
+        )
+
+        self.assertEqual(parsed["retail_subscription_ratio"], 1234.56)
+        self.assertEqual(parsed["retail_ratio_scope"], "dart_issuer_total_general_subscription")
+        self.assertEqual(parsed["retail_validation_status"], "official_dart_issuer_total_retail_ratio")
+        self.assertFalse(parsed["retail_human_review_required"])
+
+    def test_dart_offering_result_quarantines_general_ratio_without_total_scope(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_result_html(
+            "일반청약 경쟁률 1,234.56 : 1", "12345678"
+        )
+
+        self.assertIsNone(parsed["retail_subscription_ratio"])
+        self.assertEqual(parsed["retail_subscription_ratio_candidate"], 1234.56)
+        self.assertEqual(parsed["retail_validation_status"], "dart_offering_result_scope_review_required")
+
     def test_equity_offering_price_flattens_dart_group_response(self):
         collector = DARTCollector(api_key="test")
         collector._get = lambda endpoint, params: {

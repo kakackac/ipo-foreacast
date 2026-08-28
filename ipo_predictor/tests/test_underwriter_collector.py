@@ -248,6 +248,44 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
 
         self.assertTrue(pd.isna(merged.loc[0, "retail_subscription_ratio"]))
 
+    def test_pipeline_uses_pre_listing_verified_dart_result_before_notice(self):
+        dart = pd.DataFrame({
+            "event_id": ["a"], "corp_name": ["A"], "listing_date": ["2026-01-20"],
+            "retail_available_at": ["2026-01-15"],
+            "retail_subscription_ratio": [123.0],
+            "retail_validation_status": ["official_dart_issuer_total_retail_ratio"],
+        })
+
+        merged = HistoricalIPOPipeline._merge_official_underwriter_results(dart, pd.DataFrame())
+
+        self.assertEqual(merged.loc[0, "retail_subscription_ratio"], 123.0)
+        self.assertEqual(merged.loc[0, "retail_subscription_eligibility_status"], "verified_official_dart")
+        self.assertTrue(merged.loc[0, "retail_subscription_eligible"])
+
+    def test_pipeline_quarantines_conflicting_dart_and_notice_results(self):
+        dart = pd.DataFrame({
+            "event_id": ["a"], "corp_name": ["A"], "listing_date": ["2026-01-20"],
+            "retail_available_at": ["2026-01-15"],
+            "retail_subscription_ratio": [123.0],
+            "retail_validation_status": ["official_dart_issuer_total_retail_ratio"],
+        })
+        notices = pd.DataFrame([{
+            "event_id": "a", "retail_subscription_ratio": 456.0,
+            "notice_url": "https://www.kbsec.com/a",
+            "validation_status": "official_notice_integrated_retail_ratio",
+            "event_context_validation_status": "verified_event_context",
+            "available_at": "2026-01-15",
+            "collected_at": pd.Timestamp("2026-01-16", tz="Asia/Seoul"),
+        }])
+
+        merged = HistoricalIPOPipeline._merge_official_underwriter_results(dart, notices)
+
+        self.assertTrue(pd.isna(merged.loc[0, "retail_subscription_ratio"]))
+        self.assertEqual(
+            merged.loc[0, "retail_subscription_eligibility_status"],
+            "official_source_conflict_review_required",
+        )
+
     def test_pipeline_does_not_trust_legacy_notice_without_event_validation(self):
         dart = pd.DataFrame({"event_id": ["a"], "corp_name": ["A"]})
         legacy_notice = pd.DataFrame([{

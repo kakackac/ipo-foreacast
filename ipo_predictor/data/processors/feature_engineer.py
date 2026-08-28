@@ -724,8 +724,11 @@ class FeatureEngineer:
                 feature = FEATURE_MAP[feature_name]
                 source = source_by_group[feature.group]
                 if feature_name == "retail_subscription_ratio":
+                    retail_status = values.get("retail_validation_status")
                     missing_reason = (
-                        "official_underwriter_notice_not_collected" if missing else None
+                        str(retail_status)
+                        if missing and pd.notna(retail_status) and str(retail_status).strip()
+                        else "official_underwriter_notice_not_collected" if missing else None
                     )
                 elif feature.group == FeatureGroup.FINANCIAL and missing:
                     missing_reason = "financial_publication_time_unverified"
@@ -789,6 +792,7 @@ class FeatureEngineer:
                         "verified_currency_unit", "verified_text_and_structured",
                         "verified_structured_api", "manual_verified",
                         "official_source_krx_code_enriched", "official_source_collected",
+                        "official_dart_issuer_total_retail_ratio", "official_dart_and_notice_match",
                     }),
                 })
         return pd.DataFrame(records)

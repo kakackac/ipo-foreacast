@@ -290,6 +290,36 @@ class DARTCollector:
             "report_nm": best["report_nm"],
         }
 
+    def find_offering_result_disclosure_record(
+        self,
+        corp_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> Optional[dict]:
+        """상장 전 증권발행실적보고서 후보를 찾는다.
+
+        개인 청약 경쟁률은 KRX 신규상장 이벤트 표의 표준 항목이 아니며,
+        DART도 별도 구조화 API 필드로 통일해 제공하지 않는다. 따라서 이
+        메서드는 법정 공시 제목이 명시된 후보만 고르고, 실제 값의 승인 여부는
+        ``get_offering_result``의 같은 행/문장 검증에 맡긴다.
+        """
+        disclosures = self.get_company_disclosure_list(corp_code, start_date, end_date)
+        if disclosures.empty:
+            return None
+
+        title = disclosures["report_nm"].fillna("")
+        # "발행실적" 같은 단어만으로는 유상증자·채권 등의 다른 공시를 섞을
+        # 수 있으므로 증권발행실적보고서라는 법정 제목만 후보로 허용한다.
+        candidates = disclosures[title.str.contains("증권발행실적보고서", regex=False)].copy()
+        if candidates.empty:
+            return None
+        best = candidates.sort_values(["rcept_dt", "rcept_no"], ascending=[False, False]).iloc[0]
+        return {
+            "rcept_no": str(best["rcept_no"]),
+            "rcept_dt": best["rcept_dt"],
+            "report_nm": best["report_nm"],
+        }
+
     # ── 수요예측 결과 파싱 ─────────────────────────────────────
 
     def get_demand_forecast(self, corp_code: str, rcept_no: str) -> dict:
@@ -304,6 +334,88 @@ class DARTCollector:
         특정 테이블 패턴을 정규식으로 파싱한다.
         """
         return self._parse_demand_forecast_html(self.get_document_text(rcept_no), corp_code)
+
+    def get_offering_result(self, corp_code: str, rcept_no: str) -> dict:
+        """증권발행실적보고서에서 일반청약 경쟁률 후보를 읽는다.
+
+        공시마다 표 구조가 다르므로, "일반청약 경쟁률"이라는 단어만으로는
+        전체 경쟁률이라고 단정하지 않는다. 전체/총 일반청약 범위와 숫자 : 1이
+        동일 표 행 또는 문장에 직접 연결된 경우만 자동 승인 후보가 된다.
+        """
+        return self._parse_offering_result_html(self.get_document_text(rcept_no), corp_code)
+
+    def _parse_offering_result_html(self, html: str, corp_code: str) -> dict:
+        """DART 증권발행실적보고서의 일반청약 경쟁률을 보수적으로 파싱한다."""
+        result = {
+            "corp_code": corp_code,
+            "retail_subscription_ratio": None,
+            "retail_subscription_ratio_candidate": None,
+            "retail_ratio_scope": None,
+            "retail_parse_evidence": None,
+            "retail_parse_method": None,
+            "retail_validation_status": "dart_offering_result_no_supported_value",
+            "retail_human_review_required": True,
+            "retail_parse_success": False,
+        }
+        if not html:
+            return result
+
+        text = self._normalize_text(html)
+        sources = [("dart_offering_result_table_row", row) for row in self._extract_table_rows(html)]
+        sources.extend(
+            ("dart_offering_result_same_sentence", sentence)
+            # 소수 경쟁률의 ``1,234.56 : 1``에서 마침표는 문장 경계가 아니다.
+            # 표 행을 잃은 원문도 안전하게 검사하되, 실제 문장 종결부호만 나눈다.
+            for sentence in re.split(r"(?<=[!?。;])", text)
+            if sentence.strip()
+        )
+
+        approved_labels = (
+            r"(?:전체|총)\s*일반\s*(?:공모\s*)?청약\s*(?:통합\s*)?경쟁률",
+            r"일반\s*(?:공모\s*)?청약\s*(?:전체|총)\s*(?:통합\s*)?경쟁률",
+        )
+        candidate_labels = approved_labels + (
+            r"일반\s*(?:공모\s*)?청약\s*(?:통합\s*)?경쟁률",
+            r"통합\s*일반\s*(?:공모\s*)?청약\s*경쟁률",
+        )
+        for method, context in sources:
+            normalized = re.sub(r"\s+", " ", context).strip()
+            for label in approved_labels:
+                match = re.search(
+                    rf"{label}\s*(?:은|는|:|：)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b",
+                    normalized,
+                    flags=re.IGNORECASE,
+                )
+                if match:
+                    value = float(match.group(1).replace(",", ""))
+                    result.update({
+                        "retail_subscription_ratio": value,
+                        "retail_subscription_ratio_candidate": value,
+                        "retail_ratio_scope": "dart_issuer_total_general_subscription",
+                        "retail_parse_evidence": match.group(0)[:240],
+                        "retail_validation_status": "official_dart_issuer_total_retail_ratio",
+                        "retail_human_review_required": False,
+                        "retail_parse_method": method,
+                        "retail_parse_success": True,
+                    })
+                    return result
+
+            for label in candidate_labels:
+                match = re.search(
+                    rf"{label}\s*(?:은|는|:|：)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b",
+                    normalized,
+                    flags=re.IGNORECASE,
+                )
+                if match:
+                    result.update({
+                        "retail_subscription_ratio_candidate": float(match.group(1).replace(",", "")),
+                        "retail_parse_evidence": match.group(0)[:240],
+                        "retail_validation_status": "dart_offering_result_scope_review_required",
+                        "retail_parse_method": method,
+                        "retail_parse_success": True,
+                    })
+                    return result
+        return result
 
     def _parse_demand_forecast_html(self, html: str, corp_code: str) -> dict:
         """

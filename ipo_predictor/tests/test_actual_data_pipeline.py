@@ -219,6 +219,24 @@ class ActualDataPipelineTests(unittest.TestCase):
         self.assertEqual(record["rcept_no"], "20240201000001")
         self.assertEqual(record["rcept_dt"], pd.Timestamp("2024-02-01"))
 
+    def test_offering_result_candidate_requires_statutory_report_title(self):
+        collector = DARTCollector(api_key="a" * 40)
+        collector.get_company_disclosure_list = Mock(return_value=pd.DataFrame([
+            {
+                "rcept_no": "20240201000001", "rcept_dt": pd.Timestamp("2024-02-01"),
+                "report_nm": "유상증자결정", "corp_code": "12345678",
+            },
+            {
+                "rcept_no": "20240202000001", "rcept_dt": pd.Timestamp("2024-02-02"),
+                "report_nm": "증권발행실적보고서", "corp_code": "12345678",
+            },
+        ]))
+
+        record = collector.find_offering_result_disclosure_record("12345678", "20240101", "20240501")
+
+        self.assertEqual(record["rcept_no"], "20240202000001")
+        self.assertEqual(record["report_nm"], "증권발행실적보고서")
+
     def test_document_zip_is_converted_to_plain_text(self):
         content = io.BytesIO()
         with zipfile.ZipFile(content, "w") as archive:
@@ -275,8 +293,50 @@ class ActualDataPipelineTests(unittest.TestCase):
             observations = pd.read_parquet(root / "processed" / "feature_observations.parquet")
             retail = observations[observations["feature_name"] == "retail_subscription_ratio"].iloc[0]
             self.assertTrue(retail["is_missing"])
-            self.assertEqual(retail["missing_reason"], "official_underwriter_notice_not_collected")
+            self.assertEqual(retail["missing_reason"], "dart_offering_result_not_found")
             self.assertTrue(retail["human_review_required"])
+
+    def test_pipeline_prefers_verified_pre_listing_dart_offering_result(self):
+        class ResultDART(_FakeDART):
+            def find_offering_result_disclosure_record(self, corp_code, start_date, end_date):
+                return {
+                    "rcept_no": "20240501000001", "rcept_dt": pd.Timestamp("2024-05-01"),
+                    "report_nm": "증권발행실적보고서",
+                }
+
+            def get_offering_result(self, corp_code, rcept_no):
+                return {
+                    "corp_code": corp_code,
+                    "retail_subscription_ratio": 1234.56,
+                    "retail_subscription_ratio_candidate": 1234.56,
+                    "retail_ratio_scope": "dart_issuer_total_general_subscription",
+                    "retail_parse_evidence": "전체 일반청약 경쟁률 1,234.56 : 1",
+                    "retail_parse_method": "dart_offering_result_table_row",
+                    "retail_validation_status": "official_dart_issuer_total_retail_ratio",
+                    "retail_human_review_required": False,
+                    "retail_parse_success": True,
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            summary = HistoricalIPOPipeline(
+                dart_collector=ResultDART(),
+                krx_collector=_FakeKRX(),
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+            ).run(2024, 2024, feature_set="phase2")
+
+            raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
+            audit = pd.read_parquet(root / "raw" / "dart_offering_result_audit.parquet")
+            observations = pd.read_parquet(root / "processed" / "feature_observations.parquet")
+            retail = observations[observations["feature_name"] == "retail_subscription_ratio"].iloc[0]
+
+            self.assertEqual(summary["dart_offering_result_candidate_rows"], 1)
+            self.assertEqual(summary["dart_offering_result_approved_retail_rows"], 1)
+            self.assertEqual(raw.loc[0, "retail_subscription_ratio"], 1234.56)
+            self.assertEqual(audit.loc[0, "retail_result_rcept_no"], "20240501000001")
+            self.assertFalse(retail["is_missing"])
+            self.assertFalse(retail["human_review_required"])
 
     def test_document_014_tries_another_receipt_in_the_same_lineage(self):
         class FallbackDART(_FakeDART):

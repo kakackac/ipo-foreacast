@@ -59,6 +59,9 @@ class HistoricalIPOPipeline:
         self.manual_dir.mkdir(parents=True, exist_ok=True)
         self._document_failures = self._load_cached_frame("dart_document_failures.parquet")
         self._demand_document_failures = self._load_cached_frame("dart_demand_document_failures.parquet")
+        self._offering_result_document_failures = self._load_cached_frame(
+            "dart_offering_result_document_failures.parquet"
+        )
         self._lineage_rows: list[dict[str, Any]] = []
 
     def run(self, start_year: int, end_year: int, feature_set: str = "phase2") -> dict[str, Any]:
@@ -100,6 +103,9 @@ class HistoricalIPOPipeline:
         self._demand_document_failures.to_parquet(
             self.raw_dir / "dart_demand_document_failures.parquet", index=False
         )
+        self._offering_result_document_failures.to_parquet(
+            self.raw_dir / "dart_offering_result_document_failures.parquet", index=False
+        )
         lineage = pd.DataFrame(self._lineage_rows)
         lineage.to_parquet(self.raw_dir / "dart_disclosure_lineage.parquet", index=False)
         self._build_document_failure_audit().to_parquet(
@@ -113,6 +119,9 @@ class HistoricalIPOPipeline:
 
         price_audit = self._build_offering_price_audit(dart_ipo)
         price_audit.to_parquet(self.raw_dir / "dart_offering_price_audit.parquet", index=False)
+        self._build_dart_offering_result_audit(dart_ipo).to_parquet(
+            self.raw_dir / "dart_offering_result_audit.parquet", index=False
+        )
         verified_statuses = {
             "verified_currency_unit",
             "verified_text_and_structured",
@@ -156,6 +165,19 @@ class HistoricalIPOPipeline:
         summary["official_underwriter_priority_rows"] = int(len(underwriter_priorities))
         summary["official_underwriter_priority_coverage"] = round(
             float(underwriter_priorities.get("coverage_ratio", pd.Series(dtype=float)).sum()), 4
+        )
+        retail_status = dart_ipo.get("retail_validation_status", pd.Series(dtype=object)).fillna("")
+        summary["dart_offering_result_candidate_rows"] = int(
+            dart_ipo.get("retail_result_rcept_no", pd.Series(dtype=object)).notna().sum()
+        )
+        summary["dart_offering_result_approved_retail_rows"] = int(
+            retail_status.eq("official_dart_issuer_total_retail_ratio").sum()
+        )
+        summary["dart_offering_result_scope_review_rows"] = int(
+            retail_status.eq("dart_offering_result_scope_review_required").sum()
+        )
+        summary["dart_offering_result_document_failure_rows"] = int(
+            len(self._offering_result_document_failures)
         )
         summary["model_stage_readiness"] = stage_summary
         with open(self.processed_dir / "data_collection_summary.json", "w", encoding="utf-8") as file:
@@ -359,18 +381,33 @@ class HistoricalIPOPipeline:
     def _merge_official_underwriter_results(
         dart_ipo: pd.DataFrame, underwriter_results: pd.DataFrame
     ) -> pd.DataFrame:
-        """전체 통합 경쟁률로 검증된 공식 주관사 값만 피처 후보로 반영한다."""
+        """DART 발행실적을 우선하고, 부족할 때만 공식 주관사 값을 반영한다."""
         if dart_ipo.empty:
             return dart_ipo
         result = dart_ipo.copy()
-        # 개인 청약 경쟁률은 DART의 비표준/기존 값이 아니라, 아래 공식
-        # 주관사 통합 경쟁률 승인 경로를 통과한 값만 사용할 수 있다.
-        result["retail_subscription_ratio"] = float("nan")
+        dart_value = pd.to_numeric(
+            result.get("retail_subscription_ratio", pd.Series(index=result.index, dtype=float)), errors="coerce"
+        )
+        dart_status = result.get("retail_validation_status", pd.Series(index=result.index, dtype=object))
+        dart_available_at = pd.to_datetime(
+            result.get("retail_available_at", pd.Series(index=result.index, dtype=object)), errors="coerce"
+        )
+        listing_date = pd.to_datetime(
+            result.get("listing_date", pd.Series(index=result.index, dtype=object)), errors="coerce"
+        )
+        dart_is_pre_listing = dart_available_at.notna() & listing_date.notna() & (dart_available_at < listing_date)
+        dart_is_verified = dart_status.eq("official_dart_issuer_total_retail_ratio")
+        dart_approved = dart_value.notna() & dart_is_verified & dart_is_pre_listing
+        # DART 증권발행실적보고서는 발행사 기준의 전체/총 일반청약 범위가
+        # 같은 행 또는 문장에 명시된 경우만 여기에 도달한다.
+        result["retail_subscription_ratio"] = dart_value.where(dart_approved)
         if "retail_subscription_eligibility_status" not in result.columns:
             result["retail_subscription_eligibility_status"] = pd.NA
         result["retail_subscription_eligible"] = pd.array([pd.NA] * len(result), dtype="boolean")
         ineligible = result["retail_subscription_eligibility_status"].eq("not_eligible_product")
         result.loc[ineligible, "retail_subscription_eligible"] = False
+        result.loc[dart_approved, "retail_subscription_eligible"] = True
+        result.loc[dart_approved, "retail_subscription_eligibility_status"] = "verified_official_dart"
         if underwriter_results.empty:
             return result
         underwriter_results = underwriter_results.copy()
@@ -405,9 +442,21 @@ class HistoricalIPOPipeline:
             on="event_id", how="left",
         )
         official = pd.to_numeric(result["retail_subscription_ratio_official"], errors="coerce")
-        result["retail_subscription_ratio"] = official
-        result.loc[official.notna(), "retail_subscription_eligible"] = True
-        result.loc[official.notna(), "retail_subscription_eligibility_status"] = "verified_official_notice"
+        notice_approved = official.notna()
+        existing_dart = result["retail_subscription_ratio"].notna()
+        same_value = existing_dart & notice_approved & result["retail_subscription_ratio"].eq(official)
+        conflicting_value = existing_dart & notice_approved & ~same_value
+        use_notice = notice_approved & ~existing_dart
+        result.loc[use_notice, "retail_subscription_ratio"] = official[use_notice]
+        result.loc[use_notice, "retail_subscription_eligible"] = True
+        result.loc[use_notice, "retail_subscription_eligibility_status"] = "verified_official_notice"
+        result.loc[same_value, "retail_validation_status"] = "official_dart_and_notice_match"
+        result.loc[same_value, "retail_subscription_eligibility_status"] = "verified_official_dart_and_notice"
+        # 독립된 공식 원천의 값이 다르면 한쪽을 임의로 고르지 않는다.
+        result.loc[conflicting_value, "retail_subscription_ratio"] = float("nan")
+        result.loc[conflicting_value, "retail_subscription_eligible"] = pd.NA
+        result.loc[conflicting_value, "retail_subscription_eligibility_status"] = "official_source_conflict_review_required"
+        result.loc[conflicting_value, "retail_validation_status"] = "official_source_conflict_review_required"
         return result.drop(columns=["retail_subscription_ratio_official"])
 
     def collect_official_event_master(
@@ -841,6 +890,70 @@ class HistoricalIPOPipeline:
                     )
                 logger.warning("수요예측 원문 파싱 실패 (%s): %s", filing.corp_name, exc)
 
+            retail_result_rcept_no = None
+            retail_result_rcept_dt = None
+            retail_result = {
+                "retail_subscription_ratio": None,
+                "retail_subscription_ratio_candidate": None,
+                "retail_ratio_scope": None,
+                "retail_parse_evidence": None,
+                "retail_parse_method": None,
+                "retail_validation_status": "dart_offering_result_not_found",
+                "retail_human_review_required": True,
+                "retail_parse_success": False,
+            }
+            # 개인 청약 결과는 먼저 발행사 DART 증권발행실적보고서를 찾는다.
+            # 상장일 공시나 그 이후에 공개된 문서는 상장 전 예측에 사용할 수 없다.
+            try:
+                result_record_method = getattr(self.dart, "find_offering_result_disclosure_record", None)
+                if callable(result_record_method):
+                    search_end = pd.Timestamp(listing.listing_date) - pd.Timedelta(days=1)
+                    result_record = result_record_method(
+                        str(filing.corp_code),
+                        pd.Timestamp(filing.rcept_dt).strftime("%Y%m%d"),
+                        search_end.strftime("%Y%m%d"),
+                    )
+                    if result_record:
+                        retail_result_rcept_no = str(result_record["rcept_no"])
+                        retail_result_rcept_dt = result_record.get("rcept_dt")
+                        self._lineage_rows.append({
+                            "event_id": event_id,
+                            "ticker": getattr(listing, "ticker", None),
+                            "krx_standard_code": getattr(listing, "krx_standard_code", None),
+                            "listing_date": listing.listing_date,
+                            "corp_name": filing.corp_name,
+                            "corp_code": str(filing.corp_code),
+                            "rcept_no": retail_result_rcept_no,
+                            "rcept_dt": retail_result_rcept_dt,
+                            "filing_report_nm": result_record.get("report_nm"),
+                            "lineage_role": "offering_result_candidate",
+                            "match_method": "dart_corp_code_pre_listing_offering_result",
+                            "lineage_validation_status": "pre_listing_dart_offering_result_candidate",
+                            "source_name": "OpenDART_list",
+                            "source_url": "https://opendart.fss.or.kr/api/list.json",
+                            "lineage_version": DART_LINEAGE_VERSION,
+                            "attempt_status": "not_attempted",
+                            "recorded_at": pd.Timestamp.now(tz="Asia/Seoul"),
+                        })
+                        if self._should_retry_offering_result_document(retail_result_rcept_no):
+                            retail_result = self.dart.get_offering_result(
+                                str(filing.corp_code), retail_result_rcept_no
+                            )
+                        else:
+                            retail_result["retail_validation_status"] = "dart_offering_result_retry_deferred"
+            except RuntimeError as exc:
+                if retail_result_rcept_no:
+                    self._record_offering_result_document_failure(
+                        rcept_no=retail_result_rcept_no,
+                        corp_code=str(filing.corp_code),
+                        corp_name=filing.corp_name,
+                        event_id=event_id,
+                        listing_date=listing.listing_date,
+                        error=exc,
+                    )
+                    retail_result["retail_validation_status"] = "dart_offering_result_document_retry_required"
+                logger.warning("발행실적 원문 파싱 실패 (%s): %s", filing.corp_name, exc)
+
             financial_summary, collected_financials = self._collect_financials(
                 str(filing.corp_code), pd.Timestamp(listing.listing_date)
             )
@@ -871,6 +984,13 @@ class HistoricalIPOPipeline:
                 "feature_available_at": filing.rcept_dt,
                 "demand_rcept_no": demand_rcept_no,
                 "demand_rcept_dt": demand_rcept_dt,
+                "retail_result_rcept_no": retail_result_rcept_no,
+                "retail_result_rcept_dt": retail_result_rcept_dt,
+                "retail_available_at": retail_result_rcept_dt,
+                "retail_source_url": (
+                    f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={retail_result_rcept_no}"
+                    if retail_result_rcept_no else None
+                ),
                 "institutional_available_at": demand_rcept_dt,
                 "lockup_available_at": demand_rcept_dt,
                 "institutional_validation_status": (
@@ -889,7 +1009,8 @@ class HistoricalIPOPipeline:
                 # 기재된 상장예정일은 별도 보존하고, 병합 키는 실제 상장일을 쓴다.
                 "disclosed_listing_date": offering.get("listing_date"),
                 "listing_date": listing.listing_date,
-                **{key: value for key, value in demand.items() if key != "corp_code"},
+                **{key: value for key, value in demand.items() if key not in {"corp_code", "parse_success"}},
+                **{key: value for key, value in retail_result.items() if key != "corp_code"},
                 **self._compare_offering_sources(offering, demand),
                 "financial_as_of_year": financial_summary.get("financial_as_of_year"),
                 "financial_time_validation_status": financial_time_validation_status,
@@ -1022,7 +1143,11 @@ class HistoricalIPOPipeline:
 
     def _should_retry_demand_document(self, rcept_no: str) -> bool:
         """수요예측 원문도 014를 영구 제외하지 않고 접수번호별로 재시도한다."""
-        failures = self._demand_document_failures
+        return self._should_retry_document_failure(self._demand_document_failures, rcept_no)
+
+    @staticmethod
+    def _should_retry_document_failure(failures: pd.DataFrame, rcept_no: str) -> bool:
+        """같은 ZIP 실패는 TTL 이후에만 재시도해 호출 낭비를 막는다."""
         if failures.empty or "rcept_no" not in failures:
             return True
         prior = failures[failures["rcept_no"].astype(str) == str(rcept_no)].copy()
@@ -1034,6 +1159,10 @@ class HistoricalIPOPipeline:
         if recorded_at.tzinfo is None:
             recorded_at = recorded_at.tz_localize("Asia/Seoul")
         return pd.Timestamp.now(tz="Asia/Seoul") - recorded_at >= pd.Timedelta(days=DOCUMENT_RETRY_AFTER_DAYS)
+
+    def _should_retry_offering_result_document(self, rcept_no: str) -> bool:
+        """발행실적 ZIP 실패도 회사 전체가 아닌 접수번호별로 보류한다."""
+        return self._should_retry_document_failure(self._offering_result_document_failures, rcept_no)
 
     def _record_demand_document_failure(
         self,
@@ -1063,6 +1192,35 @@ class HistoricalIPOPipeline:
             "recorded_at": pd.Timestamp.now(tz="Asia/Seoul"),
         }])
         self._demand_document_failures = pd.concat([prior, record], ignore_index=True)
+
+    def _record_offering_result_document_failure(
+        self,
+        *,
+        rcept_no: str,
+        corp_code: str,
+        corp_name: str,
+        event_id: str,
+        listing_date: object,
+        error: RuntimeError,
+    ) -> None:
+        """발행실적 원문의 014/통신 실패를 별도 이력으로 저장한다."""
+        is_zip_missing = "<status>014</status>" in str(error)
+        prior = self._offering_result_document_failures
+        attempts = 0
+        if not prior.empty and "rcept_no" in prior:
+            attempts = int((prior["rcept_no"].astype(str) == str(rcept_no)).sum())
+        record = pd.DataFrame([{
+            "rcept_no": str(rcept_no),
+            "corp_code": corp_code,
+            "corp_name": corp_name,
+            "event_id": event_id,
+            "listing_date": listing_date,
+            "reason": "zip_file_missing_retry_required" if is_zip_missing else "document_request_retry_required",
+            "retriable": True,
+            "attempt_number": attempts + 1,
+            "recorded_at": pd.Timestamp.now(tz="Asia/Seoul"),
+        }])
+        self._offering_result_document_failures = pd.concat([prior, record], ignore_index=True)
 
     def audit_document_failures(self) -> pd.DataFrame:
         """기존 원문 실패 접수번호를 접수번호 단위로 다시 감사한다.
@@ -1236,6 +1394,19 @@ class HistoricalIPOPipeline:
             "structured_price_check", "structured_price_record_count", "structured_price_check_version",
             "demand_offering_price", "demand_price_check",
             "demand_offering_price_context",
+        ]
+        return dart_ipo.reindex(columns=columns).copy()
+
+    @staticmethod
+    def _build_dart_offering_result_audit(dart_ipo: pd.DataFrame) -> pd.DataFrame:
+        """DART 발행실적의 개인 청약 값과 승인 근거를 별도 감사표로 남긴다."""
+        columns = [
+            "event_id", "corp_name", "listing_date", "corp_code",
+            "retail_result_rcept_no", "retail_result_rcept_dt", "retail_source_url",
+            "retail_subscription_ratio", "retail_subscription_ratio_candidate",
+            "retail_ratio_scope", "retail_parse_evidence", "retail_parse_method",
+            "retail_available_at", "retail_validation_status",
+            "retail_subscription_eligibility_status", "retail_human_review_required",
         ]
         return dart_ipo.reindex(columns=columns).copy()
 
