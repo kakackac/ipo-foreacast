@@ -7,7 +7,7 @@ import pandas as pd
 from data.collectors.dart_collector import DARTCollector
 from data.processors.feature_engineer import FeatureEngineer, build_demo_dataset
 from features.definitions import get_phase2_feature_names
-from features.model_profiles import get_model_profile
+from features.model_profiles import build_stage_dataset, get_model_profile
 from pipeline import assess_training_readiness
 import models.baseline.gradient_boost_model as gradient_boost_model
 from models.baseline.gradient_boost_model import IPOPriceModel
@@ -96,6 +96,43 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertNotIn("retail_subscription_ratio", post_demand.feature_names)
         self.assertIn("retail_subscription_ratio", post_retail.feature_names)
         self.assertIn("institutional_demand_ratio", post_demand.feature_names)
+
+    def test_stage_datasets_reuse_one_ipo_population_with_different_feature_contracts(self):
+        features = pd.DataFrame({
+            "event_id": ["common", "spac"],
+            "event_class": ["general_ipo", "spac_ipo"],
+            "offering_type": ["common_stock_ipo", "spac_ipo"],
+            "retail_subscription_eligible": [True, True],
+            "offering_price_review_status": ["verified_currency_unit"] * 2,
+            "open_return_pct": [10.0, 5.0],
+            "close_return_pct": [8.0, 4.0],
+            "listing_date": ["2024-01-10", "2024-01-11"],
+        })
+        for profile_name in ("pre_demand", "post_demand", "post_retail"):
+            profile = get_model_profile(profile_name)
+            for feature_name in profile.feature_names:
+                features[feature_name] = 1.0
+        audit = pd.DataFrame([
+            {
+                "event_id": event_id, "feature_name": feature_name,
+                "is_missing": False, "time_validation_status": "pre_listing_or_same_day",
+            }
+            for event_id in features["event_id"]
+            for feature_name in set().union(*(p.feature_names for p in (
+                get_model_profile("pre_demand"), get_model_profile("post_demand"), get_model_profile("post_retail")
+            )))
+        ])
+
+        pre = build_stage_dataset(features, "pre_demand", audit)
+        post_demand = build_stage_dataset(features, "post_demand", audit)
+        post_retail = build_stage_dataset(features, "post_retail", audit)
+
+        self.assertEqual(len(pre), 2)
+        self.assertEqual(len(post_demand), 2)
+        self.assertEqual(len(post_retail), 2)
+        self.assertTrue(pre["stage_model_candidate"].all())
+        self.assertTrue(post_demand["stage_model_candidate"].all())
+        self.assertTrue(post_retail["stage_model_candidate"].all())
 
     def test_merge_excludes_market_transfer_with_different_listing_date(self):
         dart = pd.DataFrame({

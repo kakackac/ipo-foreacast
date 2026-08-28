@@ -14,6 +14,7 @@ from data.collectors.krx_collector import KRXCollector
 from data.collectors.underwriter_collector import OfficialUnderwriterCollector, RESULT_COLUMNS
 from data.collectors.underwriter_registry import build_underwriter_priorities
 from data.processors.feature_engineer import FeatureEngineer
+from features.model_profiles import MODEL_PROFILES, build_stage_dataset, stage_readiness_by_offering_type
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +126,7 @@ class HistoricalIPOPipeline:
         )
         time_audit = self._build_feature_time_audit(features, observations)
         time_audit.to_parquet(self.processed_dir / "feature_time_validation.parquet", index=False)
+        stage_summary = self._write_stage_datasets(features, time_audit)
 
         summary = self._build_summary(calendar, dart_ipo, prices, features)
         summary["event_master_source"] = "KRX_KIND_new_listing_company"
@@ -145,9 +147,36 @@ class HistoricalIPOPipeline:
         summary["official_underwriter_priority_coverage"] = round(
             float(underwriter_priorities.get("coverage_ratio", pd.Series(dtype=float)).sum()), 4
         )
+        summary["model_stage_readiness"] = stage_summary
         with open(self.processed_dir / "data_collection_summary.json", "w", encoding="utf-8") as file:
             json.dump(summary, file, ensure_ascii=False, indent=2, default=str)
         logger.info("실제 데이터 파이프라인 완료: %d개 학습 행", len(features))
+        return summary
+
+    def _write_stage_datasets(
+        self, features: pd.DataFrame, feature_time_audit: pd.DataFrame
+    ) -> dict[str, dict[str, Any]]:
+        """동일 원천 데이터로 세 공개 단계의 후보 표와 유형별 준비도를 함께 저장한다."""
+        stage_dir = self.processed_dir / "model_stage_datasets"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        summary: dict[str, dict[str, Any]] = {}
+        for stage_name in MODEL_PROFILES:
+            dataset = build_stage_dataset(features, stage_name, feature_time_audit)
+            dataset.to_parquet(stage_dir / f"{stage_name}.parquet", index=False)
+            profile = MODEL_PROFILES[stage_name]
+            summary[stage_name] = {
+                "description": profile.description,
+                "required_features": list(profile.feature_names),
+                "event_rows": int(len(dataset)),
+                "verified_offering_price_rows": int(dataset["stage_offering_price_verified"].sum()),
+                "dual_target_rows": int(dataset["stage_dual_target_ready"].sum()),
+                "feature_complete_rows": int(dataset["stage_features_complete"].sum()),
+                "time_valid_rows": int(dataset["stage_time_valid"].sum()),
+                "model_candidate_rows": int(dataset["stage_model_candidate"].sum()),
+                "offering_type_breakdown": stage_readiness_by_offering_type(dataset),
+            }
+        with open(self.processed_dir / "model_stage_readiness.json", "w", encoding="utf-8") as file:
+            json.dump(summary, file, ensure_ascii=False, indent=2, default=str)
         return summary
 
     def _collect_official_underwriter_results(self, events: pd.DataFrame) -> pd.DataFrame:
@@ -261,6 +290,11 @@ class HistoricalIPOPipeline:
         # 개인 청약 경쟁률은 DART의 비표준/기존 값이 아니라, 아래 공식
         # 주관사 통합 경쟁률 승인 경로를 통과한 값만 사용할 수 있다.
         result["retail_subscription_ratio"] = float("nan")
+        if "retail_subscription_eligibility_status" not in result.columns:
+            result["retail_subscription_eligibility_status"] = pd.NA
+        result["retail_subscription_eligible"] = pd.array([pd.NA] * len(result), dtype="boolean")
+        ineligible = result["retail_subscription_eligibility_status"].eq("not_eligible_product")
+        result.loc[ineligible, "retail_subscription_eligible"] = False
         if underwriter_results.empty:
             return result
         underwriter_results = underwriter_results.copy()
@@ -296,6 +330,8 @@ class HistoricalIPOPipeline:
         )
         official = pd.to_numeric(result["retail_subscription_ratio_official"], errors="coerce")
         result["retail_subscription_ratio"] = official
+        result.loc[official.notna(), "retail_subscription_eligible"] = True
+        result.loc[official.notna(), "retail_subscription_eligibility_status"] = "verified_official_notice"
         return result.drop(columns=["retail_subscription_ratio_official"])
 
     def collect_official_event_master(
@@ -1021,7 +1057,7 @@ class HistoricalIPOPipeline:
             audit["available_at"] = audit["feature_available_at"]
         else:
             audit = observations.reindex(columns=[
-                "event_id", "corp_name", "listing_date", "feature_name", "available_at",
+                "event_id", "corp_name", "listing_date", "feature_name", "available_at", "is_missing",
             ]).copy()
             audit["feature_available_at"] = audit["available_at"]
         listing_date = pd.to_datetime(audit["listing_date"], errors="coerce")

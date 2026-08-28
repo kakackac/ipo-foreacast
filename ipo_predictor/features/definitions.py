@@ -217,6 +217,28 @@ CORE_FEATURES: list[FeatureDef] = [
 SECONDARY_FEATURES: list[FeatureDef] = [
 
     FeatureDef(
+        name        = "offering_type_spac_ipo",
+        group       = FeatureGroup.IPO_STRUCTURE,
+        importance  = Importance.SECONDARY,
+        dtype       = "bool",
+        description = "공모 유형이 스팩 IPO인지 여부",
+        source      = "KRX KIND 신규상장종목 현황 분류",
+        formula     = "offering_type == 'spac_ipo'",
+        fill_na     = "flag",
+    ),
+
+    FeatureDef(
+        name        = "offering_type_foreign_common_stock",
+        group       = FeatureGroup.IPO_STRUCTURE,
+        importance  = Importance.SECONDARY,
+        dtype       = "bool",
+        description = "공모 유형이 외국기업 보통주 상장인지 여부",
+        source      = "KRX KIND 신규상장종목 현황 분류",
+        formula     = "offering_type == 'foreign_common_stock_listing'",
+        fill_na     = "flag",
+    ),
+
+    FeatureDef(
         name        = "float_share_ratio",
         group       = FeatureGroup.SUPPLY,
         importance  = Importance.SECONDARY,

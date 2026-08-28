@@ -376,33 +376,68 @@ class KRXCollector:
         normalized = re.sub(r"\s+", "", name).upper()
         security_text = " ".join([security_type, stock_type]).upper()
 
-        def result(category: str, reason: str, confidence: str, review: bool = False) -> dict[str, str | bool]:
+        def result(
+            category: str,
+            reason: str,
+            confidence: str,
+            review: bool = False,
+            offering_type: str = "review_required",
+            retail_eligibility_status: str = "review_required",
+        ) -> dict[str, str | bool]:
             return {
                 "event_class": category,
+                "offering_type": offering_type,
+                # KIND의 신규상장 표만으로 일반청약 가능 여부를 확정하지 않는다.
+                # 실제 일반청약 결과 공지가 연결된 뒤에만 True로 승격한다.
+                "retail_subscription_eligibility_status": retail_eligibility_status,
                 "classification_reason": reason,
                 "classification_confidence": confidence,
                 "classification_review_required": review,
             }
 
         if "재상장" in listing_type:
-            return result("relisting", f"KIND 상장유형={listing_type}", "high")
+            return result("relisting", f"KIND 상장유형={listing_type}", "high", offering_type="relisting")
         if "이전상장" in listing_type:
             # KIND 공개 목록은 이전 시장을 항상 주지 않으므로 KONEX 여부를 추측하지 않는다.
-            return result("unclassified_review", "KIND 이전상장; 이전 시장 미확인", "medium", True)
+            return result(
+                "unclassified_review", "KIND 이전상장; 이전 시장 미확인", "medium", True,
+                offering_type="market_transfer",
+            )
         if any(token in security_text for token in ("ETF", "ETN", "수익증권", "펀드", "ELW")):
-            return result("ineligible_product", f"KIND 증권구분/주식종류={security_text}", "high")
+            return result(
+                "ineligible_product", f"KIND 증권구분/주식종류={security_text}", "high",
+                offering_type="fund_or_exchange_traded_product",
+                retail_eligibility_status="not_eligible_product",
+            )
         # '메리츠'처럼 '리츠'를 포함하는 일반·스팩 종목을 리츠로 오인하지 않도록
         # 스팩 판정을 리츠 문자열보다 먼저 한다.
         if "스팩" in name or "SPAC" in normalized:
-            return result("spac_ipo", "종목명 스팩/SPAC 단서", "high")
+            return result(
+                "spac_ipo", "종목명 스팩/SPAC 단서", "high", offering_type="spac_ipo",
+                retail_eligibility_status="candidate_requires_official_notice",
+            )
         if "리츠" in normalized or "REIT" in normalized or "부동산투자회사" in security_text:
-            return result("ineligible_product", "리츠·부동산투자회사", "high")
+            return result(
+                "ineligible_product", "리츠·부동산투자회사", "high", offering_type="reit",
+                retail_eligibility_status="not_eligible_product",
+            )
         if re.search(r"(?:우|우B|우C|우선)$", normalized) or "우선" in stock_type:
-            return result("preferred_or_class_share", "종목명 또는 주식종류의 우선·종류주 단서", "medium", True)
+            return result(
+                "preferred_or_class_share", "종목명 또는 주식종류의 우선·종류주 단서", "medium", True,
+                offering_type="preferred_or_class_share",
+            )
         if country and country not in {"대한민국", "국내"}:
-            return result("foreign_listing", f"KIND 국적={country}", "high")
+            return result(
+                "foreign_listing", f"KIND 국적={country}", "high",
+                offering_type="foreign_common_stock_listing",
+                retail_eligibility_status="candidate_requires_official_notice",
+            )
         if listing_type == "신규상장" and security_type in {"주권", "일반주권", ""}:
-            return result("general_ipo", "KIND 신규상장·주권; 추가 공시 정합 대기", "medium", True)
+            return result(
+                "general_ipo", "KIND 신규상장·주권; 추가 공시 정합 대기", "medium", True,
+                offering_type="common_stock_ipo",
+                retail_eligibility_status="candidate_requires_official_notice",
+            )
         return result("unclassified_review", "공식 분류 필드가 부족하거나 규칙 미포함", "low", True)
 
     @staticmethod
@@ -426,7 +461,8 @@ class KRXCollector:
             "security_type", "stock_type", "listing_type", "offering_price", "offering_shares",
             "lead_underwriter", "industry_name", "industry_code", "country", "face_value",
             "offering_amount", "event_class", "classification_reason", "classification_confidence",
-            "classification_review_required", "source_name", "source_url", "source_request_id",
+            "classification_review_required", "offering_type", "retail_subscription_eligibility_status",
+            "source_name", "source_url", "source_request_id",
             "collected_at", "verification_status", "listing_segment",
         ]
         if start > end:

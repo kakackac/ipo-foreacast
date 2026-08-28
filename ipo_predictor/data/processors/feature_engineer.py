@@ -107,6 +107,7 @@ class FeatureEngineer:
         df = self._calc_lockup_features(df)
         df = self._calc_band_position(df)
         df = self._calc_supply_structure_features(df)
+        df = self._calc_offering_type_features(df)
         df = self._calc_same_day_ipo_count(df)
         df = self._calc_underwriter_tier(df)
         df = self._calc_risk_factor_count(df)
@@ -128,7 +129,9 @@ class FeatureEngineer:
                 df[feature] = np.nan
 
         identity_columns = [
-            "event_id", "corp_name", "listing_date", "event_class", "industry_name", "listing_segment",
+            "event_id", "corp_name", "listing_date", "event_class", "offering_type",
+            "retail_subscription_eligibility_status", "retail_subscription_eligible",
+            "industry_name", "listing_segment",
             "offering_price", "offering_price_review_status", "open_return_pct", "close_return_pct",
             "rcept_no", "corp_code", "feature_available_at", "event_source_url",
             "verification_status", "lineage_validation_status", "retail_source_url",
@@ -196,6 +199,12 @@ class FeatureEngineer:
             "ticker": ["ticker", "ticker_krx", "ticker_dart"],
             "event_id": ["event_id_krx", "event_id_dart", "event_id"],
             "event_class": ["event_class_krx", "event_class_dart", "event_class"],
+            "offering_type": ["offering_type_krx", "offering_type_dart", "offering_type"],
+            "retail_subscription_eligibility_status": [
+                "retail_subscription_eligibility_status_krx",
+                "retail_subscription_eligibility_status_dart",
+                "retail_subscription_eligibility_status",
+            ],
             "industry_name": ["industry_name_krx", "industry_name_dart", "industry_name"],
             "listing_segment": ["listing_segment_krx", "listing_segment_dart", "sector_krx", "sector"],
             "market": ["market", "market_krx", "market_dart"],
@@ -230,6 +239,27 @@ class FeatureEngineer:
             merged["listing_date"] = pd.to_datetime(merged["listing_date"], errors="coerce")
         logger.info("병합 결과: %d건 (DART %d × KRX %d)", len(merged), len(dart_df), len(krx_df))
         return merged
+
+    def _calc_offering_type_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """공모 유형은 범주형 원문을 보존하고, 모델에는 독립 이진 피처로 넣는다.
+
+        유형에 임의의 순서를 부여하는 숫자 코드 대신 이진 피처를 쓴다. 스팩
+        여부는 DART 신고서 회사명으로 상장 전에 알 수 있어 모델에 쓸 수 있다.
+        외국기업 분류는 KIND 사후 이벤트 마스터 기반이므로 감사/평가용으로만
+        보존하고, 모델 프로필에는 넣지 않는다.
+        """
+        if "offering_type" not in df.columns:
+            event_class = df.get("event_class", pd.Series(index=df.index, dtype=object))
+            df["offering_type"] = event_class.map({
+                "general_ipo": "common_stock_ipo",
+                "spac_ipo": "spac_ipo",
+                "foreign_listing": "foreign_common_stock_listing",
+            }).fillna("review_required")
+        offering_type = df["offering_type"].fillna("review_required").astype(str)
+        pre_listing_name = df.get("corp_name", pd.Series("", index=df.index)).fillna("").astype(str)
+        df["offering_type_spac_ipo"] = pre_listing_name.str.contains("스팩|SPAC", case=False, regex=True)
+        df["offering_type_foreign_common_stock"] = offering_type.eq("foreign_common_stock_listing")
+        return df
 
     # ── 확약 피처 ─────────────────────────────────────────────
 
@@ -705,6 +735,14 @@ class FeatureEngineer:
                     missing_reason = None
                 source_ref = values.get("rcept_no")
                 available_at = values.get("feature_available_at")
+                if feature_name == "offering_type_spac_ipo":
+                    source = "DART_disclosure"
+                elif feature_name == "offering_type_foreign_common_stock":
+                    # KIND의 최종 상장 분류는 과거 유형별 평가에는 쓰되, 상장 전
+                    # 입력으로 쓸 수 없으므로 공개시각을 꾸며내지 않는다.
+                    source = "KRX_KIND_post_listing_event_classification"
+                    source_ref = values.get("event_source_url")
+                    available_at = pd.NA
                 if feature_name == "institutional_demand_ratio":
                     source_ref = values.get("demand_rcept_no")
                     available_at = values.get("institutional_available_at")
@@ -862,6 +900,18 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
             operating_margin=operating_margin,
             debt_ratio=debt_ratio,
         )
+        # 데모 데이터도 실제 파이프라인과 같은 범주형 입력 계약을 따른다.
+        # 기준 범주인 일반 보통주 IPO 외에 일부 스팩·외국기업 플래그를 섞는다.
+        offering_type = rng.choice(
+            ["common_stock_ipo", "spac_ipo", "foreign_common_stock_listing"],
+            size=n,
+            p=[0.80, 0.15, 0.05],
+        )
+        df["offering_type"] = offering_type
+        df["offering_type_spac_ipo"] = (offering_type == "spac_ipo").astype(int)
+        df["offering_type_foreign_common_stock"] = (
+            offering_type == "foreign_common_stock_listing"
+        ).astype(int)
     return df
 
 

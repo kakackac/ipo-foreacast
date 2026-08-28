@@ -208,6 +208,14 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertTrue((root / "raw" / "dart_ipo_raw.parquet").exists())
             self.assertTrue((root / "processed" / "feature_observations.parquet").exists())
             self.assertTrue((root / "processed" / "feature_time_validation.parquet").exists())
+            for stage_name in ("pre_demand", "post_demand", "post_retail"):
+                stage_path = root / "processed" / "model_stage_datasets" / f"{stage_name}.parquet"
+                self.assertTrue(stage_path.exists())
+                stage = pd.read_parquet(stage_path)
+                self.assertEqual(len(stage), 1)
+                self.assertIn("stage_model_candidate", stage.columns)
+            self.assertTrue((root / "processed" / "model_stage_readiness.json").exists())
+            self.assertIn("model_stage_readiness", summary)
             audit = pd.read_parquet(root / "raw" / "dart_offering_price_audit.parquet")
             review_queue = pd.read_parquet(root / "raw" / "dart_offering_price_review_queue.parquet")
             self.assertIn("offering_price_review_status", audit.columns)

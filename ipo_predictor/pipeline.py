@@ -49,7 +49,9 @@ class TrainingReadinessError(RuntimeError):
 
 # ── 파이프라인 스텝 ───────────────────────────────────────────
 
-def step_load_or_build_data(demo: bool = False, phase: str = "core"):
+def step_load_or_build_data(
+    demo: bool = False, phase: str = "core", prediction_stage: str | None = None
+):
     """데이터 로드 또는 데모 데이터 생성"""
     from data.processors.feature_engineer import build_demo_dataset, FeatureEngineer
     from features.definitions import get_core_feature_names, get_phase2_feature_names
@@ -60,13 +62,17 @@ def step_load_or_build_data(demo: bool = False, phase: str = "core"):
         logger.info("데모 데이터: %d행 × %d열", len(df), len(df.columns))
     else:
         from config import PROC_DIR
-        proc_path = PROC_DIR / "features_all.parquet"
+        stage_path = (
+            PROC_DIR / "model_stage_datasets" / f"{prediction_stage}.parquet"
+            if prediction_stage else None
+        )
+        proc_path = stage_path if stage_path and stage_path.exists() else PROC_DIR / "features_all.parquet"
         if not proc_path.exists():
             logger.error("피처 파일 없음: %s", proc_path)
-            logger.error("먼저 데이터 수집을 실행하세요 (dart_collector, krx_collector)")
+            logger.error("먼저 collect 모드로 공식 원천과 단계별 피처 파일을 생성하세요.")
             sys.exit(1)
         df = pd.read_parquet(proc_path)
-        logger.info("피처 로드: %d행", len(df))
+        logger.info("피처 로드: %d행 (%s)", len(df), proc_path.name)
 
     return df
 
@@ -164,7 +170,15 @@ def assess_training_readiness(
                     f"핵심 원천 피처 {feature} 충족률이 {rate:.1%}로 최소 "
                     f"{MIN_CRITICAL_FEATURE_COMPLETENESS:.0%}에 미달합니다."
                 )
-    if "feature_available_at" not in candidates.columns:
+    if "stage_time_valid" in candidates.columns:
+        invalid_time_rows = int((~candidates["stage_time_valid"].fillna(False).astype(bool)).sum())
+        report["stage_time_unverified_or_future_rows"] = invalid_time_rows
+        if invalid_time_rows:
+            report["reasons"].append(
+                f"{profile.name} 단계에서 피처 공개시각이 누락되었거나 상장일 이후인 행이 "
+                f"{invalid_time_rows}건 있습니다."
+            )
+    elif "feature_available_at" not in candidates.columns:
         report["reasons"].append("피처 공개시각이 없어 미래 정보 누출을 검증할 수 없습니다.")
     else:
         available_at = pd.to_datetime(candidates["feature_available_at"], errors="coerce")
@@ -184,9 +198,10 @@ def require_training_ready(
     if not report["eligible"]:
         details = " | ".join(report["reasons"])
         raise TrainingReadinessError(f"학습·성능평가 차단: {details}")
-    return step_filter_unreviewed_offering_prices(
-        df[df["event_class"].eq("general_ipo")].copy()
-    ).reset_index(drop=True)
+    eligible = step_filter_unreviewed_offering_prices(df[df["event_class"].eq("general_ipo")].copy())
+    if "stage_model_candidate" in eligible.columns:
+        eligible = eligible[eligible["stage_model_candidate"].fillna(False).astype(bool)]
+    return eligible.reset_index(drop=True)
 
 
 def step_filter_unreviewed_offering_prices(df):
@@ -377,7 +392,7 @@ def run_train(phase: str = "core", prediction_stage: str = "post_retail"):
     import pandas as pd
 
     logger.info("════ IPO 예측 파이프라인 — 학습 모드 (%s, %s) ════", phase, prediction_stage)
-    df           = step_load_or_build_data(demo=False, phase=phase)
+    df           = step_load_or_build_data(demo=False, phase=phase, prediction_stage=prediction_stage)
     df           = require_training_ready(df, phase=phase, prediction_stage=prediction_stage)
     feature_cols = step_feature_selection(df, phase=phase, prediction_stage=prediction_stage)
     results = {}
@@ -397,7 +412,7 @@ def run_train(phase: str = "core", prediction_stage: str = "post_retail"):
 def run_backtest(phase: str = "core", prediction_stage: str = "post_retail"):
     """실제 데이터로 백테스트만 실행"""
     logger.info("════ IPO 예측 파이프라인 — 백테스트 모드 (%s, %s) ════", phase, prediction_stage)
-    df           = step_load_or_build_data(demo=False, phase=phase)
+    df           = step_load_or_build_data(demo=False, phase=phase, prediction_stage=prediction_stage)
     df           = require_training_ready(df, phase=phase, prediction_stage=prediction_stage)
     feature_cols = step_feature_selection(df, phase=phase, prediction_stage=prediction_stage)
     results = {}
