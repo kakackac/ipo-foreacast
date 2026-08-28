@@ -476,13 +476,25 @@ def run_audit_dart_failures():
     return audit
 
 
+def run_prepare_underwriter_notice_review_queue():
+    """저장된 KRX 이벤트 마스터에서 공식 주관사 공지 URL 검토 대기열을 생성한다."""
+    from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline
+
+    queue = HistoricalIPOPipeline().prepare_underwriter_notice_review_queue()
+    logger.info("공식 주관사 공지 검토 대기열 생성 완료 | %d건", len(queue))
+    return queue
+
+
 if __name__ == "__main__":
     import pandas as pd
 
     parser = argparse.ArgumentParser(description="IPO 예측 파이프라인")
     parser.add_argument(
         "--mode",
-        choices=["train", "backtest", "analyze", "demo", "collect", "collect-events", "audit-dart-failures"],
+        choices=[
+            "train", "backtest", "analyze", "demo", "collect", "collect-events",
+            "audit-dart-failures", "prepare-underwriter-review-queue",
+        ],
         default="demo",
         help="실행 모드",
     )
@@ -537,6 +549,12 @@ if __name__ == "__main__":
             run_audit_dart_failures()
         except RuntimeError as exc:
             logger.error("DART 원문 실패 재감사 중단: %s", exc)
+            sys.exit(2)
+    elif args.mode == "prepare-underwriter-review-queue":
+        try:
+            run_prepare_underwriter_notice_review_queue()
+        except RuntimeError as exc:
+            logger.error("공식 주관사 공지 검토 대기열 생성 중단: %s", exc)
             sys.exit(2)
     else:
         logger.error("지원하지 않는 모드: %s", args.mode)

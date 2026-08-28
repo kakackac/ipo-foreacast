@@ -115,6 +115,54 @@ class _FakeKRX:
 
 
 class ActualDataPipelineTests(unittest.TestCase):
+    def test_underwriter_notice_review_queue_uses_event_master_without_web_discovery(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            raw_dir = root / "raw"
+            manual_dir = root / "manual"
+            raw_dir.mkdir()
+            manual_dir.mkdir()
+            pd.DataFrame([
+                {
+                    "event_id": "event-1", "event_class": "general_ipo",
+                    "offering_type": "common_stock_ipo", "ticker": "000001", "corp_name": "가나다",
+                    "lead_underwriter": "한국투자증권(주)", "market": "KOSDAQ",
+                    "listing_date": "2024-01-10", "offering_price": 10000,
+                    "source_url": "https://kind.krx.co.kr/event-1",
+                },
+                {
+                    "event_id": "event-2", "event_class": "spac_ipo",
+                    "offering_type": "spac_ipo", "ticker": "000002", "corp_name": "테스트스팩",
+                    "lead_underwriter": "KB증권(주)", "market": "KOSDAQ",
+                    "listing_date": "2024-01-11", "offering_price": 2000,
+                    "source_url": "https://kind.krx.co.kr/event-2",
+                },
+                {
+                    "event_id": "event-3", "event_class": "general_ipo",
+                    "offering_type": "common_stock_ipo", "ticker": "000003", "corp_name": "제외",
+                    "lead_underwriter": "다른증권", "market": "KOSDAQ",
+                    "listing_date": "2024-01-12", "offering_price": 10000,
+                    "source_url": "https://kind.krx.co.kr/event-3",
+                },
+            ]).to_parquet(raw_dir / "krx_official_event_master.parquet", index=False)
+            (manual_dir / "underwriter_notice_sources.csv").write_text(
+                "event_id,corp_name,lead_underwriter,notice_url\n"
+                "event-1,가나다,한국투자증권,https://securities.koreainvestment.com/notice/1\n",
+                encoding="utf-8",
+            )
+
+            queue = HistoricalIPOPipeline(
+                dart_collector=_FakeDART(), krx_collector=_FakeKRX(), raw_dir=raw_dir,
+                processed_dir=root / "processed",
+            ).prepare_underwriter_notice_review_queue()
+
+            self.assertEqual(queue["event_id"].tolist(), ["event-1", "event-2"])
+            self.assertEqual(queue.loc[0, "review_status"], "official_notice_url_already_linked")
+            self.assertEqual(queue.loc[1, "review_status"], "official_notice_url_required")
+            self.assertTrue(queue["collection_policy"].str.startswith("manual_url_only").all())
+            self.assertTrue((raw_dir / "official_underwriter_notice_review_queue.parquet").exists())
+            self.assertTrue((manual_dir / "underwriter_notice_review_queue.csv").exists())
+
     def test_dart_no_data_status_is_normalised_to_an_empty_list(self):
         response = Mock()
         response.raise_for_status.return_value = None

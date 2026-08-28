@@ -12,7 +12,11 @@ from config import PROC_DIR, RAW_DIR
 from data.collectors.dart_collector import DARTCollector
 from data.collectors.krx_collector import KRXCollector
 from data.collectors.underwriter_collector import OfficialUnderwriterCollector, RESULT_COLUMNS
-from data.collectors.underwriter_registry import build_underwriter_priorities
+from data.collectors.underwriter_registry import (
+    OFFICIAL_UNDERWRITER_REGISTRY,
+    build_underwriter_priorities,
+    normalize_underwriter,
+)
 from data.processors.feature_engineer import FeatureEngineer
 from features.model_profiles import MODEL_PROFILES, build_stage_dataset, stage_readiness_by_offering_type
 
@@ -26,6 +30,12 @@ DOCUMENT_RETRY_AFTER_DAYS = 7
 OFFICIAL_SOURCE_RESOLUTION_COLUMNS = [
     "event_id", "feature_name", "resolution_status", "checked_at", "checked_sources",
     "reviewed_by", "note",
+]
+UNDERWRITER_NOTICE_REVIEW_QUEUE_COLUMNS = [
+    "event_id", "event_class", "offering_type", "ticker", "corp_name", "lead_underwriter",
+    "market", "listing_date", "offering_price", "event_source_url", "public_discovery_url",
+    "collection_policy", "review_status", "review_note", "official_notice_url",
+    "notice_title", "published_at", "source_offering_price", "subscription_start", "subscription_end",
 ]
 
 
@@ -228,6 +238,72 @@ class HistoricalIPOPipeline:
         )
         result = pd.concat([reusable, fresh], ignore_index=True)
         return result.reindex(columns=RESULT_COLUMNS).drop_duplicates("notice_id", keep="last")
+
+    def prepare_underwriter_notice_review_queue(self) -> pd.DataFrame:
+        """공식 공지 URL을 사람 검토로 연결하기 위한 작업 대기열을 만든다.
+
+        이 메서드는 주관사 사이트를 탐색하거나 URL을 추측하지 않는다. 이미
+        저장된 KRX 이벤트 마스터에서 지원 주관사의 일반청약 후보만 골라,
+        공식 안내 페이지와 확인해야 할 이벤트 메타데이터를 함께 제공한다.
+        """
+        event_path = self.raw_dir / "krx_official_event_master.parquet"
+        if not event_path.exists():
+            raise RuntimeError(
+                "공식 KRX 이벤트 마스터가 없습니다. 먼저 collect-events 또는 collect를 실행하세요."
+            )
+        events = pd.read_parquet(event_path)
+        if events.empty:
+            return pd.DataFrame(columns=UNDERWRITER_NOTICE_REVIEW_QUEUE_COLUMNS)
+        candidates = events.copy()
+        candidates["normalized_underwriter"] = candidates.get(
+            "lead_underwriter", pd.Series(index=candidates.index, dtype=object)
+        ).map(normalize_underwriter)
+        candidates = candidates[candidates["normalized_underwriter"].isin(OFFICIAL_UNDERWRITER_REGISTRY)].copy()
+        candidates = candidates[candidates.get("event_class", pd.Series(index=candidates.index)).isin({
+            "general_ipo", "spac_ipo", "foreign_listing",
+        })].copy()
+
+        source_path = self.manual_dir / "underwriter_notice_sources.csv"
+        already_linked: set[str] = set()
+        if source_path.exists():
+            linked = pd.read_csv(source_path, dtype=str).fillna("")
+            if "event_id" in linked.columns and "notice_url" in linked.columns:
+                already_linked = set(linked[linked["notice_url"].astype(str).str.strip().ne("")]["event_id"])
+
+        records: list[dict[str, object]] = []
+        for event in candidates.itertuples(index=False):
+            config = OFFICIAL_UNDERWRITER_REGISTRY[str(event.normalized_underwriter)]
+            event_id = str(getattr(event, "event_id", ""))
+            records.append({
+                "event_id": event_id,
+                "event_class": getattr(event, "event_class", None),
+                "offering_type": getattr(event, "offering_type", None),
+                "ticker": getattr(event, "ticker", None),
+                "corp_name": getattr(event, "corp_name", None),
+                "lead_underwriter": event.normalized_underwriter,
+                "market": getattr(event, "market", None),
+                "listing_date": getattr(event, "listing_date", None),
+                "offering_price": getattr(event, "offering_price", None),
+                "event_source_url": getattr(event, "source_url", None),
+                "public_discovery_url": config["public_discovery_url"],
+                "collection_policy": config["collection_policy"],
+                "review_status": (
+                    "official_notice_url_already_linked" if event_id in already_linked
+                    else "official_notice_url_required"
+                ),
+                "review_note": "Do not use a broker-only or proportional ratio as the model feature.",
+                "official_notice_url": None,
+                "notice_title": None,
+                "published_at": None,
+                "source_offering_price": None,
+                "subscription_start": None,
+                "subscription_end": None,
+            })
+        queue = pd.DataFrame(records, columns=UNDERWRITER_NOTICE_REVIEW_QUEUE_COLUMNS)
+        queue = queue.sort_values(["listing_date", "corp_name"], na_position="last").reset_index(drop=True)
+        queue.to_parquet(self.raw_dir / "official_underwriter_notice_review_queue.parquet", index=False)
+        queue.to_csv(self.manual_dir / "underwriter_notice_review_queue.csv", index=False, encoding="utf-8-sig")
+        return queue
 
     def _load_official_source_resolutions(self) -> pd.DataFrame:
         """공식 원천을 확인한 뒤 확정한 결측 사유만 관측 원장에 반영한다."""
