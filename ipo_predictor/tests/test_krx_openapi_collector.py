@@ -123,6 +123,63 @@ class KRXOpenAPICollectorTests(unittest.TestCase):
         self.assertEqual(price["open_price"], 12000.0)
         self.assertEqual(price["close_price"], 10500.0)
 
+    def test_listing_price_records_empty_api_response_separately(self):
+        session = Mock()
+        session.get.side_effect = [
+            _response({"OutBlock_1": []}),
+            _response({"OutBlock_1": []}),
+        ]
+        collector = KRXCollector(api_key="test-key", session=session, request_delay=0)
+
+        price = collector.get_listing_day_price(
+            "214610", "20151022", market="KOSDAQ", corp_name="테스트기업"
+        )
+
+        self.assertEqual(price["price_match_status"], "unmatched")
+        self.assertEqual(price["price_failure_reason"], "daily_price_api_response_empty")
+        self.assertEqual(price["price_markets_queried"], "KOSDAQ,KOSPI")
+        self.assertEqual(price["price_api_rows_returned"], 0)
+
+    def test_listing_price_recovers_from_market_mismatch(self):
+        session = Mock()
+        session.get.side_effect = [
+            _response({"OutBlock_1": [{"ISU_SRT_CD": "999999", "ISU_NM": "다른기업"}]}),
+            _response({"OutBlock_1": [{
+                "ISU_SRT_CD": "214610", "ISU_NM": "테스트기업",
+                "TDD_OPNPRC": "10,000", "TDD_CLSPRC": "11,000",
+                "TDD_HGPRC": "12,000", "TDD_LWPRC": "9,000", "ACC_TRDVOL": "1,000",
+            }]}),
+        ]
+        collector = KRXCollector(api_key="test-key", session=session, request_delay=0)
+
+        price = collector.get_listing_day_price(
+            "214610", "20151022", market="KOSDAQ", corp_name="테스트기업"
+        )
+
+        self.assertEqual(price["market"], "KOSPI")
+        self.assertEqual(
+            price["price_match_method"], "ticker_or_short_issue_code_market_mismatch_recovered"
+        )
+        self.assertEqual(price["price_markets_queried"], "KOSDAQ,KOSPI")
+
+    def test_listing_price_records_code_and_company_name_mismatch(self):
+        session = Mock()
+        session.get.side_effect = [
+            _response({"OutBlock_1": [{"ISU_SRT_CD": "999999", "ISU_NM": "다른기업"}]}),
+            _response({"OutBlock_1": [{"ISU_SRT_CD": "888888", "ISU_NM": "또다른기업"}]}),
+        ]
+        collector = KRXCollector(api_key="test-key", session=session, request_delay=0)
+
+        price = collector.get_listing_day_price(
+            "214610", "20151022", market="KOSDAQ", corp_name="테스트기업"
+        )
+
+        self.assertEqual(price["price_match_status"], "unmatched")
+        self.assertEqual(
+            price["price_failure_reason"], "daily_rows_code_and_company_name_unmatched"
+        )
+        self.assertEqual(price["price_api_rows_returned"], 2)
+
     def test_index_collection_selects_main_index_and_skips_non_trading_days(self):
         session = Mock()
         session.get.side_effect = [

@@ -26,6 +26,7 @@ MAX_FILING_TO_LISTING_DAYS = 400
 STRUCTURED_PRICE_CHECK_VERSION = 3
 OFFERING_PRICE_PARSER_VERSION = 2
 DART_LINEAGE_VERSION = 1
+DART_OFFERING_RESULT_PARSER_VERSION = 2
 DOCUMENT_RETRY_AFTER_DAYS = 7
 OFFICIAL_SOURCE_RESOLUTION_COLUMNS = [
     "event_id", "feature_name", "resolution_status", "checked_at", "checked_sources",
@@ -79,6 +80,8 @@ class HistoricalIPOPipeline:
 
         prices = self._collect_listing_prices(calendar)
         prices.to_parquet(self.raw_dir / "ipo_listing_prices.parquet", index=False)
+        listing_price_audit = self._build_listing_price_audit(calendar, prices)
+        listing_price_audit.to_parquet(self.raw_dir / "krx_listing_price_audit.parquet", index=False)
         krx_ipo = self._attach_prices(calendar, prices)
         # 상장일 가격 조회에서 확인된 KRX 표준코드·시장 정보를 이벤트 마스터에
         # 되돌려 다음 실행의 이벤트 식별과 정합에 재사용한다.
@@ -155,6 +158,15 @@ class HistoricalIPOPipeline:
         }
         summary["legacy_list_dd_candidate_rows"] = event_manifest["legacy_candidate_rows"]
         summary["event_master_manifest"] = event_manifest["path"]
+        summary["listing_price_unmatched_rows"] = int(
+            listing_price_audit.get("price_match_status", pd.Series(dtype=object)).eq("unmatched").sum()
+        )
+        summary["listing_price_failure_reasons"] = {
+            str(reason): int(count)
+            for reason, count in listing_price_audit.get(
+                "price_failure_reason", pd.Series(dtype=object)
+            ).dropna().value_counts().items()
+        }
         summary["future_information_violations"] = int(time_audit["is_future_information"].sum())
         summary["feature_time_validation_rows"] = int(len(time_audit))
         summary["official_underwriter_notice_rows"] = int(len(underwriter_results))
@@ -175,6 +187,12 @@ class HistoricalIPOPipeline:
         )
         summary["dart_offering_result_scope_review_rows"] = int(
             retail_status.eq("dart_offering_result_scope_review_required").sum()
+        )
+        summary["dart_offering_result_non_retail_scope_rows"] = int(
+            retail_status.isin({
+                "dart_offering_result_institutional_included_not_retail",
+                "dart_offering_result_general_offering_not_retail_scope",
+            }).sum()
         )
         summary["dart_offering_result_document_failure_rows"] = int(
             len(self._offering_result_document_failures)
@@ -597,7 +615,11 @@ class HistoricalIPOPipeline:
             if not cached.empty and cache_key in cached_by_key.index:
                 previous = cached_by_key.loc[cache_key]
                 if pd.notna(previous.get("open_price")) and pd.notna(previous.get("close_price")):
-                    records.append(previous.to_dict())
+                    cached_record = previous.to_dict()
+                    cached_record.setdefault("price_match_status", "cached_verified_price")
+                    cached_record.setdefault("price_match_method", "prior_cache")
+                    cached_record.setdefault("price_failure_reason", None)
+                    records.append(cached_record)
                     reused += 1
                     continue
             listing_date = pd.Timestamp(row["listing_date"]).strftime("%Y%m%d")
@@ -699,6 +721,33 @@ class HistoricalIPOPipeline:
             merged.loc[enriched, "verification_status"] = "official_source_krx_code_enriched"
         return merged
 
+    @staticmethod
+    def _build_listing_price_audit(calendar: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
+        """KRX 상장일 가격 매칭 결과를 실패 원인까지 보존한다."""
+        event_columns = [
+            "event_id", "ticker", "corp_name", "listing_date", "market", "krx_standard_code",
+            "event_class", "offering_type",
+        ]
+        price_columns = [
+            "ticker", "listing_date", "isu_cd", "market", "open_price", "close_price",
+            "price_match_status", "price_match_method", "price_failure_reason",
+            "price_markets_queried", "price_api_rows_returned",
+        ]
+        events = calendar.reindex(columns=event_columns).copy()
+        events["listing_date"] = pd.to_datetime(events["listing_date"], errors="coerce")
+        result = prices.reindex(columns=price_columns).copy()
+        result["listing_date"] = pd.to_datetime(result["listing_date"], errors="coerce")
+        result = result.rename(columns={
+            "isu_cd": "price_isu_cd", "market": "price_market",
+            "open_price": "listing_open_price", "close_price": "listing_close_price",
+        })
+        audit = events.merge(result, on=["ticker", "listing_date"], how="left")
+        audit["price_match_status"] = audit["price_match_status"].fillna("unknown_legacy_cache")
+        audit["human_review_required"] = audit["price_match_status"].ne("matched") & audit[
+            "price_match_status"
+        ].ne("cached_verified_price")
+        return audit
+
     def _collect_dart_records(
         self,
         calendar: pd.DataFrame,
@@ -723,6 +772,20 @@ class HistoricalIPOPipeline:
             cached_by_receipt = {
                 str(row.rcept_no): row._asdict()
                 for row in cached_records.drop_duplicates("rcept_no", keep="last").itertuples(index=False)
+            }
+        cached_retail_by_receipt = {}
+        required_retail_cache_columns = {
+            "retail_result_rcept_no", "retail_parser_version", "retail_validation_status",
+        }
+        if not cached_records.empty and required_retail_cache_columns.issubset(cached_records.columns):
+            reusable_retail = cached_records[
+                cached_records["retail_result_rcept_no"].notna()
+                & cached_records["retail_parser_version"].eq(DART_OFFERING_RESULT_PARSER_VERSION)
+                & ~cached_records["retail_validation_status"].fillna("").str.contains("retry_", regex=False)
+            ]
+            cached_retail_by_receipt = {
+                str(row.retail_result_rcept_no): row._asdict()
+                for row in reusable_retail.drop_duplicates("retail_result_rcept_no", keep="last").itertuples(index=False)
             }
         calendar = calendar.copy()
         calendar["corp_name_clean"] = calendar["corp_name"].map(self._clean_name)
@@ -922,6 +985,7 @@ class HistoricalIPOPipeline:
             retail_result_rcept_no = None
             retail_result_rcept_dt = None
             retail_result = {
+                "retail_parser_version": DART_OFFERING_RESULT_PARSER_VERSION,
                 "retail_subscription_ratio": None,
                 "retail_subscription_ratio_candidate": None,
                 "retail_ratio_scope": None,
@@ -964,7 +1028,13 @@ class HistoricalIPOPipeline:
                             "attempt_status": "not_attempted",
                             "recorded_at": pd.Timestamp.now(tz="Asia/Seoul"),
                         })
-                        if self._should_retry_offering_result_document(retail_result_rcept_no):
+                        cached_retail = cached_retail_by_receipt.get(retail_result_rcept_no)
+                        if cached_retail is not None:
+                            retail_result = {
+                                key: cached_retail.get(key)
+                                for key in retail_result
+                            }
+                        elif self._should_retry_offering_result_document(retail_result_rcept_no):
                             retail_result = self.dart.get_offering_result(
                                 str(filing.corp_code), retail_result_rcept_no
                             )
@@ -1434,7 +1504,7 @@ class HistoricalIPOPipeline:
             "retail_result_rcept_no", "retail_result_rcept_dt", "retail_source_url",
             "retail_subscription_ratio", "retail_subscription_ratio_candidate",
             "retail_ratio_scope", "retail_parse_evidence", "retail_parse_method",
-            "retail_available_at", "retail_validation_status",
+            "retail_available_at", "retail_parser_version", "retail_validation_status",
             "retail_subscription_eligibility_status", "retail_human_review_required",
         ]
         return dart_ipo.reindex(columns=columns).copy()

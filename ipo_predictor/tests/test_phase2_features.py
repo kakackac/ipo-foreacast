@@ -247,9 +247,9 @@ class Phase2FeatureTests(unittest.TestCase):
 
         self.assertEqual(parsed["demand_offering_price"], 45_000)
 
-    def test_dart_offering_result_approves_only_explicit_total_general_subscription_ratio(self):
+    def test_dart_offering_result_approves_only_explicit_total_general_investor_subscription_ratio(self):
         parsed = DARTCollector(api_key="test")._parse_offering_result_html(
-            "<table><tr><th>전체 일반청약 경쟁률</th><td>1,234.56 : 1</td></tr></table>",
+            "<table><tr><th>전체 일반청약자 경쟁률</th><td>1,234.56 : 1</td></tr></table>",
             "12345678",
         )
 
@@ -257,6 +257,31 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(parsed["retail_ratio_scope"], "dart_issuer_total_general_subscription")
         self.assertEqual(parsed["retail_validation_status"], "official_dart_issuer_total_retail_ratio")
         self.assertFalse(parsed["retail_human_review_required"])
+
+    def test_dart_offering_result_with_institutional_subscription_is_not_retail(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_result_html(
+            "<table><tr><th>전체 일반청약자 경쟁률</th><td>1,234.56 : 1</td></tr></table>"
+            "일반공모에는 기관투자자의 청약이 포함되어 있습니다.",
+            "12345678",
+        )
+
+        self.assertIsNone(parsed["retail_subscription_ratio"])
+        self.assertEqual(
+            parsed["retail_validation_status"],
+            "dart_offering_result_institutional_included_not_retail",
+        )
+
+    def test_dart_general_offering_table_is_not_assumed_to_be_retail(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_result_html(
+            "청약 및 배정현황 일반공모 최초 배정내역 청약현황 배정현황",
+            "12345678",
+        )
+
+        self.assertIsNone(parsed["retail_subscription_ratio"])
+        self.assertEqual(
+            parsed["retail_validation_status"],
+            "dart_offering_result_general_offering_not_retail_scope",
+        )
 
     def test_dart_offering_result_quarantines_general_ratio_without_total_scope(self):
         parsed = DARTCollector(api_key="test")._parse_offering_result_html(

@@ -242,27 +242,45 @@ class KRXCollector:
         없을 때만 KOSPI와 KOSDAQ를 모두 조회해, API 호출을 최소화한다.
         """
         selected_market = self._normalise_market(market)
+        # KIND 시장값이 맞더라도 과거 코드·시장 변경 사례를 감사하기 위해, 첫
+        # 시장에서 못 찾은 경우에만 반대 시장을 추가로 확인한다.
         markets = [selected_market] if selected_market else list(MARKETS)
+        if selected_market:
+            markets.extend(name for name in MARKETS if name != selected_market)
         normalized_ticker = self._normalise_ticker(ticker)
         normalized_isu_cd = str(isu_cd or "").strip().upper()
         expected_short_code = self._short_issue_code(isu_cd or ticker)
         normalized_name = self._normalise_company_name(corp_name)
+        rows_by_market: dict[str, list[dict[str, Any]]] = {}
 
         for market_name in markets:
             rows = self._get_daily_records(
                 MARKETS[market_name]["daily_price"], self._as_bas_dd(listing_date)
             )
+            rows_by_market[market_name] = rows
             for row in rows:
                 row_isu_cd = str(row.get("ISU_CD", "")).strip().upper()
                 row_ticker = self._normalise_ticker(row.get("ISU_SRT_CD"))
                 if normalized_isu_cd and row_isu_cd == normalized_isu_cd:
-                    return self._price_record(ticker, listing_date, isu_cd, row, market_name)
+                    method = "krx_standard_code"
+                    if selected_market and market_name != selected_market:
+                        method = "krx_standard_code_market_mismatch_recovered"
+                    return self._price_record(
+                        ticker, listing_date, isu_cd, row, market_name, method, rows_by_market
+                    )
                 if (
                     row_ticker == normalized_ticker
                     or self._short_issue_code(row_isu_cd) == expected_short_code
                 ):
-                    return self._price_record(ticker, listing_date, isu_cd or row_isu_cd, row, market_name)
-            if normalized_name:
+                    method = "ticker_or_short_issue_code"
+                    if selected_market and market_name != selected_market:
+                        method = "ticker_or_short_issue_code_market_mismatch_recovered"
+                    return self._price_record(
+                        ticker, listing_date, isu_cd or row_isu_cd, row, market_name, method, rows_by_market
+                    )
+
+        if normalized_name:
+            for market_name, rows in rows_by_market.items():
                 name_match = next(
                     (
                         row for row in rows
@@ -271,19 +289,40 @@ class KRXCollector:
                     None,
                 )
                 if name_match is not None:
-                    logger.info("회사명으로 외국기업 상장일 가격을 매칭했습니다: %s", corp_name)
-                    return self._price_record(ticker, listing_date, isu_cd, name_match, market_name)
+                    method = "company_name_fallback"
+                    if selected_market and market_name != selected_market:
+                        method = "company_name_market_mismatch_recovered"
+                    logger.info("회사명으로 상장일 가격을 매칭했습니다: %s (%s)", corp_name, method)
+                    return self._price_record(
+                        ticker, listing_date, isu_cd, name_match, market_name, method, rows_by_market
+                    )
 
-        logger.warning("상장일 가격을 찾지 못했습니다: %s (%s)", ticker, listing_date)
+        row_count = sum(len(rows) for rows in rows_by_market.values())
+        if row_count == 0:
+            failure_reason = "daily_price_api_response_empty"
+        elif normalized_name:
+            failure_reason = "daily_rows_code_and_company_name_unmatched"
+        else:
+            failure_reason = "daily_rows_code_unmatched_company_name_unavailable"
+        logger.warning(
+            "상장일 가격 미매칭 | 종목=%s | 일자=%s | 사유=%s | 조회시장=%s | 응답행=%d",
+            ticker, listing_date, failure_reason, ",".join(rows_by_market), row_count,
+        )
         return {
             "ticker": ticker,
             "isu_cd": isu_cd,
             "listing_date": self._as_bas_dd(listing_date),
+            "market": selected_market,
             "open_price": None,
             "close_price": None,
             "high_price": None,
             "low_price": None,
             "volume": None,
+            "price_match_status": "unmatched",
+            "price_match_method": None,
+            "price_failure_reason": failure_reason,
+            "price_markets_queried": ",".join(rows_by_market),
+            "price_api_rows_returned": row_count,
         }
 
     def _price_record(
@@ -293,6 +332,8 @@ class KRXCollector:
         isu_cd: str | None,
         row: dict[str, Any],
         market: str,
+        match_method: str,
+        rows_by_market: dict[str, list[dict[str, Any]]],
     ) -> dict[str, Any]:
         return {
             "ticker": ticker,
@@ -304,6 +345,11 @@ class KRXCollector:
             "high_price": self._to_number(row.get("TDD_HGPRC")),
             "low_price": self._to_number(row.get("TDD_LWPRC")),
             "volume": self._to_number(row.get("ACC_TRDVOL")),
+            "price_match_status": "matched",
+            "price_match_method": match_method,
+            "price_failure_reason": None,
+            "price_markets_queried": ",".join(rows_by_market),
+            "price_api_rows_returned": sum(len(rows) for rows in rows_by_market.values()),
         }
 
     def get_legacy_list_dd_candidates(self, start_date: str, end_date: str) -> pd.DataFrame:

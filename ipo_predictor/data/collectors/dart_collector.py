@@ -348,6 +348,7 @@ class DARTCollector:
         """DART 증권발행실적보고서의 일반청약 경쟁률을 보수적으로 파싱한다."""
         result = {
             "corp_code": corp_code,
+            "retail_parser_version": 2,
             "retail_subscription_ratio": None,
             "retail_subscription_ratio_candidate": None,
             "retail_ratio_scope": None,
@@ -361,6 +362,22 @@ class DARTCollector:
             return result
 
         text = self._normalize_text(html)
+        # 발행실적보고서의 "일반공모" 청약현황은 기관투자자 청약을 포함하는
+        # 경우가 있다. 이 경우 전체 공모 경쟁률은 개인 일반청약 경쟁률이 아니므로
+        # 숫자가 있더라도 retail 피처로 전환하지 않는다.
+        institutional_included = re.search(
+            r"일반\s*공모(?:에는|에)?\s*기관\s*투자자의?\s*청약이\s*포함",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if institutional_included:
+            result.update({
+                "retail_parse_evidence": institutional_included.group(0)[:240],
+                "retail_parse_method": "dart_offering_result_scope_note",
+                "retail_validation_status": "dart_offering_result_institutional_included_not_retail",
+                "retail_parse_success": True,
+            })
+            return result
         sources = [("dart_offering_result_table_row", row) for row in self._extract_table_rows(html)]
         sources.extend(
             ("dart_offering_result_same_sentence", sentence)
@@ -371,8 +388,8 @@ class DARTCollector:
         )
 
         approved_labels = (
-            r"(?:전체|총)\s*일반\s*(?:공모\s*)?청약\s*(?:통합\s*)?경쟁률",
-            r"일반\s*(?:공모\s*)?청약\s*(?:전체|총)\s*(?:통합\s*)?경쟁률",
+            r"(?:전체|총)\s*일반\s*(?:공모\s*)?청약자\s*(?:통합\s*)?경쟁률",
+            r"일반\s*(?:공모\s*)?청약자\s*(?:전체|총)\s*(?:통합\s*)?경쟁률",
         )
         candidate_labels = approved_labels + (
             r"일반\s*(?:공모\s*)?청약\s*(?:통합\s*)?경쟁률",
@@ -415,6 +432,15 @@ class DARTCollector:
                         "retail_parse_success": True,
                     })
                     return result
+        general_offering = re.search(r"일반\s*공모", text, flags=re.IGNORECASE)
+        subscription_status = re.search(r"청약\s*현황", text, flags=re.IGNORECASE)
+        if general_offering and subscription_status:
+            result.update({
+                "retail_parse_evidence": f"{general_offering.group(0)} / {subscription_status.group(0)}",
+                "retail_parse_method": "dart_offering_result_general_offering_table",
+                "retail_validation_status": "dart_offering_result_general_offering_not_retail_scope",
+                "retail_parse_success": True,
+            })
         return result
 
     def _parse_demand_forecast_html(self, html: str, corp_code: str) -> dict:

@@ -338,6 +338,46 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertFalse(retail["is_missing"])
             self.assertFalse(retail["human_review_required"])
 
+    def test_second_run_reuses_versioned_dart_offering_result_audit(self):
+        class CachedResultDART(_FakeDART):
+            def __init__(self):
+                self.result_calls = 0
+
+            def find_offering_result_disclosure_record(self, corp_code, start_date, end_date):
+                return {
+                    "rcept_no": "20240501000001", "rcept_dt": pd.Timestamp("2024-05-01"),
+                    "report_nm": "증권발행실적보고서",
+                }
+
+            def get_offering_result(self, corp_code, rcept_no):
+                self.result_calls += 1
+                return {
+                    "corp_code": corp_code,
+                    "retail_parser_version": 2,
+                    "retail_subscription_ratio": None,
+                    "retail_subscription_ratio_candidate": None,
+                    "retail_ratio_scope": None,
+                    "retail_parse_evidence": "일반공모 / 청약현황",
+                    "retail_parse_method": "dart_offering_result_general_offering_table",
+                    "retail_validation_status": "dart_offering_result_general_offering_not_retail_scope",
+                    "retail_human_review_required": True,
+                    "retail_parse_success": True,
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dart = CachedResultDART()
+            pipeline = HistoricalIPOPipeline(
+                dart_collector=dart,
+                krx_collector=_FakeKRX(),
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+            )
+            pipeline.run(2024, 2024, feature_set="phase2")
+            pipeline.run(2024, 2024, feature_set="phase2")
+
+            self.assertEqual(dart.result_calls, 1)
+
     def test_document_014_tries_another_receipt_in_the_same_lineage(self):
         class FallbackDART(_FakeDART):
             def get_ipo_disclosure_list(self, start_date, end_date):
