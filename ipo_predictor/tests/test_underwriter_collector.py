@@ -64,9 +64,37 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
             notice_url="https://www.kbsec.com/notice/1",
         ))
 
-        self.assertEqual(record["retail_subscription_ratio"], 1364.23)
-        self.assertEqual(record["retail_ratio_scope"], "underwriter_only_or_unknown")
+        self.assertIsNone(record["retail_subscription_ratio"])
+        self.assertEqual(record["proportional_allocation_ratio"], 1364.23)
+        self.assertIsNone(record["retail_ratio_scope"])
         self.assertEqual(record["validation_status"], "official_notice_value_requires_scope_review")
+
+    def test_kb_style_notice_keeps_raw_general_subscription_components_unapproved(self):
+        """공식 KB 공지 형식은 전체 경쟁률 대신 비례 경쟁률과 원시 수치를 싣는다."""
+        session = Mock()
+        response = Mock()
+        response.content = """
+            <html><body>
+              <h1>테스트 일반청약 배정주식 및 환불 안내</h1>
+              <p>일반배정 주식수: 300,000주[균등배정 150,000주(50%), 비례배정 150,000주(50%)]</p>
+              <p>청약주식수: 512,013,160주</p>
+              <p>비례배정: 비례배정 경쟁률 3,412.42 : 1 기준으로 안분배정</p>
+            </body></html>
+        """.encode()
+        response.headers = {"Content-Type": "text/html; charset=utf-8"}
+        response.raise_for_status.return_value = None
+        session.get.return_value = response
+
+        record = OfficialUnderwriterCollector(session=session).collect_notice(OfficialNoticeSource(
+            event_id="event-1", corp_name="테스트", lead_underwriter="KB증권",
+            notice_url="https://www.kbsec.com/notice/1",
+        ))
+
+        self.assertIsNone(record["retail_subscription_ratio"])
+        self.assertEqual(record["proportional_allocation_ratio"], 3412.42)
+        self.assertEqual(record["retail_subscribed_shares"], 512_013_160)
+        self.assertEqual(record["retail_allocation_shares"], 300_000)
+        self.assertEqual(record["validation_status"], "official_notice_raw_retail_components_collected")
 
     def test_label_and_ratio_must_be_directly_connected(self):
         session = Mock()

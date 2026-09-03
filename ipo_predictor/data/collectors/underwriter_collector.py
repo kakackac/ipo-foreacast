@@ -29,7 +29,7 @@ RESULT_COLUMNS = [
     "source_document_sha256", "source_offering_price", "subscription_start", "subscription_end",
     "event_listing_date", "event_offering_price", "event_context_validation_status",
     "notice_underwriter", "retail_participating_brokers", "scope_verification_status",
-    "retail_subscription_ratio", "retail_ratio_scope", "retail_subscribed_shares",
+    "retail_subscription_ratio", "proportional_allocation_ratio", "retail_ratio_scope", "retail_subscribed_shares",
     "retail_allocation_shares", "retail_raw_values_evidence", "institutional_demand_ratio",
     "lockup_ratio", "parse_evidence", "validation_status", "missing_reason",
     "human_review_required",
@@ -288,6 +288,7 @@ class OfficialUnderwriterCollector:
             "retail_participating_brokers": source.retail_participating_brokers,
             "scope_verification_status": source.scope_verification_status,
             "retail_subscription_ratio": None,
+            "proportional_allocation_ratio": None,
             "retail_ratio_scope": None,
             "retail_subscribed_shares": None,
             "retail_allocation_shares": None,
@@ -347,19 +348,24 @@ class OfficialUnderwriterCollector:
             blocks, (
                 "공동주관사 전체 일반청약 경쟁률", "전체 일반청약 경쟁률",
                 "일반청약 전체 경쟁률", "통합 일반청약 경쟁률", "통합경쟁률",
-                "통합 경쟁률", "일반청약 경쟁률", "일반 경쟁률", "비례배정 경쟁률",
+                "통합 경쟁률", "일반청약 경쟁률", "일반 경쟁률",
             )
+        )
+        proportional, proportional_evidence = self._direct_ratio(
+            blocks, ("비례배정 경쟁률", "비례 경쟁률")
         )
         subscribed_shares, subscribed_evidence = self._direct_share(
             blocks, (
                 r"일반\s*(?:공모\s*)?청약\s*(?:신청\s*)?주식\s*수",
                 r"일반\s*(?:공모\s*)?청약\s*청약\s*주식\s*수",
+                r"청약\s*주식\s*수",
             )
         )
         allocation_shares, allocation_evidence = self._direct_share(
             blocks, (
                 r"일반\s*(?:공모\s*)?청약\s*(?:배정\s*)?(?:주식\s*)?(?:수|물량)",
                 r"일반\s*(?:공모\s*)?청약\s*배정\s*주식\s*수",
+                r"일반\s*배정\s*주식\s*수",
             )
         )
         institutional, institutional_evidence = self._direct_ratio(
@@ -368,7 +374,10 @@ class OfficialUnderwriterCollector:
         lockup, lockup_evidence = self._direct_percent(
             blocks, ("의무보유확약 비율", "의무보유 확약 비율", "확약비율")
         )
-        evidence = retail_evidence or subscribed_evidence or allocation_evidence or institutional_evidence or lockup_evidence
+        evidence = (
+            retail_evidence or proportional_evidence or subscribed_evidence or allocation_evidence
+            or institutional_evidence or lockup_evidence
+        )
         scope = self._retail_ratio_scope(blocks, retail_evidence)
         sole_scope = self._is_sole_retail_intake_scope(blocks, retail_evidence)
         if retail is not None and scope is None and sole_scope:
@@ -377,6 +386,7 @@ class OfficialUnderwriterCollector:
             scope = "underwriter_only_or_unknown"
         record.update(
             retail_subscription_ratio=retail,
+            proportional_allocation_ratio=proportional,
             retail_ratio_scope=scope,
             retail_subscribed_shares=subscribed_shares,
             retail_allocation_shares=allocation_shares,
@@ -401,7 +411,7 @@ class OfficialUnderwriterCollector:
                 validation_status="official_notice_raw_retail_components_collected",
                 missing_reason="requires_all_participants_reconstruction",
             )
-        elif any(value is not None for value in (retail, institutional, lockup)):
+        elif any(value is not None for value in (retail, proportional, institutional, lockup)):
             record.update(validation_status="official_notice_value_requires_scope_review")
         else:
             record.update(
