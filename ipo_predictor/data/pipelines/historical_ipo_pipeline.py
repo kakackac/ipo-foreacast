@@ -660,20 +660,40 @@ class HistoricalIPOPipeline:
     def _attach_prices(calendar: pd.DataFrame, prices: pd.DataFrame) -> pd.DataFrame:
         if prices.empty:
             return calendar.copy()
-        right = prices.copy()
+        # 이벤트 마스터는 이전 실행에서 이미 가격·시장 보강 열을 가질 수 있다.
+        # 다시 merge할 때 같은 이름을 쓰면 pandas가 중복 열을 만들므로, 가격
+        # 원천을 임시 이름으로 붙인 뒤 아래에서 단일 정식 열로 합친다.
+        price_columns = [
+            "isu_cd", "market", "open_price", "close_price", "high_price", "low_price", "volume",
+        ]
+        available_price_columns = [column for column in price_columns if column in prices.columns]
+        right = prices.reindex(columns=["ticker", "listing_date", *available_price_columns]).copy()
         if "listing_date" in right.columns:
             right["listing_date"] = pd.to_datetime(right["listing_date"], errors="coerce")
+        right = right.rename(columns={column: f"{column}_from_price" for column in available_price_columns})
         left = calendar.copy()
         left["listing_date"] = pd.to_datetime(left["listing_date"], errors="coerce")
-        merged = left.merge(right, on=["ticker", "listing_date"], how="left", suffixes=("", "_price"))
+        merged = left.merge(right, on=["ticker", "listing_date"], how="left")
+        for column in price_columns:
+            source_column = f"{column}_from_price"
+            if source_column not in merged.columns:
+                continue
+            existing = merged[column] if column in merged.columns else pd.Series(index=merged.index, dtype=object)
+            # 이번 가격 조회값이 있으면 사용하고, 해당 종목의 가격 조회가 실패한
+            # 경우에만 이전 실행에서 보강한 값을 유지한다.
+            source_value = merged[source_column]
+            merged[column] = source_value.where(source_value.notna(), existing)
+        source_isu_code = merged.get("isu_cd_from_price")
+        if "krx_standard_code" in merged.columns and source_isu_code is not None:
+            merged["krx_standard_code"] = source_isu_code.combine_first(merged["krx_standard_code"])
+        elif source_isu_code is not None:
+            merged["krx_standard_code"] = source_isu_code
+        # 과거 버전이 남긴 ``market_price``는 이미 ``market``에 반영했거나
+        # 새 가격 원천으로 대체했으므로 저장 스키마에서는 제거한다.
+        helper_columns = [column for column in merged.columns if column.endswith("_from_price")]
         if "market_price" in merged.columns:
-            merged["market"] = merged.get("market", pd.Series(index=merged.index, dtype=object)).combine_first(
-                merged["market_price"]
-            )
-        if "krx_standard_code" in merged.columns and "isu_cd" in merged.columns:
-            merged["krx_standard_code"] = merged["krx_standard_code"].combine_first(merged["isu_cd"])
-        elif "isu_cd" in merged.columns:
-            merged["krx_standard_code"] = merged["isu_cd"]
+            helper_columns.append("market_price")
+        merged = merged.drop(columns=helper_columns)
         if "verification_status" in merged.columns:
             enriched = merged.get("krx_standard_code", pd.Series(index=merged.index, dtype=object)).notna()
             merged.loc[enriched, "verification_status"] = "official_source_krx_code_enriched"

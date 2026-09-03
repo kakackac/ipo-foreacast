@@ -539,6 +539,26 @@ class ActualDataPipelineTests(unittest.TestCase):
             cached_prices = pd.read_parquet(root / "raw" / "ipo_listing_prices.parquet")
             self.assertTrue(pd.api.types.is_datetime64_any_dtype(cached_prices["listing_date"]))
 
+    def test_attach_prices_replaces_prior_enrichment_without_duplicate_market_columns(self):
+        calendar = pd.DataFrame([{
+            "ticker": "123456", "listing_date": "2024-01-10", "market": "KOSDAQ",
+            "market_price": "KOSDAQ", "isu_cd": "OLD", "open_price": 10_000,
+            "close_price": 11_000, "verification_status": "previous",
+        }])
+        prices = pd.DataFrame([{
+            "ticker": "123456", "listing_date": "2024-01-10", "market": "KOSPI",
+            "isu_cd": "NEW", "open_price": 12_000, "close_price": 13_000,
+            "high_price": 14_000, "low_price": 9_000, "volume": 1_000,
+        }])
+
+        merged = HistoricalIPOPipeline._attach_prices(calendar, prices)
+
+        self.assertFalse(merged.columns.duplicated().any())
+        self.assertEqual(merged.loc[0, "market"], "KOSPI")
+        self.assertEqual(merged.loc[0, "krx_standard_code"], "NEW")
+        self.assertEqual(merged.loc[0, "open_price"], 12_000)
+        self.assertNotIn("market_price", merged.columns)
+
     def test_official_source_resolution_preserves_null_and_records_reason(self):
         observations = pd.DataFrame([{
             "event_id": "event-1", "feature_name": "retail_subscription_ratio", "is_missing": True,
