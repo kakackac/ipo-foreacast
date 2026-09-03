@@ -451,6 +451,13 @@ def run_collect(start_year: int, end_year: int, phase: str = "phase2"):
         summary["calendar_rows"], summary["dart_matched_rows"], summary["feature_rows"],
         summary["open_target_rows"], summary["close_target_rows"],
     )
+    logger.info(
+        "DART 발행실적보고서 감사 | 후보 %d | 전체 일반청약 직접 승인 %d | 범위 검토 %d | 원문 실패 %d",
+        summary.get("dart_offering_result_candidate_rows", 0),
+        summary.get("dart_offering_result_approved_retail_rows", 0),
+        summary.get("dart_offering_result_scope_review_rows", 0),
+        summary.get("dart_offering_result_document_failure_rows", 0),
+    )
     return summary
 
 
