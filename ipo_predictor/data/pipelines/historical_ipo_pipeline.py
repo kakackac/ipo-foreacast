@@ -232,7 +232,10 @@ class HistoricalIPOPipeline:
         )
         reusable_statuses = {
             "official_notice_integrated_retail_ratio",
+            "official_notice_single_retail_intake_ratio",
+            "official_notice_reconstructed_retail_ratio",
             "official_notice_value_requires_scope_review",
+            "official_notice_raw_retail_components_collected",
             "official_notice_no_supported_value",
             "source_document_type_not_supported",
         }
@@ -259,7 +262,8 @@ class HistoricalIPOPipeline:
             if not pending.empty else pd.DataFrame(columns=RESULT_COLUMNS)
         )
         result = pd.concat([reusable, fresh], ignore_index=True)
-        return result.reindex(columns=RESULT_COLUMNS).drop_duplicates("notice_id", keep="last")
+        result = result.reindex(columns=RESULT_COLUMNS).drop_duplicates("notice_id", keep="last")
+        return collector.resolve_reconstructed_retail_ratios(result).drop_duplicates("notice_id", keep="last")
 
     def prepare_underwriter_notice_review_queue(self) -> pd.DataFrame:
         """공식 공지 URL을 사람 검토로 연결하기 위한 작업 대기열을 만든다.
@@ -415,8 +419,13 @@ class HistoricalIPOPipeline:
         for column in ("available_at", "collected_at", "notice_url", "event_context_validation_status"):
             if column not in underwriter_results.columns:
                 underwriter_results[column] = pd.NA
+        approved_statuses = {
+            "official_notice_integrated_retail_ratio",
+            "official_notice_single_retail_intake_ratio",
+            "official_notice_reconstructed_retail_ratio",
+        }
         approved = underwriter_results[
-            (underwriter_results["validation_status"] == "official_notice_integrated_retail_ratio")
+            underwriter_results["validation_status"].isin(approved_statuses)
             & underwriter_results["retail_subscription_ratio"].notna()
         ].copy()
         if not has_event_context_status:

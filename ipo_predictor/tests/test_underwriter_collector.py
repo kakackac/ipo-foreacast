@@ -181,6 +181,113 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
         self.assertEqual(record["validation_status"], "official_notice_integrated_retail_ratio")
         self.assertEqual(record["retail_subscription_ratio"], 587.0)
 
+    def test_explicit_total_general_subscription_scope_is_approved_without_integrated_word(self):
+        session = Mock()
+        response = Mock()
+        response.content = "<html><body>전체 일반청약 경쟁률 587 : 1</body></html>".encode()
+        response.headers = {"Content-Type": "text/html; charset=utf-8"}
+        response.raise_for_status.return_value = None
+        session.get.return_value = response
+        source = OfficialNoticeSource(
+            event_id="event-1", corp_name="테스트", lead_underwriter="KB증권",
+            notice_url="https://www.kbsec.com/notice/1", published_at="2026-01-10",
+            source_offering_price="10000", subscription_start="2026-01-08", subscription_end="2026-01-12",
+        )
+        context = {
+            "corp_name": "테스트", "lead_underwriter": "KB증권", "listing_date": "2026-01-20",
+            "offering_price": 10000,
+        }
+
+        record = OfficialUnderwriterCollector(session=session).collect_notice(source, context)
+
+        self.assertEqual(record["retail_ratio_scope"], "integrated_all_participants")
+        self.assertEqual(record["validation_status"], "official_notice_integrated_retail_ratio")
+
+    def test_sole_retail_intake_broker_is_approved_only_with_explicit_document_scope(self):
+        session = Mock()
+        response = Mock()
+        response.content = "<html><body>단독 주관 일반청약 경쟁률 587 : 1</body></html>".encode()
+        response.headers = {"Content-Type": "text/html; charset=utf-8"}
+        response.raise_for_status.return_value = None
+        session.get.return_value = response
+        source = OfficialNoticeSource(
+            event_id="event-1", corp_name="테스트", lead_underwriter="KB증권",
+            notice_url="https://www.kbsec.com/notice/1", published_at="2026-01-10",
+            source_offering_price="10000", subscription_start="2026-01-08", subscription_end="2026-01-12",
+        )
+        context = {
+            "corp_name": "테스트", "lead_underwriter": "KB증권", "listing_date": "2026-01-20",
+            "offering_price": 10000,
+        }
+
+        record = OfficialUnderwriterCollector(session=session).collect_notice(source, context)
+
+        self.assertEqual(record["retail_ratio_scope"], "sole_retail_intake_broker")
+        self.assertEqual(record["validation_status"], "official_notice_single_retail_intake_ratio")
+
+    def test_all_participant_raw_shares_are_reconstructed_without_averaging_ratios(self):
+        session = Mock()
+        responses = []
+        for body in (
+            "일반청약 청약주식수 900,000주 일반청약 배정주식수 1,000주",
+            "일반청약 청약주식수 1,100,000주 일반청약 배정주식수 1,000주",
+        ):
+            response = Mock()
+            response.content = f"<html><body>{body}</body></html>".encode()
+            response.headers = {"Content-Type": "text/html; charset=utf-8"}
+            response.raise_for_status.return_value = None
+            responses.append(response)
+        session.get.side_effect = responses
+        collector = OfficialUnderwriterCollector(session=session)
+        sources = pd.DataFrame([
+            {
+                "event_id": "event-1", "corp_name": "테스트", "lead_underwriter": "한국투자증권",
+                "notice_underwriter": "한국투자증권", "notice_url": "https://securities.koreainvestment.com/1",
+                "published_at": "2026-01-10", "source_offering_price": "10000",
+                "subscription_start": "2026-01-08", "subscription_end": "2026-01-12",
+                "retail_participating_brokers": "한국투자증권,KB증권",
+                "scope_verification_status": "manual_verified_official_source",
+            },
+            {
+                "event_id": "event-1", "corp_name": "테스트", "lead_underwriter": "한국투자증권",
+                "notice_underwriter": "KB증권", "notice_url": "https://www.kbsec.com/1",
+                "published_at": "2026-01-10", "source_offering_price": "10000",
+                "subscription_start": "2026-01-08", "subscription_end": "2026-01-12",
+                "retail_participating_brokers": "한국투자증권,KB증권",
+                "scope_verification_status": "manual_verified_official_source",
+            },
+        ])
+        contexts = {"event-1": {
+            "corp_name": "테스트", "lead_underwriter": "한국투자증권", "listing_date": "2026-01-20",
+            "offering_price": 10000,
+        }}
+
+        records = collector.collect_sources(sources, event_contexts=contexts)
+        resolved = collector.resolve_reconstructed_retail_ratios(records)
+        reconstructed = resolved[
+            resolved["validation_status"].eq("official_notice_reconstructed_retail_ratio")
+        ].iloc[0]
+
+        self.assertEqual(reconstructed["retail_subscription_ratio"], 1000.0)
+        self.assertEqual(reconstructed["retail_subscribed_shares"], 2_000_000)
+        self.assertEqual(reconstructed["retail_allocation_shares"], 2_000)
+
+    def test_reconstruction_rejects_missing_participant_components(self):
+        record = pd.DataFrame([{
+            "event_id": "event-1", "notice_id": "one", "notice_underwriter": "한국투자증권",
+            "retail_participating_brokers": "한국투자증권,KB증권",
+            "scope_verification_status": "manual_verified_official_source",
+            "retail_subscribed_shares": 900_000, "retail_allocation_shares": 1_000,
+            "validation_status": "official_notice_raw_retail_components_collected",
+            "event_context_validation_status": "verified_event_context",
+        }])
+
+        resolved = OfficialUnderwriterCollector(session=Mock()).resolve_reconstructed_retail_ratios(record)
+
+        self.assertFalse(
+            resolved["validation_status"].eq("official_notice_reconstructed_retail_ratio").any()
+        )
+
     def test_supported_underwriter_priorities_use_normalized_krx_names(self):
         events = pd.DataFrame({
             "event_class": ["general_ipo"] * 5,
@@ -247,6 +354,22 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
         merged = HistoricalIPOPipeline._merge_official_underwriter_results(dart, notices)
 
         self.assertTrue(pd.isna(merged.loc[0, "retail_subscription_ratio"]))
+
+    def test_pipeline_accepts_verified_reconstructed_all_participant_ratio(self):
+        dart = pd.DataFrame({"event_id": ["a"], "corp_name": ["A"]})
+        reconstructed = pd.DataFrame([{
+            "event_id": "a", "retail_subscription_ratio": 1000.0,
+            "notice_url": "https://official.example/a | https://official.example/b",
+            "validation_status": "official_notice_reconstructed_retail_ratio",
+            "event_context_validation_status": "verified_event_context",
+            "available_at": "2026-01-15",
+            "collected_at": pd.Timestamp("2026-01-16", tz="Asia/Seoul"),
+        }])
+
+        merged = HistoricalIPOPipeline._merge_official_underwriter_results(dart, reconstructed)
+
+        self.assertEqual(merged.loc[0, "retail_subscription_ratio"], 1000.0)
+        self.assertEqual(merged.loc[0, "retail_subscription_eligibility_status"], "verified_official_notice")
 
     def test_pipeline_uses_pre_listing_verified_dart_result_before_notice(self):
         dart = pd.DataFrame({
