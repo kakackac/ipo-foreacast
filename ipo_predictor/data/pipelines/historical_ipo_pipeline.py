@@ -89,6 +89,7 @@ class HistoricalIPOPipeline:
         listing_price_audit = self._build_listing_price_audit(calendar, prices)
         listing_price_audit.to_parquet(self.raw_dir / "krx_listing_price_audit.parquet", index=False)
         krx_ipo = self._attach_prices(calendar, prices)
+        krx_ipo = self._attach_price_resolution(krx_ipo, listing_price_audit)
         # 상장일 가격 조회에서 확인된 KRX 표준코드·시장 정보를 이벤트 마스터에
         # 되돌려 다음 실행의 이벤트 식별과 정합에 재사용한다.
         krx_ipo.to_parquet(self.raw_dir / "krx_official_event_master.parquet", index=False)
@@ -187,6 +188,11 @@ class HistoricalIPOPipeline:
                 "price_resolution_status", pd.Series(dtype=object)
             ).value_counts(dropna=False).items()
         }
+        verified_price_rows = listing_price_audit.get(
+            "price_resolution_status", pd.Series(dtype=object)
+        ).eq("official_price_verified")
+        summary["listing_price_target_eligible_rows"] = int(verified_price_rows.sum())
+        summary["listing_price_target_blocked_rows"] = int((~verified_price_rows).sum())
         summary["future_information_violations"] = int(time_audit["is_future_information"].sum())
         summary["feature_time_validation_rows"] = int(len(time_audit))
         summary["official_underwriter_notice_rows"] = int(len(underwriter_results))
@@ -625,15 +631,16 @@ class HistoricalIPOPipeline:
                 previous = cached_by_key.loc[cache_key]
                 if pd.notna(previous.get("open_price")) and pd.notna(previous.get("close_price")):
                     cached_record = previous.to_dict()
-                    if pd.isna(cached_record.get("price_match_status")):
-                        cached_record["price_match_status"] = "cached_verified_price"
-                    if pd.isna(cached_record.get("price_match_method")):
-                        cached_record["price_match_method"] = "prior_cache"
-                    if pd.isna(cached_record.get("price_failure_reason")):
-                        cached_record["price_failure_reason"] = None
-                    records.append(cached_record)
-                    reused += 1
-                    continue
+                    has_raw_evidence = pd.notna(cached_record.get("price_raw_response_evidence"))
+                    has_direct_match = cached_record.get("price_match_status") == "matched"
+                    if has_raw_evidence and has_direct_match:
+                        records.append(cached_record)
+                        reused += 1
+                        continue
+                    # 이전 코드가 남긴 값만 있는 캐시는 신뢰 상태를 승격하지
+                    # 않는다. 이번 실행에서 KRX 일별 원시 응답을 다시 받아
+                    # 이벤트 식별자와 재매칭한 뒤에만 타깃으로 쓸 수 있다.
+                    logger.info("KRX 상장일 가격 캐시 재감사: %s", cache_key)
             listing_date = pd.Timestamp(row["listing_date"]).strftime("%Y%m%d")
             ticker = str(row["ticker"])
             isu_cd = row.get("isu_cd")
@@ -757,14 +764,20 @@ class HistoricalIPOPipeline:
         })
         audit = events.merge(result, on=["ticker", "listing_date"], how="left")
         audit["price_match_status"] = audit["price_match_status"].fillna("unknown_legacy_cache")
-        audit["price_raw_response_verified"] = audit["price_raw_response_evidence"].notna()
+        audit["price_raw_response_verified"] = (
+            audit["price_raw_response_evidence"].notna()
+            & audit["price_raw_response_evidence"].astype(str).str.len().gt(0)
+        )
         non_target = audit.get("event_class", pd.Series("", index=audit.index)).isin({
             "relisting", "unclassified_review", "preferred_or_class_share", "ineligible_product",
         })
-        direct_match = audit["price_match_status"].isin({"matched", "cached_verified_price"})
+        direct_match = (
+            audit["price_match_status"].eq("matched")
+            & audit["price_raw_response_verified"]
+        )
         api_empty = audit["price_failure_reason"].eq("daily_price_api_response_empty")
         legacy_value = (
-            audit["price_match_status"].eq("unknown_legacy_cache")
+            ~audit["price_raw_response_verified"]
             & (audit["listing_open_price"].notna() | audit["listing_close_price"].notna())
         )
         audit["price_resolution_status"] = "historical_identifier_review_required"
@@ -783,6 +796,22 @@ class HistoricalIPOPipeline:
             "historical_identifier_review_required", "historical_price_cache_reaudit_required",
         })
         return audit
+
+    @staticmethod
+    def _attach_price_resolution(krx_ipo: pd.DataFrame, audit: pd.DataFrame) -> pd.DataFrame:
+        """가격 감사의 최종 상태를 이벤트 마스터에 연결한다.
+
+        가격 원시값과 검증 상태를 함께 보존해야 피처 단계에서 검증되지 않은
+        캐시·식별자 불일치 가격을 타깃으로 사용하지 않을 수 있다.
+        """
+        columns = [
+            "event_id", "price_resolution_status", "price_match_status",
+            "price_match_method", "price_failure_reason", "price_raw_response_verified",
+            "human_review_required",
+        ]
+        resolution = audit.reindex(columns=columns).drop_duplicates("event_id", keep="last")
+        result = krx_ipo.drop(columns=columns[1:], errors="ignore")
+        return result.merge(resolution, on="event_id", how="left")
 
     def _collect_dart_records(
         self,

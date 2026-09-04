@@ -280,7 +280,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertTrue((root / "raw" / "dart_ipo_raw.parquet").exists())
             self.assertTrue((root / "processed" / "feature_observations.parquet").exists())
             self.assertTrue((root / "processed" / "feature_time_validation.parquet").exists())
-            for stage_name in ("pre_demand", "post_demand", "post_retail"):
+            for stage_name in ("pre_demand", "post_demand"):
                 stage_path = root / "processed" / "model_stage_datasets" / f"{stage_name}.parquet"
                 self.assertTrue(stage_path.exists())
                 stage = pd.read_parquet(stage_path)
@@ -297,10 +297,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertTrue((root / "processed" / "data_collection_summary.json").exists())
 
             observations = pd.read_parquet(root / "processed" / "feature_observations.parquet")
-            retail = observations[observations["feature_name"] == "retail_subscription_ratio"].iloc[0]
-            self.assertTrue(retail["is_missing"])
-            self.assertEqual(retail["missing_reason"], "retail_feature_deferred_not_collected")
-            self.assertFalse(retail["human_review_required"])
+            self.assertNotIn("retail_subscription_ratio", observations["feature_name"].tolist())
 
     def test_default_collection_skips_retail_audit_sources(self):
         class RetailAuditSpy(_FakeDART):
@@ -358,6 +355,30 @@ class ActualDataPipelineTests(unittest.TestCase):
         self.assertEqual(status["identifier"], "historical_identifier_review_required")
         self.assertEqual(status["relisting"], "excluded_non_target_event")
 
+        enriched = HistoricalIPOPipeline._attach_price_resolution(calendar, audit)
+        resolution = enriched.set_index("event_id")["price_resolution_status"].to_dict()
+        self.assertEqual(resolution["matched"], "official_price_verified")
+        self.assertEqual(resolution["identifier"], "historical_identifier_review_required")
+
+    def test_cached_price_without_raw_evidence_is_not_officially_verified(self):
+        calendar = pd.DataFrame([{
+            "event_id": "legacy", "ticker": "000001", "corp_name": "가",
+            "listing_date": "2024-01-02", "market": "KOSDAQ",
+            "event_class": "general_ipo", "offering_type": "common_stock_ipo",
+        }])
+        prices = pd.DataFrame([{
+            "ticker": "000001", "listing_date": "20240102", "open_price": 10000,
+            "close_price": 11000, "price_match_status": "matched",
+            "price_match_method": "prior_cache",
+        }])
+
+        audit = HistoricalIPOPipeline._build_listing_price_audit(calendar, prices)
+
+        self.assertEqual(
+            audit.loc[0, "price_resolution_status"],
+            "historical_price_cache_reaudit_required",
+        )
+
     def test_pipeline_keeps_dart_offering_result_as_audit_candidate_only(self):
         class ResultDART(_FakeDART):
             def find_offering_result_disclosure_record(self, corp_code, start_date, end_date):
@@ -391,14 +412,13 @@ class ActualDataPipelineTests(unittest.TestCase):
             raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
             audit = pd.read_parquet(root / "raw" / "dart_offering_result_audit.parquet")
             observations = pd.read_parquet(root / "processed" / "feature_observations.parquet")
-            retail = observations[observations["feature_name"] == "retail_subscription_ratio"].iloc[0]
 
             self.assertEqual(summary["dart_offering_result_candidate_rows"], 1)
             self.assertEqual(summary["dart_offering_result_approved_retail_rows"], 1)
             self.assertTrue(pd.isna(raw.loc[0, "retail_subscription_ratio"]))
             self.assertEqual(raw.loc[0, "retail_subscription_ratio_candidate"], 1234.56)
             self.assertEqual(audit.loc[0, "retail_result_rcept_no"], "20240501000001")
-            self.assertTrue(retail["is_missing"])
+            self.assertNotIn("retail_subscription_ratio", observations["feature_name"].tolist())
 
     def test_second_run_reuses_versioned_dart_offering_result_audit(self):
         class CachedResultDART(_FakeDART):
@@ -641,6 +661,39 @@ class ActualDataPipelineTests(unittest.TestCase):
             cached_prices = pd.read_parquet(root / "raw" / "ipo_listing_prices.parquet")
             self.assertTrue(pd.api.types.is_datetime64_any_dtype(cached_prices["listing_date"]))
 
+    def test_legacy_listing_price_cache_without_evidence_is_reaudited(self):
+        class CountingKRX(_FakeKRX):
+            def __init__(self):
+                self.price_calls = 0
+
+            def get_listing_day_price(self, *args, **kwargs):
+                self.price_calls += 1
+                return super().get_listing_day_price(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            raw_dir = root / "raw"
+            raw_dir.mkdir()
+            pd.DataFrame([{
+                "ticker": "123456", "listing_date": "20240510", "open_price": 18000,
+                "close_price": 15000, "price_match_status": "matched",
+            }]).to_parquet(raw_dir / "ipo_listing_prices.parquet", index=False)
+            krx = CountingKRX()
+            pipeline = HistoricalIPOPipeline(
+                dart_collector=_FakeDART(),
+                krx_collector=krx,
+                raw_dir=raw_dir,
+                processed_dir=root / "processed",
+            )
+
+            prices = pipeline._collect_listing_prices(
+                krx.get_official_listing_events("20240101", "20241231")
+            )
+
+            self.assertEqual(krx.price_calls, 1)
+            self.assertEqual(prices.loc[0, "price_match_status"], "matched")
+            self.assertTrue(pd.notna(prices.loc[0, "price_raw_response_evidence"]))
+
     def test_attach_prices_replaces_prior_enrichment_without_duplicate_market_columns(self):
         calendar = pd.DataFrame([{
             "ticker": "123456", "listing_date": "2024-01-10", "market": "KOSDAQ",
@@ -663,12 +716,12 @@ class ActualDataPipelineTests(unittest.TestCase):
 
     def test_official_source_resolution_preserves_null_and_records_reason(self):
         observations = pd.DataFrame([{
-            "event_id": "event-1", "feature_name": "retail_subscription_ratio", "is_missing": True,
-            "missing_reason": "official_underwriter_notice_not_collected", "source_reference": None,
+            "event_id": "event-1", "feature_name": "institutional_demand_ratio", "is_missing": True,
+            "missing_reason": "official_source_field_unavailable_or_unverified", "source_reference": None,
             "collected_at": pd.NaT, "validation_status": "needs_review", "human_review_required": True,
         }])
         resolutions = pd.DataFrame([{
-            "event_id": "event-1", "feature_name": "retail_subscription_ratio",
+            "event_id": "event-1", "feature_name": "institutional_demand_ratio",
             "resolution_status": "official_source_not_published", "checked_at": "2026-01-10",
             "checked_sources": "DART;KRX;official_notice", "reviewed_by": "reviewer", "note": "checked",
         }])
@@ -686,7 +739,7 @@ class ActualDataPipelineTests(unittest.TestCase):
         })
         observations = pd.DataFrame({
             "event_id": ["event-1"], "corp_name": ["테스트"], "listing_date": ["2026-01-20"],
-            "feature_name": ["retail_subscription_ratio"], "available_at": ["2026-01-21"],
+            "feature_name": ["institutional_demand_ratio"], "available_at": ["2026-01-21"],
         })
 
         audit = HistoricalIPOPipeline._build_feature_time_audit(features, observations)

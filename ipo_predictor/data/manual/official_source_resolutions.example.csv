@@ -1,2 +1,1 @@
 event_id,feature_name,resolution_status,checked_at,checked_sources,reviewed_by,note
-krx_kind|000000|YYYYMMDD|회사명,retail_subscription_ratio,official_source_not_published,YYYY-MM-DD,OpenDART;KRX;official_underwriter_public_notice,reviewer,All official sources were checked and no public result was published.

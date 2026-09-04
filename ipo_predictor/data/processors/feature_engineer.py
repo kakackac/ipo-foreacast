@@ -130,12 +130,12 @@ class FeatureEngineer:
 
         identity_columns = [
             "event_id", "corp_name", "listing_date", "event_class", "offering_type",
-            "retail_subscription_eligibility_status", "retail_subscription_eligible",
             "industry_name", "listing_segment",
             "offering_price", "offering_price_review_status", "open_return_pct", "close_return_pct",
+            "price_resolution_status", "price_match_status", "price_match_method",
+            "price_failure_reason", "price_target_validation_status",
             "rcept_no", "corp_code", "feature_available_at", "event_source_url",
-            "verification_status", "lineage_validation_status", "retail_source_url",
-            "retail_validation_status", "retail_available_at", "retail_collected_at",
+            "verification_status", "lineage_validation_status",
             "demand_rcept_no", "institutional_available_at", "lockup_available_at",
             "institutional_validation_status", "lockup_validation_status",
         ]
@@ -222,6 +222,10 @@ class FeatureEngineer:
                 "institutional_validation_status", "institutional_validation_status_dart",
             ],
             "lockup_validation_status": ["lockup_validation_status", "lockup_validation_status_dart"],
+            "price_resolution_status": ["price_resolution_status", "price_resolution_status_krx"],
+            "price_match_status": ["price_match_status", "price_match_status_krx"],
+            "price_match_method": ["price_match_method", "price_match_method_krx"],
+            "price_failure_reason": ["price_failure_reason", "price_failure_reason_krx"],
             "same_day_ipo_count": ["same_day_ipo_count", "same_day_ipo_count_krx"],
             "open_price": ["open_price", "open_price_krx"],
             "close_price": ["close_price", "close_price_krx"],
@@ -611,9 +615,22 @@ class FeatureEngineer:
         if "offering_price" not in df.columns:
             df["open_return_pct"] = np.nan
             df["close_return_pct"] = np.nan
+            df["price_target_validation_status"] = "missing_offering_price"
             return df
 
         df["offering_price"] = pd.to_numeric(df["offering_price"], errors="coerce")
+        if "price_resolution_status" in df.columns:
+            verified_listing_price = df["price_resolution_status"].eq("official_price_verified")
+            df["price_target_validation_status"] = np.where(
+                verified_listing_price,
+                "official_price_verified",
+                "blocked_nonverified_krx_listing_price",
+            )
+        else:
+            # 실제 collect 산출물에는 항상 감사 상태가 있어야 한다. 이 표기는
+            # 구버전 산출물과 단위 테스트의 호환을 위한 것이며 학습 승인 근거가 아니다.
+            verified_listing_price = pd.Series(True, index=df.index)
+            df["price_target_validation_status"] = "legacy_price_status_unavailable"
         out_of_expected_range = (df["offering_price"] < 100) | (df["offering_price"] > 10_000_000)
         if out_of_expected_range.any():
             logger.warning(
@@ -629,7 +646,7 @@ class FeatureEngineer:
                 continue
             df[price_col] = pd.to_numeric(df[price_col], errors="coerce")
             df[target_col] = np.where(
-                (df["offering_price"] > 0) & df[price_col].notna(),
+                verified_listing_price & (df["offering_price"] > 0) & df[price_col].notna(),
                 (df[price_col] / df["offering_price"] - 1) * 100,
                 np.nan,
             )
@@ -707,7 +724,7 @@ class FeatureEngineer:
         """
         source_by_group = {
             FeatureGroup.MARKET: "KRX_KIND_or_KRX_OpenAPI",
-            FeatureGroup.SUBSCRIPTION: "DART_or_official_underwriter_notice",
+            FeatureGroup.SUBSCRIPTION: "DART_disclosure_or_official_demand_notice",
             FeatureGroup.SUPPLY: "DART_disclosure",
             FeatureGroup.IPO_STRUCTURE: "DART_disclosure",
             FeatureGroup.VALUATION: "DART_disclosure",
@@ -723,14 +740,7 @@ class FeatureEngineer:
                 missing = pd.isna(value)
                 feature = FEATURE_MAP[feature_name]
                 source = source_by_group[feature.group]
-                if feature_name == "retail_subscription_ratio":
-                    retail_status = values.get("retail_validation_status")
-                    missing_reason = (
-                        str(retail_status)
-                        if missing and pd.notna(retail_status) and str(retail_status).strip()
-                        else "official_underwriter_notice_not_collected" if missing else None
-                    )
-                elif feature.group == FeatureGroup.FINANCIAL and missing:
+                if feature.group == FeatureGroup.FINANCIAL and missing:
                     missing_reason = "financial_publication_time_unverified"
                 elif missing:
                     missing_reason = "official_source_field_unavailable_or_unverified"
@@ -752,9 +762,6 @@ class FeatureEngineer:
                 if feature_name.startswith("lockup_"):
                     source_ref = values.get("demand_rcept_no")
                     available_at = values.get("lockup_available_at")
-                if feature_name == "retail_subscription_ratio" and pd.notna(values.get("retail_source_url")):
-                    source_ref = values.get("retail_source_url")
-                    available_at = values.get("retail_available_at")
                 if source.startswith("KRX"):
                     event_source_url = values.get("event_source_url")
                     source_ref = (
@@ -762,9 +769,7 @@ class FeatureEngineer:
                         else "KRX_KIND_new_listing_company"
                     )
                 validation = values.get("offering_price_review_status")
-                if feature_name == "retail_subscription_ratio":
-                    validation = values.get("retail_validation_status")
-                elif feature_name == "institutional_demand_ratio":
+                if feature_name == "institutional_demand_ratio":
                     validation = values.get("institutional_validation_status")
                 elif feature_name.startswith("lockup_"):
                     validation = values.get("lockup_validation_status")
@@ -775,10 +780,6 @@ class FeatureEngineer:
                 if pd.isna(validation) or str(validation).strip() == "":
                     validation = "needs_review"
                 validation = str(validation)
-                deferred_retail_feature = (
-                    feature_name == "retail_subscription_ratio"
-                    and validation == "retail_feature_deferred_not_collected"
-                )
                 records.append({
                     "event_id": values.get("event_id"),
                     "corp_name": values.get("corp_name"),
@@ -792,12 +793,11 @@ class FeatureEngineer:
                     "available_at": available_at,
                     "collected_at": pd.Timestamp.now(tz="Asia/Seoul"),
                     "validation_status": validation,
-                    "human_review_required": bool(not deferred_retail_feature and (missing or validation not in {
+                    "human_review_required": bool(missing or validation not in {
                         "verified_currency_unit", "verified_text_and_structured",
                         "verified_structured_api", "manual_verified",
                         "official_source_krx_code_enriched", "official_source_collected",
-                        "official_dart_issuer_total_retail_ratio", "official_dart_and_notice_match",
-                    })),
+                    }),
                 })
         return pd.DataFrame(records)
 
@@ -826,7 +826,6 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
     lockup_15d = rng.beta(2, 3, n).clip(0, 1)
 
     institutional_demand = rng.lognormal(5.5, 1.2, n).clip(1, 3000)
-    retail_demand        = rng.lognormal(6.0, 1.5, n).clip(1, 5000)
     band_position        = rng.uniform(-0.1, 1.3, n)
 
     kospi_5d  = rng.normal(0.005, 0.025, n)
@@ -884,7 +883,6 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
         "lockup_15d_ratio":             lockup_15d,
         "lockup_weighted_score":        lockup_score,
         "institutional_demand_ratio":   institutional_demand,
-        "retail_subscription_ratio":    retail_demand,
         "offering_price_band_position": band_position,
         "band_exceeded":                (band_position > 1.0).astype(int),
         "kospi_momentum_5d":            kospi_5d,

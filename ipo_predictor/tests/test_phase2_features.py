@@ -42,6 +42,25 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertAlmostEqual(result.loc[0, "open_return_pct"], 20.0)
         self.assertAlmostEqual(result.loc[0, "close_return_pct"], 10.0)
 
+    def test_unverified_krx_listing_price_is_not_used_as_target(self):
+        df = pd.DataFrame(
+            {
+                "offering_price": [10_000],
+                "open_price": [12_000],
+                "close_price": [11_000],
+                "price_resolution_status": ["historical_identifier_review_required"],
+            }
+        )
+
+        result = FeatureEngineer()._calc_target(df)
+
+        self.assertTrue(pd.isna(result.loc[0, "open_return_pct"]))
+        self.assertTrue(pd.isna(result.loc[0, "close_return_pct"]))
+        self.assertEqual(
+            result.loc[0, "price_target_validation_status"],
+            "blocked_nonverified_krx_listing_price",
+        )
+
     def test_missing_band_and_supply_values_are_not_changed_to_zero(self):
         engineer = FeatureEngineer(feature_set="phase2")
         base = pd.DataFrame({
@@ -85,30 +104,30 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertFalse(readiness["eligible"])
         self.assertEqual(readiness["general_ipo_dual_target_rows"], 46)
         self.assertTrue(any("최소 100건" in reason for reason in readiness["reasons"]))
+        self.assertTrue(any("KRX 상장일 가격 검증 상태" in reason for reason in readiness["reasons"]))
         self.assertEqual(readiness["source_time_validated_core_complete_rows"], 0)
 
-    def test_prediction_profiles_keep_retail_out_before_general_subscription_closes(self):
+    def test_prediction_profiles_exclude_retail_subscription_ratio(self):
         pre_demand = get_model_profile("pre_demand")
         post_demand = get_model_profile("post_demand")
-        post_retail = get_model_profile("post_retail")
 
         self.assertNotIn("retail_subscription_ratio", pre_demand.feature_names)
         self.assertNotIn("retail_subscription_ratio", post_demand.feature_names)
-        self.assertIn("retail_subscription_ratio", post_retail.feature_names)
         self.assertIn("institutional_demand_ratio", post_demand.feature_names)
+        with self.assertRaises(ValueError):
+            get_model_profile("post_retail")
 
     def test_stage_datasets_reuse_one_ipo_population_with_different_feature_contracts(self):
         features = pd.DataFrame({
             "event_id": ["common", "spac"],
             "event_class": ["general_ipo", "spac_ipo"],
             "offering_type": ["common_stock_ipo", "spac_ipo"],
-            "retail_subscription_eligible": [True, True],
             "offering_price_review_status": ["verified_currency_unit"] * 2,
             "open_return_pct": [10.0, 5.0],
             "close_return_pct": [8.0, 4.0],
             "listing_date": ["2024-01-10", "2024-01-11"],
         })
-        for profile_name in ("pre_demand", "post_demand", "post_retail"):
+        for profile_name in ("pre_demand", "post_demand"):
             profile = get_model_profile(profile_name)
             for feature_name in profile.feature_names:
                 features[feature_name] = 1.0
@@ -119,20 +138,17 @@ class Phase2FeatureTests(unittest.TestCase):
             }
             for event_id in features["event_id"]
             for feature_name in set().union(*(p.feature_names for p in (
-                get_model_profile("pre_demand"), get_model_profile("post_demand"), get_model_profile("post_retail")
+                get_model_profile("pre_demand"), get_model_profile("post_demand")
             )))
         ])
 
         pre = build_stage_dataset(features, "pre_demand", audit)
         post_demand = build_stage_dataset(features, "post_demand", audit)
-        post_retail = build_stage_dataset(features, "post_retail", audit)
 
         self.assertEqual(len(pre), 2)
         self.assertEqual(len(post_demand), 2)
-        self.assertEqual(len(post_retail), 2)
         self.assertTrue(pre["stage_model_candidate"].all())
         self.assertTrue(post_demand["stage_model_candidate"].all())
-        self.assertTrue(post_retail["stage_model_candidate"].all())
 
     def test_merge_excludes_market_transfer_with_different_listing_date(self):
         dart = pd.DataFrame({

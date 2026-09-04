@@ -48,7 +48,6 @@ class IPOFeatures(BaseModel):
     recent_ipo_avg_return_all:     float = Field(10.0, description="전체 최근 IPO 평균 수익률(%)")
 
     # 선택 — SECONDARY 피처 (없으면 모델 내부에서 중앙값 대체)
-    retail_subscription_ratio:     Optional[float] = Field(None, ge=0)
     float_share_ratio:             Optional[float] = Field(None, ge=0, le=1)
     secondary_offering_ratio:      Optional[float] = Field(None, ge=0, le=1)
     major_shareholder_lockup_months: Optional[int] = Field(None, ge=0)
@@ -85,7 +84,6 @@ class IPOFeatures(BaseModel):
                 "kospi_momentum_20d":            0.035,
                 "recent_ipo_avg_return_sector":  18.5,
                 "recent_ipo_avg_return_all":     14.2,
-                "retail_subscription_ratio":     900.0,
                 "offering_per":                  22.0,
                 "per_vs_sector_median":          0.78,
                 "revenue_growth_3y":             0.35,

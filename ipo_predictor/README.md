@@ -35,7 +35,6 @@
 | 피처 | 설명 | 출처 |
 |------|------|------|
 | `institutional_demand_ratio` | 기관 수요예측 경쟁률 | DART |
-| `retail_subscription_ratio` | 개인 청약 경쟁률 | 증권사 |
 | `lockup_6m_ratio` | 6개월 의무확약 비율 | DART |
 | `lockup_3m_ratio` | 3개월 의무확약 비율 | DART |
 | `lockup_1m_ratio` | 1개월 의무확약 비율 | DART |

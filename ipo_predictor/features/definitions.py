@@ -65,18 +65,6 @@ CORE_FEATURES: list[FeatureDef] = [
     ),
 
     FeatureDef(
-        name        = "retail_subscription_ratio",
-        group       = FeatureGroup.SUBSCRIPTION,
-        importance  = Importance.CORE,
-        dtype       = "float",
-        description = "개인 청약 경쟁률",
-        source      = "주관사 공식 청약 결과 공지(통합 경쟁률이 명시된 경우만 자동 승인)",
-        formula     = "전체 참여 증권사를 포함한다고 명시된 개인 청약 경쟁률",
-        fill_na     = "median",
-        clip        = (0, 5000),
-    ),
-
-    FeatureDef(
         name        = "lockup_6m_ratio",
         group       = FeatureGroup.SUPPLY,
         importance  = Importance.CORE,

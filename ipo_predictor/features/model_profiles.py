@@ -43,20 +43,6 @@ MODEL_PROFILES = {
         ),
         critical_features=("institutional_demand_ratio", "offering_price_band_position"),
     ),
-    "post_retail": PredictionProfile(
-        name="post_retail",
-        description="실험 확장: 일반청약 마감 후 검증된 통합 개인 청약 경쟁률을 추가",
-        feature_names=(
-            "institutional_demand_ratio", "retail_subscription_ratio", "lockup_6m_ratio",
-            "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio", "lockup_weighted_score",
-            "offering_price_band_position", "band_exceeded", "kospi_momentum_5d",
-            "kospi_momentum_20d", "recent_ipo_avg_return_sector", "recent_ipo_avg_return_all",
-            "offering_type_spac_ipo",
-        ),
-        critical_features=(
-            "institutional_demand_ratio", "retail_subscription_ratio", "offering_price_band_position",
-        ),
-    ),
 }
 
 
@@ -82,7 +68,7 @@ def build_stage_dataset(
 ) -> pd.DataFrame:
     """하나의 원천 피처 표에서 공개 단계별 학습 후보 표를 만든다.
 
-    세 단계는 서로 다른 표본을 나눠 갖지 않는다. 동일 IPO 행을 보존하면서
+    공개 단계는 서로 다른 표본을 나눠 갖지 않는다. 동일 IPO 행을 보존하면서
     해당 단계의 피처 계약, 공모가 승인, 타깃, 공개시각 검사를 각각 표시한다.
     결측 보정이나 행 삭제는 여기서 수행하지 않는다.
     """
@@ -106,21 +92,12 @@ def build_stage_dataset(
     ).notna()
     frame["stage_dual_target_ready"] = open_ready & close_ready
 
-    # 일반청약 적격은 KRX 분류만으로 추정하지 않는다. 공식 통합 청약 결과
-    # 공지가 이벤트에 정합된 경우에만 post_retail 후보가 될 수 있다.
-    if "retail_subscription_eligible" not in frame.columns:
-        frame["retail_subscription_eligible"] = pd.NA
-    retail_eligible = frame["retail_subscription_eligible"].astype("boolean").fillna(False).astype(bool)
-    frame["stage_retail_eligibility_verified"] = (
-        retail_eligible if profile.name == "post_retail" else True
-    )
     frame["stage_time_valid"] = _stage_time_valid(frame, profile, feature_time_audit)
     frame["stage_model_candidate"] = (
         frame["stage_features_complete"]
         & frame["stage_offering_price_verified"]
         & frame["stage_dual_target_ready"]
         & frame["stage_time_valid"]
-        & frame["stage_retail_eligibility_verified"]
     )
     return frame
 
@@ -175,7 +152,6 @@ def stage_readiness_by_offering_type(dataset: pd.DataFrame) -> list[dict[str, ob
             "dual_target_rows": int(group["stage_dual_target_ready"].sum()),
             "feature_complete_rows": int(group["stage_features_complete"].sum()),
             "time_valid_rows": int(group["stage_time_valid"].sum()),
-            "retail_eligibility_verified_rows": int(group["stage_retail_eligibility_verified"].sum()),
             "model_candidate_rows": int(group["stage_model_candidate"].sum()),
         })
     return rows

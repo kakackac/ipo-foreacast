@@ -6,6 +6,10 @@
 
 ## 1. 결론 요약
 
+### 1.0 현재 제품 범위 정정 (2026-09-04)
+
+개인청약 경쟁률은 모델 피처와 기본 수집 범위에서 제외했다. 현재 학습 후보는 `pre_demand`와 `post_demand` 두 공개 단계만 생성하며, 둘 다 개인청약 경쟁률을 요구하지 않는다. 기존 개인청약 원시 감사 자료는 과거 검증 기록으로만 보존하고 모델·API에는 사용하지 않는다.
+
 **현재 데이터셋으로 일반 기업 IPO 모델을 학습하거나 성능을 주장하면 안 된다.**
 
 근거는 다음과 같다.
@@ -162,6 +166,8 @@ URL 원장은 숫자 입력 양식이 아니다. 문서 URL, 게시 증권사, �
 
 ### 1.8 현재 우선순위: 개인청약 경쟁률 제외, 수요예측 후 모델 우선 (2026-09-04)
 
+**갱신:** 이후 결정으로 개인청약 경쟁률은 후순위 실험이 아니라 현 모델·수집 범위에서 완전히 제외됐다. 아래 문단의 `post_retail`·`--include-retail-audit` 언급은 당시 검토 기록이며 현재 실행 정책으로 사용하지 않는다.
+
 개인청약 경쟁률은 상장 전에 공개되기는 하지만 일반청약 마감 이후에야 확정된다. 출시 초기 예측의 기본 시점을 수요예측 결과 공개 후로 두면 확정 공모가·기관 수요예측·의무보유확약까지 활용할 수 있고, 개인청약 경쟁률은 필수 입력이 아니다. 따라서 기본 모델은 `post_demand`이며 개인청약 경쟁률은 피처·수집·준비도 기준에서 제외한다.
 
 `post_retail`은 삭제하지 않은 실험 확장이다. 기본 `collect`는 DART 발행실적보고서와 주관사 공지에서 개인청약 경쟁률을 새로 탐색하지 않으며, 값은 `retail_feature_deferred_not_collected`로 보존한다. 성능 검증에서 추가 정보의 필요성이 확인될 때만 `--include-retail-audit` 옵션으로 별도 수집·감사를 실행한다. 기존 원시 감사 파일은 보존하며 기본 실행이 덮어쓰지 않는다.
@@ -179,6 +185,12 @@ URL 원장은 숫자 입력 양식이 아니다. 문서 URL, 게시 증권사, �
 5. 일반 IPO에서 공식 일별 응답이 양 시장 모두 비었다는 증적이 있을 때만 `official_price_unconfirmed`으로 종료한다. 응답이 있으나 식별자가 맞지 않는 경우는 `historical_identifier_review_required`이며 자동 제외나 가격 부재 확정이 아니다.
 
 이제 수집 요약은 단순 경고 개수 대신 `official_price_verified`, `official_price_unconfirmed`, `historical_identifier_review_required`, `historical_price_cache_reaudit_required`, `excluded_non_target_event`별 건수를 출력한다. 실제 재수집 후에만 각 상태의 실측 건수를 보고한다.
+
+### 1.10 가격 타깃 승인 게이트 (2026-09-04)
+
+상장일 가격의 원시값 보존과 모델 타깃 승인은 별도다. `open_price`, `close_price`가 존재하더라도 `price_resolution_status`가 `official_price_verified`가 아니면 `open_return_pct`, `close_return_pct`를 만들지 않는다. 가격이 있어도 근거가 없는 과거 캐시·식별자 불일치·공식 응답 미확인·비대상 이벤트는 `price_target_validation_status=blocked_nonverified_krx_listing_price`로 남긴다.
+
+`official_price_verified`는 KRX 일별 원시 응답 근거가 저장되어 있고, KIND 이벤트의 표준코드·종목코드·회사명 중 허용된 식별자로 직접 매칭된 경우에만 부여한다. 원시 응답 근거가 없는 이전 캐시는 자동으로 검증 완료로 승격하지 않고 다음 `collect`에서 KRX 일별 API 재조회 대상으로 보낸다. 재조회 뒤에도 근거를 얻지 못한 행만 `historical_price_cache_reaudit_required`로 분류한다. 이 게이트는 타깃 수를 줄일 수 있지만, 근거가 불명확한 가격으로 모델 성능을 과장하는 일을 막는 필수 조건이다.
 
 ## 2. 감사 방법과 스냅샷
 
