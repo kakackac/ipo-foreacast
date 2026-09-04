@@ -192,6 +192,12 @@ URL 원장은 숫자 입력 양식이 아니다. 문서 URL, 게시 증권사, �
 
 `official_price_verified`는 KRX 일별 원시 응답 근거가 저장되어 있고, KIND 이벤트의 표준코드·종목코드·회사명 중 허용된 식별자로 직접 매칭된 경우에만 부여한다. 원시 응답 근거가 없는 이전 캐시는 자동으로 검증 완료로 승격하지 않고 다음 `collect`에서 KRX 일별 API 재조회 대상으로 보낸다. 재조회 뒤에도 근거를 얻지 못한 행만 `historical_price_cache_reaudit_required`로 분류한다. 이 게이트는 타깃 수를 줄일 수 있지만, 근거가 불명확한 가격으로 모델 성능을 과장하는 일을 막는 필수 조건이다.
 
+### 1.11 피처 품질 집계와 학습 전 판정 (2026-09-04)
+
+수집 결과의 피처 품질은 감으로 판단하지 않는다. `feature_coverage_audit.parquet`는 피처마다 전체 행, 값이 있는 행, 결측 행, 충족률, 출처 식별자 보유 행, 공개시각 보유 행, 사람 검토 필요 행을 기록한다. 결측 사유와 검증 상태의 분포는 JSON 열에 저장해 `official_source_field_unavailable_or_unverified`, `financial_publication_time_unverified`, `parser_failed` 같은 원인을 구분한다.
+
+이 집계는 성능 수치가 아니다. 다음 실제 수집 뒤 `post_demand`의 기관 수요예측·희망 밴드·확약 피처 충족률과 `model_stage_readiness.json`의 후보 수를 함께 확인해, 최소 기준을 넘긴 단계만 학습 후보로 판단한다.
+
 ## 2. 감사 방법과 스냅샷
 
 코드 실행으로 재수집·학습·백테스트는 하지 않았다. 2026-08-27 00:04 KST에 존재하던 로컬 Parquet과 `c315e65` 소스 코드를 읽어 수치와 로직을 대조했다.

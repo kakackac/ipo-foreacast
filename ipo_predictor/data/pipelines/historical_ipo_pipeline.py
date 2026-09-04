@@ -161,6 +161,10 @@ class HistoricalIPOPipeline:
         observations.to_parquet(
             self.processed_dir / "feature_observations.parquet", index=False
         )
+        feature_coverage = self._build_feature_coverage_audit(observations)
+        feature_coverage.to_parquet(
+            self.processed_dir / "feature_coverage_audit.parquet", index=False
+        )
         time_audit = self._build_feature_time_audit(features, observations)
         time_audit.to_parquet(self.processed_dir / "feature_time_validation.parquet", index=False)
         stage_summary = self._write_stage_datasets(features, time_audit)
@@ -195,6 +199,14 @@ class HistoricalIPOPipeline:
         summary["listing_price_target_blocked_rows"] = int((~verified_price_rows).sum())
         summary["future_information_violations"] = int(time_audit["is_future_information"].sum())
         summary["feature_time_validation_rows"] = int(len(time_audit))
+        summary["feature_coverage"] = {
+            str(row.feature_name): {
+                "observed_rows": int(row.observed_rows),
+                "coverage_rate": float(row.coverage_rate),
+                "human_review_required_rows": int(row.human_review_required_rows),
+            }
+            for row in feature_coverage.itertuples(index=False)
+        }
         summary["official_underwriter_notice_rows"] = int(len(underwriter_results))
         summary["official_underwriter_integrated_retail_rows"] = int(
             (underwriter_results.get("validation_status", pd.Series(dtype=str)) ==
@@ -1450,6 +1462,55 @@ class HistoricalIPOPipeline:
         audit = self._build_document_failure_audit()
         audit.to_parquet(self.raw_dir / "dart_document_failure_audit.parquet", index=False)
         return audit
+
+    @staticmethod
+    def _build_feature_coverage_audit(observations: pd.DataFrame) -> pd.DataFrame:
+        """피처별 원시 충족률과 결측·검증 상태를 감사 가능한 집계로 만든다."""
+        columns = [
+            "feature_name", "total_rows", "observed_rows", "missing_rows", "coverage_rate",
+            "human_review_required_rows", "source_reference_rows", "available_at_rows",
+            "missing_reason_counts", "validation_status_counts",
+        ]
+        if observations.empty or "feature_name" not in observations.columns:
+            return pd.DataFrame(columns=columns)
+
+        rows: list[dict[str, object]] = []
+        for feature_name, group in observations.groupby("feature_name", dropna=False):
+            missing = group.get("is_missing", pd.Series(True, index=group.index)).fillna(True).astype(bool)
+            review_required = group.get(
+                "human_review_required", pd.Series(False, index=group.index)
+            ).fillna(False).astype(bool)
+            missing_reasons = group.loc[missing, "missing_reason"].fillna("unspecified").astype(str)
+            validation = group.get(
+                "validation_status", pd.Series("unspecified", index=group.index)
+            ).fillna("unspecified").astype(str)
+            source_reference = group.get(
+                "source_reference", pd.Series(index=group.index, dtype=object)
+            )
+            available_at = group.get("available_at", pd.Series(index=group.index, dtype=object))
+            total = int(len(group))
+            observed = int((~missing).sum())
+            rows.append({
+                "feature_name": str(feature_name),
+                "total_rows": total,
+                "observed_rows": observed,
+                "missing_rows": int(missing.sum()),
+                "coverage_rate": round(observed / total, 4) if total else 0.0,
+                "human_review_required_rows": int(review_required.sum()),
+                "source_reference_rows": int(source_reference.notna().sum()),
+                "available_at_rows": int(available_at.notna().sum()),
+                "missing_reason_counts": json.dumps(
+                    {str(key): int(value) for key, value in missing_reasons.value_counts().items()},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+                "validation_status_counts": json.dumps(
+                    {str(key): int(value) for key, value in validation.value_counts().items()},
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            })
+        return pd.DataFrame(rows, columns=columns).sort_values("feature_name").reset_index(drop=True)
 
     @staticmethod
     def _build_feature_time_audit(

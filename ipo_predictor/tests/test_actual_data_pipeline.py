@@ -279,6 +279,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertAlmostEqual(features.loc[0, "close_return_pct"], 25.0)
             self.assertTrue((root / "raw" / "dart_ipo_raw.parquet").exists())
             self.assertTrue((root / "processed" / "feature_observations.parquet").exists())
+            self.assertTrue((root / "processed" / "feature_coverage_audit.parquet").exists())
             self.assertTrue((root / "processed" / "feature_time_validation.parquet").exists())
             for stage_name in ("pre_demand", "post_demand"):
                 stage_path = root / "processed" / "model_stage_datasets" / f"{stage_name}.parquet"
@@ -297,7 +298,12 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertTrue((root / "processed" / "data_collection_summary.json").exists())
 
             observations = pd.read_parquet(root / "processed" / "feature_observations.parquet")
+            coverage = pd.read_parquet(root / "processed" / "feature_coverage_audit.parquet")
             self.assertNotIn("retail_subscription_ratio", observations["feature_name"].tolist())
+            self.assertIn("institutional_demand_ratio", summary["feature_coverage"])
+            demand_coverage = coverage.set_index("feature_name").loc["institutional_demand_ratio"]
+            self.assertEqual(demand_coverage["observed_rows"], 1)
+            self.assertEqual(demand_coverage["missing_rows"], 0)
 
     def test_default_collection_skips_retail_audit_sources(self):
         class RetailAuditSpy(_FakeDART):
