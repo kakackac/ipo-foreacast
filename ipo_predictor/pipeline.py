@@ -77,7 +77,7 @@ def step_load_or_build_data(
     return df
 
 
-def step_feature_selection(df, phase: str = "core", prediction_stage: str = "post_retail"):
+def step_feature_selection(df, phase: str = "core", prediction_stage: str = "post_demand"):
     """사용할 피처 컬럼 선택"""
     from features.model_profiles import get_model_profile
 
@@ -95,7 +95,7 @@ def step_feature_selection(df, phase: str = "core", prediction_stage: str = "pos
 
 
 def assess_training_readiness(
-    df: pd.DataFrame, phase: str = "core", prediction_stage: str = "post_retail"
+    df: pd.DataFrame, phase: str = "core", prediction_stage: str = "post_demand"
 ) -> dict:
     """일반 IPO만 대상으로 학습 가능 여부와 미달 사유를 계산한다."""
     from features.model_profiles import get_model_profile
@@ -191,7 +191,7 @@ def assess_training_readiness(
 
 
 def require_training_ready(
-    df: pd.DataFrame, phase: str = "core", prediction_stage: str = "post_retail"
+    df: pd.DataFrame, phase: str = "core", prediction_stage: str = "post_demand"
 ) -> pd.DataFrame:
     """학습 안전장치를 적용하고, 통과한 일반 IPO 행만 반환한다."""
     report = assess_training_readiness(df, phase=phase, prediction_stage=prediction_stage)
@@ -387,7 +387,7 @@ def run_demo(phase: str = "core"):
     return summary
 
 
-def run_train(phase: str = "core", prediction_stage: str = "post_retail"):
+def run_train(phase: str = "core", prediction_stage: str = "post_demand"):
     """실제 데이터 학습 모드"""
     import pandas as pd
 
@@ -409,7 +409,7 @@ def run_train(phase: str = "core", prediction_stage: str = "post_retail"):
     step_save_results(results)
 
 
-def run_backtest(phase: str = "core", prediction_stage: str = "post_retail"):
+def run_backtest(phase: str = "core", prediction_stage: str = "post_demand"):
     """실제 데이터로 백테스트만 실행"""
     logger.info("════ IPO 예측 파이프라인 — 백테스트 모드 (%s, %s) ════", phase, prediction_stage)
     df           = step_load_or_build_data(demo=False, phase=phase, prediction_stage=prediction_stage)
@@ -440,25 +440,33 @@ def run_analyze():
     logger.info(report.summary())
 
 
-def run_collect(start_year: int, end_year: int, phase: str = "phase2"):
+def run_collect(
+    start_year: int, end_year: int, phase: str = "phase2", include_retail_audit: bool = False
+):
     """공식 원천 데이터를 수집해 학습용 피처 파일을 생성한다."""
     from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline
 
     logger.info("════ 실제 IPO 데이터 수집 (%d~%d) ════", start_year, end_year)
-    summary = HistoricalIPOPipeline().run(start_year, end_year, feature_set=phase)
+    summary = HistoricalIPOPipeline().run(
+        start_year, end_year, feature_set=phase, include_retail_audit=include_retail_audit
+    )
     logger.info(
         "수집 완료 | KRX 일정 %d | DART 정합 %d | 학습 행 %d | 시초가 타깃 %d | 종가 타깃 %d",
         summary["calendar_rows"], summary["dart_matched_rows"], summary["feature_rows"],
         summary["open_target_rows"], summary["close_target_rows"],
     )
-    logger.info(
-        "DART 발행실적보고서 감사 | 후보 %d | 개인청약 직접 승인 %d | 일반공모/기관포함 제외 %d | 범위 검토 %d | 원문 실패 %d",
-        summary.get("dart_offering_result_candidate_rows", 0),
-        summary.get("dart_offering_result_approved_retail_rows", 0),
-        summary.get("dart_offering_result_non_retail_scope_rows", 0),
-        summary.get("dart_offering_result_scope_review_rows", 0),
-        summary.get("dart_offering_result_document_failure_rows", 0),
-    )
+    logger.info("KRX 상장일 가격 해소 상태 | %s", summary.get("listing_price_resolution_counts", {}))
+    if include_retail_audit:
+        logger.info(
+            "DART 발행실적보고서 범위 감사 | 후보 %d | 개인청약 직접 문구 후보 %d | 일반공모/기관포함 제외 %d | 범위 검토 %d | 원문 실패 %d",
+            summary.get("dart_offering_result_candidate_rows", 0),
+            summary.get("dart_offering_result_approved_retail_rows", 0),
+            summary.get("dart_offering_result_non_retail_scope_rows", 0),
+            summary.get("dart_offering_result_scope_review_rows", 0),
+            summary.get("dart_offering_result_document_failure_rows", 0),
+        )
+    else:
+        logger.info("개인청약 경쟁률 감사는 후순위로 보류했습니다. 필요 시 --include-retail-audit를 사용하세요.")
     return summary
 
 
@@ -520,8 +528,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--prediction-stage",
         choices=["pre_demand", "post_demand", "post_retail"],
-        default="post_retail",
+        default="post_demand",
         help="예측 기준 공개 단계. 실제 학습은 해당 단계의 품질 기준을 통과한 경우에만 허용",
+    )
+    parser.add_argument(
+        "--include-retail-audit",
+        action="store_true",
+        help="후순위 개인청약 경쟁률 감사(DART 발행실적보고서)를 함께 실행",
     )
     parser.add_argument("--start-year", type=int, default=2015, help="실제 수집 시작 연도")
     parser.add_argument(
@@ -542,7 +555,10 @@ if __name__ == "__main__":
         run_backtest(phase=args.phase, prediction_stage=args.prediction_stage)
     elif args.mode == "collect":
         try:
-            run_collect(args.start_year, args.end_year, phase=args.phase)
+            run_collect(
+                args.start_year, args.end_year,
+                phase=args.phase, include_retail_audit=args.include_retail_audit,
+            )
         except RuntimeError as exc:
             logger.error("실제 데이터 수집 중단: %s", exc)
             sys.exit(2)

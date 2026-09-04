@@ -1,3 +1,4 @@
+import json
 import unittest
 from unittest.mock import Mock
 
@@ -47,6 +48,9 @@ class KRXOpenAPICollectorTests(unittest.TestCase):
         self.assertEqual(price["open_price"], 18000.0)
         self.assertEqual(price["close_price"], 15000.0)
         self.assertEqual(price["market"], "KOSDAQ")
+        evidence = json.loads(price["price_raw_response_evidence"])
+        self.assertEqual(evidence["KOSDAQ"]["row_count"], 1)
+        self.assertEqual(evidence["KOSDAQ"]["identity_sample"][0]["ISU_CD"], "123456")
         session.get.assert_called_once_with(
             "https://example.test/svc/apis/sto/ksq_bydd_trd",
             params={"basDd": "20240510"},

@@ -102,8 +102,14 @@ class _FakeKRX:
     def get_listing_day_price(self, ticker, listing_date, isu_cd=None, market=None, corp_name=None):
         return {
             "ticker": ticker, "isu_cd": isu_cd, "listing_date": listing_date,
+            "market": market,
             "open_price": 18000, "close_price": 15000, "high_price": 19000,
             "low_price": 14000, "volume": 100000,
+            "price_match_status": "matched", "price_match_method": "ticker_or_short_issue_code",
+            "price_failure_reason": None, "price_markets_queried": market,
+            "price_api_rows_returned": 1, "price_raw_response_evidence": "{}",
+            "price_matched_ticker": ticker, "price_matched_isu_cd": isu_cd,
+            "price_matched_corp_name": corp_name,
         }
 
     def get_index_ohlcv(self, index_code, start_date, end_date):
@@ -293,10 +299,66 @@ class ActualDataPipelineTests(unittest.TestCase):
             observations = pd.read_parquet(root / "processed" / "feature_observations.parquet")
             retail = observations[observations["feature_name"] == "retail_subscription_ratio"].iloc[0]
             self.assertTrue(retail["is_missing"])
-            self.assertEqual(retail["missing_reason"], "dart_offering_result_not_found")
-            self.assertTrue(retail["human_review_required"])
+            self.assertEqual(retail["missing_reason"], "retail_feature_deferred_not_collected")
+            self.assertFalse(retail["human_review_required"])
 
-    def test_pipeline_prefers_verified_pre_listing_dart_offering_result(self):
+    def test_default_collection_skips_retail_audit_sources(self):
+        class RetailAuditSpy(_FakeDART):
+            def __init__(self):
+                self.offering_result_lookup_calls = 0
+
+            def find_offering_result_disclosure_record(self, corp_code, start_date, end_date):
+                self.offering_result_lookup_calls += 1
+                raise AssertionError("기본 수집은 개인청약 감사 원천을 조회하면 안 됩니다.")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dart = RetailAuditSpy()
+            summary = HistoricalIPOPipeline(
+                dart_collector=dart,
+                krx_collector=_FakeKRX(),
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+            ).run(2024, 2024, feature_set="phase2")
+
+            self.assertEqual(summary["retail_audit_mode"], "deferred")
+            self.assertEqual(dart.offering_result_lookup_calls, 0)
+            self.assertFalse((root / "raw" / "dart_offering_result_audit.parquet").exists())
+
+    def test_listing_price_audit_resolves_only_verified_target_events(self):
+        calendar = pd.DataFrame([
+            {"event_id": "matched", "ticker": "000001", "corp_name": "가", "listing_date": "2024-01-02",
+             "market": "KOSDAQ", "event_class": "general_ipo", "offering_type": "common_stock_ipo"},
+            {"event_id": "empty", "ticker": "000002", "corp_name": "나", "listing_date": "2024-01-03",
+             "market": "KOSDAQ", "event_class": "general_ipo", "offering_type": "common_stock_ipo"},
+            {"event_id": "identifier", "ticker": "000003", "corp_name": "다", "listing_date": "2024-01-04",
+             "market": "KOSDAQ", "event_class": "general_ipo", "offering_type": "common_stock_ipo"},
+            {"event_id": "relisting", "ticker": "000004", "corp_name": "라", "listing_date": "2024-01-05",
+             "market": "KOSDAQ", "event_class": "relisting", "offering_type": "relisting"},
+        ])
+        prices = pd.DataFrame([
+            {"ticker": "000001", "listing_date": "20240102", "open_price": 10000, "close_price": 11000,
+             "price_match_status": "matched", "price_match_method": "krx_standard_code",
+             "price_raw_response_evidence": "{}"},
+            {"ticker": "000002", "listing_date": "20240103", "price_match_status": "unmatched",
+             "price_failure_reason": "daily_price_api_response_empty", "price_raw_response_evidence": "{}"},
+            {"ticker": "000003", "listing_date": "20240104", "price_match_status": "unmatched",
+             "price_failure_reason": "daily_rows_code_and_company_name_unmatched",
+             "price_raw_response_evidence": "{}"},
+            {"ticker": "000004", "listing_date": "20240105", "price_match_status": "unmatched",
+             "price_failure_reason": "daily_rows_code_and_company_name_unmatched",
+             "price_raw_response_evidence": "{}"},
+        ])
+
+        audit = HistoricalIPOPipeline._build_listing_price_audit(calendar, prices)
+
+        status = audit.set_index("event_id")["price_resolution_status"].to_dict()
+        self.assertEqual(status["matched"], "official_price_verified")
+        self.assertEqual(status["empty"], "official_price_unconfirmed")
+        self.assertEqual(status["identifier"], "historical_identifier_review_required")
+        self.assertEqual(status["relisting"], "excluded_non_target_event")
+
+    def test_pipeline_keeps_dart_offering_result_as_audit_candidate_only(self):
         class ResultDART(_FakeDART):
             def find_offering_result_disclosure_record(self, corp_code, start_date, end_date):
                 return {
@@ -324,7 +386,7 @@ class ActualDataPipelineTests(unittest.TestCase):
                 krx_collector=_FakeKRX(),
                 raw_dir=root / "raw",
                 processed_dir=root / "processed",
-            ).run(2024, 2024, feature_set="phase2")
+            ).run(2024, 2024, feature_set="phase2", include_retail_audit=True)
 
             raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
             audit = pd.read_parquet(root / "raw" / "dart_offering_result_audit.parquet")
@@ -333,10 +395,10 @@ class ActualDataPipelineTests(unittest.TestCase):
 
             self.assertEqual(summary["dart_offering_result_candidate_rows"], 1)
             self.assertEqual(summary["dart_offering_result_approved_retail_rows"], 1)
-            self.assertEqual(raw.loc[0, "retail_subscription_ratio"], 1234.56)
+            self.assertTrue(pd.isna(raw.loc[0, "retail_subscription_ratio"]))
+            self.assertEqual(raw.loc[0, "retail_subscription_ratio_candidate"], 1234.56)
             self.assertEqual(audit.loc[0, "retail_result_rcept_no"], "20240501000001")
-            self.assertFalse(retail["is_missing"])
-            self.assertFalse(retail["human_review_required"])
+            self.assertTrue(retail["is_missing"])
 
     def test_second_run_reuses_versioned_dart_offering_result_audit(self):
         class CachedResultDART(_FakeDART):
@@ -373,8 +435,8 @@ class ActualDataPipelineTests(unittest.TestCase):
                 raw_dir=root / "raw",
                 processed_dir=root / "processed",
             )
-            pipeline.run(2024, 2024, feature_set="phase2")
-            pipeline.run(2024, 2024, feature_set="phase2")
+            pipeline.run(2024, 2024, feature_set="phase2", include_retail_audit=True)
+            pipeline.run(2024, 2024, feature_set="phase2", include_retail_audit=True)
 
             self.assertEqual(dart.result_calls, 1)
 

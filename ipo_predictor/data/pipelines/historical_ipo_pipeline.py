@@ -65,7 +65,13 @@ class HistoricalIPOPipeline:
         )
         self._lineage_rows: list[dict[str, Any]] = []
 
-    def run(self, start_year: int, end_year: int, feature_set: str = "phase2") -> dict[str, Any]:
+    def run(
+        self,
+        start_year: int,
+        end_year: int,
+        feature_set: str = "phase2",
+        include_retail_audit: bool = False,
+    ) -> dict[str, Any]:
         """수집 결과와 데이터 품질 요약을 반환하고 산출물을 디스크에 저장한다."""
         if start_year > end_year:
             raise ValueError("start_year는 end_year보다 클 수 없습니다.")
@@ -96,12 +102,19 @@ class HistoricalIPOPipeline:
         kospi.to_parquet(self.raw_dir / "kospi_index.parquet", index=False)
         kosdaq.to_parquet(self.raw_dir / "kosdaq_index.parquet", index=False)
 
-        dart_ipo, financials = self._collect_dart_records(calendar, start_year, end_year)
-        underwriter_results = self._collect_official_underwriter_results(krx_ipo)
-        underwriter_results.to_parquet(
-            self.raw_dir / "official_underwriter_notice_results.parquet", index=False
+        dart_ipo, financials = self._collect_dart_records(
+            calendar, start_year, end_year, include_retail_audit=include_retail_audit
         )
-        dart_ipo = self._merge_official_underwriter_results(dart_ipo, underwriter_results)
+        if include_retail_audit:
+            underwriter_results = self._collect_official_underwriter_results(krx_ipo)
+            underwriter_results.to_parquet(
+                self.raw_dir / "official_underwriter_notice_results.parquet", index=False
+            )
+            dart_ipo = self._merge_official_underwriter_results(dart_ipo, underwriter_results)
+        else:
+            # 기존 감사 결과 파일은 보존한다. 기본 수집에서는 개인청약 결과를
+            # 새로 호출하거나 모델 원시행에 합치지 않는다.
+            underwriter_results = pd.DataFrame(columns=RESULT_COLUMNS)
         self._document_failures.to_parquet(self.raw_dir / "dart_document_failures.parquet", index=False)
         self._demand_document_failures.to_parquet(
             self.raw_dir / "dart_demand_document_failures.parquet", index=False
@@ -122,9 +135,10 @@ class HistoricalIPOPipeline:
 
         price_audit = self._build_offering_price_audit(dart_ipo)
         price_audit.to_parquet(self.raw_dir / "dart_offering_price_audit.parquet", index=False)
-        self._build_dart_offering_result_audit(dart_ipo).to_parquet(
-            self.raw_dir / "dart_offering_result_audit.parquet", index=False
-        )
+        if include_retail_audit:
+            self._build_dart_offering_result_audit(dart_ipo).to_parquet(
+                self.raw_dir / "dart_offering_result_audit.parquet", index=False
+            )
         verified_statuses = {
             "verified_currency_unit",
             "verified_text_and_structured",
@@ -167,6 +181,12 @@ class HistoricalIPOPipeline:
                 "price_failure_reason", pd.Series(dtype=object)
             ).dropna().value_counts().items()
         }
+        summary["listing_price_resolution_counts"] = {
+            str(status): int(count)
+            for status, count in listing_price_audit.get(
+                "price_resolution_status", pd.Series(dtype=object)
+            ).value_counts(dropna=False).items()
+        }
         summary["future_information_violations"] = int(time_audit["is_future_information"].sum())
         summary["feature_time_validation_rows"] = int(len(time_audit))
         summary["official_underwriter_notice_rows"] = int(len(underwriter_results))
@@ -197,6 +217,7 @@ class HistoricalIPOPipeline:
         summary["dart_offering_result_document_failure_rows"] = int(
             len(self._offering_result_document_failures)
         )
+        summary["retail_audit_mode"] = "included" if include_retail_audit else "deferred"
         summary["model_stage_readiness"] = stage_summary
         with open(self.processed_dir / "data_collection_summary.json", "w", encoding="utf-8") as file:
             json.dump(summary, file, ensure_ascii=False, indent=2, default=str)
@@ -403,33 +424,20 @@ class HistoricalIPOPipeline:
     def _merge_official_underwriter_results(
         dart_ipo: pd.DataFrame, underwriter_results: pd.DataFrame
     ) -> pd.DataFrame:
-        """DART 발행실적을 우선하고, 부족할 때만 공식 주관사 값을 반영한다."""
+        """개인청약 값은 검증된 주관사 공식 공지만 모델 행에 반영한다.
+
+        DART 발행실적보고서는 공모 범위 감사 자료로 보존하지만, 일반공모에
+        기관 청약이 포함될 수 있으므로 개인청약 피처의 승인 원천은 아니다.
+        """
         if dart_ipo.empty:
             return dart_ipo
         result = dart_ipo.copy()
-        dart_value = pd.to_numeric(
-            result.get("retail_subscription_ratio", pd.Series(index=result.index, dtype=float)), errors="coerce"
-        )
-        dart_status = result.get("retail_validation_status", pd.Series(index=result.index, dtype=object))
-        dart_available_at = pd.to_datetime(
-            result.get("retail_available_at", pd.Series(index=result.index, dtype=object)), errors="coerce"
-        )
-        listing_date = pd.to_datetime(
-            result.get("listing_date", pd.Series(index=result.index, dtype=object)), errors="coerce"
-        )
-        dart_is_pre_listing = dart_available_at.notna() & listing_date.notna() & (dart_available_at < listing_date)
-        dart_is_verified = dart_status.eq("official_dart_issuer_total_retail_ratio")
-        dart_approved = dart_value.notna() & dart_is_verified & dart_is_pre_listing
-        # DART 증권발행실적보고서는 발행사 기준의 전체/총 일반청약 범위가
-        # 같은 행 또는 문장에 명시된 경우만 여기에 도달한다.
-        result["retail_subscription_ratio"] = dart_value.where(dart_approved)
+        result["retail_subscription_ratio"] = pd.NA
         if "retail_subscription_eligibility_status" not in result.columns:
             result["retail_subscription_eligibility_status"] = pd.NA
         result["retail_subscription_eligible"] = pd.array([pd.NA] * len(result), dtype="boolean")
         ineligible = result["retail_subscription_eligibility_status"].eq("not_eligible_product")
         result.loc[ineligible, "retail_subscription_eligible"] = False
-        result.loc[dart_approved, "retail_subscription_eligible"] = True
-        result.loc[dart_approved, "retail_subscription_eligibility_status"] = "verified_official_dart"
         if underwriter_results.empty:
             return result
         underwriter_results = underwriter_results.copy()
@@ -456,35 +464,36 @@ class HistoricalIPOPipeline:
         approved = approved.sort_values("collected_at").drop_duplicates("event_id", keep="last")
         approved = approved.rename(columns={
             "retail_subscription_ratio": "retail_subscription_ratio_official",
-            "notice_url": "retail_source_url",
-            "validation_status": "retail_validation_status",
-            "available_at": "retail_available_at",
-            "collected_at": "retail_collected_at",
+            "notice_url": "retail_notice_source_url",
+            "validation_status": "retail_notice_validation_status",
+            "available_at": "retail_notice_available_at",
+            "collected_at": "retail_notice_collected_at",
         })
         result = result.merge(
             approved[[
-                "event_id", "retail_subscription_ratio_official", "retail_source_url",
-                "retail_validation_status", "retail_available_at", "retail_collected_at",
+                "event_id", "retail_subscription_ratio_official", "retail_notice_source_url",
+                "retail_notice_validation_status", "retail_notice_available_at", "retail_notice_collected_at",
             ]],
             on="event_id", how="left",
         )
         official = pd.to_numeric(result["retail_subscription_ratio_official"], errors="coerce")
         notice_approved = official.notna()
-        existing_dart = result["retail_subscription_ratio"].notna()
-        same_value = existing_dart & notice_approved & result["retail_subscription_ratio"].eq(official)
-        conflicting_value = existing_dart & notice_approved & ~same_value
-        use_notice = notice_approved & ~existing_dart
-        result.loc[use_notice, "retail_subscription_ratio"] = official[use_notice]
-        result.loc[use_notice, "retail_subscription_eligible"] = True
-        result.loc[use_notice, "retail_subscription_eligibility_status"] = "verified_official_notice"
-        result.loc[same_value, "retail_validation_status"] = "official_dart_and_notice_match"
-        result.loc[same_value, "retail_subscription_eligibility_status"] = "verified_official_dart_and_notice"
-        # 독립된 공식 원천의 값이 다르면 한쪽을 임의로 고르지 않는다.
-        result.loc[conflicting_value, "retail_subscription_ratio"] = float("nan")
-        result.loc[conflicting_value, "retail_subscription_eligible"] = pd.NA
-        result.loc[conflicting_value, "retail_subscription_eligibility_status"] = "official_source_conflict_review_required"
-        result.loc[conflicting_value, "retail_validation_status"] = "official_source_conflict_review_required"
-        return result.drop(columns=["retail_subscription_ratio_official"])
+        result.loc[notice_approved, "retail_subscription_ratio"] = official[notice_approved]
+        result.loc[notice_approved, "retail_source_url"] = result.loc[
+            notice_approved, "retail_notice_source_url"
+        ]
+        result.loc[notice_approved, "retail_available_at"] = result.loc[
+            notice_approved, "retail_notice_available_at"
+        ]
+        result.loc[notice_approved, "retail_validation_status"] = result.loc[
+            notice_approved, "retail_notice_validation_status"
+        ]
+        result.loc[notice_approved, "retail_subscription_eligible"] = True
+        result.loc[notice_approved, "retail_subscription_eligibility_status"] = "verified_official_notice"
+        return result.drop(columns=[
+            "retail_subscription_ratio_official", "retail_notice_source_url",
+            "retail_notice_validation_status", "retail_notice_available_at", "retail_notice_collected_at",
+        ])
 
     def collect_official_event_master(
         self, start_year: int, end_year: int, force_refresh: bool = False
@@ -616,9 +625,12 @@ class HistoricalIPOPipeline:
                 previous = cached_by_key.loc[cache_key]
                 if pd.notna(previous.get("open_price")) and pd.notna(previous.get("close_price")):
                     cached_record = previous.to_dict()
-                    cached_record.setdefault("price_match_status", "cached_verified_price")
-                    cached_record.setdefault("price_match_method", "prior_cache")
-                    cached_record.setdefault("price_failure_reason", None)
+                    if pd.isna(cached_record.get("price_match_status")):
+                        cached_record["price_match_status"] = "cached_verified_price"
+                    if pd.isna(cached_record.get("price_match_method")):
+                        cached_record["price_match_method"] = "prior_cache"
+                    if pd.isna(cached_record.get("price_failure_reason")):
+                        cached_record["price_failure_reason"] = None
                     records.append(cached_record)
                     reused += 1
                     continue
@@ -732,6 +744,8 @@ class HistoricalIPOPipeline:
             "ticker", "listing_date", "isu_cd", "market", "open_price", "close_price",
             "price_match_status", "price_match_method", "price_failure_reason",
             "price_markets_queried", "price_api_rows_returned",
+            "price_raw_response_evidence", "price_matched_ticker", "price_matched_isu_cd",
+            "price_matched_corp_name",
         ]
         events = calendar.reindex(columns=event_columns).copy()
         events["listing_date"] = pd.to_datetime(events["listing_date"], errors="coerce")
@@ -743,9 +757,31 @@ class HistoricalIPOPipeline:
         })
         audit = events.merge(result, on=["ticker", "listing_date"], how="left")
         audit["price_match_status"] = audit["price_match_status"].fillna("unknown_legacy_cache")
-        audit["human_review_required"] = audit["price_match_status"].ne("matched") & audit[
-            "price_match_status"
-        ].ne("cached_verified_price")
+        audit["price_raw_response_verified"] = audit["price_raw_response_evidence"].notna()
+        non_target = audit.get("event_class", pd.Series("", index=audit.index)).isin({
+            "relisting", "unclassified_review", "preferred_or_class_share", "ineligible_product",
+        })
+        direct_match = audit["price_match_status"].isin({"matched", "cached_verified_price"})
+        api_empty = audit["price_failure_reason"].eq("daily_price_api_response_empty")
+        legacy_value = (
+            audit["price_match_status"].eq("unknown_legacy_cache")
+            & (audit["listing_open_price"].notna() | audit["listing_close_price"].notna())
+        )
+        audit["price_resolution_status"] = "historical_identifier_review_required"
+        audit.loc[non_target, "price_resolution_status"] = "excluded_non_target_event"
+        audit.loc[~non_target & direct_match, "price_resolution_status"] = "official_price_verified"
+        audit.loc[~non_target & api_empty & audit["price_raw_response_verified"], "price_resolution_status"] = (
+            "official_price_unconfirmed"
+        )
+        audit.loc[~non_target & legacy_value, "price_resolution_status"] = (
+            "historical_price_cache_reaudit_required"
+        )
+        audit["historical_identifier_rematch_status"] = audit["price_match_method"].fillna(
+            "all_identifier_methods_unmatched"
+        )
+        audit["human_review_required"] = audit["price_resolution_status"].isin({
+            "historical_identifier_review_required", "historical_price_cache_reaudit_required",
+        })
         return audit
 
     def _collect_dart_records(
@@ -753,6 +789,8 @@ class HistoricalIPOPipeline:
         calendar: pd.DataFrame,
         start_year: int,
         end_year: int,
+        *,
+        include_retail_audit: bool,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         disclosures = []
         for year in range(start_year, end_year + 1):
@@ -995,10 +1033,17 @@ class HistoricalIPOPipeline:
                 "retail_human_review_required": True,
                 "retail_parse_success": False,
             }
-            # 개인 청약 결과는 먼저 발행사 DART 증권발행실적보고서를 찾는다.
+            # 개인청약 경쟁률은 기본 모델의 입력이 아니다. 비용이 큰 DART 원문
+            # 재검사는 명시적으로 요청한 감사 실행에서만 수행한다.
+            if not include_retail_audit:
+                retail_result["retail_validation_status"] = "retail_feature_deferred_not_collected"
+                retail_result["retail_human_review_required"] = False
             # 상장일 공시나 그 이후에 공개된 문서는 상장 전 예측에 사용할 수 없다.
             try:
-                result_record_method = getattr(self.dart, "find_offering_result_disclosure_record", None)
+                result_record_method = (
+                    getattr(self.dart, "find_offering_result_disclosure_record", None)
+                    if include_retail_audit else None
+                )
                 if callable(result_record_method):
                     search_end = pd.Timestamp(listing.listing_date) - pd.Timedelta(days=1)
                     result_record = result_record_method(

@@ -4,6 +4,8 @@
 사용하지 않으며, API 키는 ``KRX_API_KEY`` 환경변수로만 전달한다.
 """
 
+import hashlib
+import json
 import logging
 import re
 import time
@@ -323,6 +325,10 @@ class KRXCollector:
             "price_failure_reason": failure_reason,
             "price_markets_queried": ",".join(rows_by_market),
             "price_api_rows_returned": row_count,
+            "price_raw_response_evidence": self._raw_price_response_evidence(rows_by_market),
+            "price_matched_ticker": None,
+            "price_matched_isu_cd": None,
+            "price_matched_corp_name": None,
         }
 
     def _price_record(
@@ -350,7 +356,36 @@ class KRXCollector:
             "price_failure_reason": None,
             "price_markets_queried": ",".join(rows_by_market),
             "price_api_rows_returned": sum(len(rows) for rows in rows_by_market.values()),
+            "price_raw_response_evidence": self._raw_price_response_evidence(rows_by_market),
+            "price_matched_ticker": row.get("ISU_SRT_CD"),
+            "price_matched_isu_cd": row.get("ISU_CD"),
+            "price_matched_corp_name": row.get("ISU_NM"),
         }
+
+    @staticmethod
+    def _raw_price_response_evidence(rows_by_market: dict[str, list[dict[str, Any]]]) -> str:
+        """일별 원시 응답을 재현 가능하게 요약한다.
+
+        일자별 전체 시세 행을 이벤트마다 중복 저장하지 않는다. 대신 실제로
+        매칭에 사용한 KRX 응답의 시장별 행 수, SHA-256 해시, 식별 열 표본을
+        보관해 같은 응답인지와 코드·회사명 대조 근거를 감사할 수 있게 한다.
+        """
+        evidence: dict[str, dict[str, Any]] = {}
+        for market, rows in rows_by_market.items():
+            raw = json.dumps(rows, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+            evidence[market] = {
+                "row_count": len(rows),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "identity_sample": [
+                    {
+                        "ISU_CD": row.get("ISU_CD"),
+                        "ISU_SRT_CD": row.get("ISU_SRT_CD"),
+                        "ISU_NM": row.get("ISU_NM"),
+                    }
+                    for row in rows[:20]
+                ],
+            }
+        return json.dumps(evidence, ensure_ascii=False, sort_keys=True)
 
     def get_legacy_list_dd_candidates(self, start_date: str, end_date: str) -> pd.DataFrame:
         """종목기본정보 ``LIST_DD`` 기반의 이전 후보 목록을 반환한다.

@@ -45,7 +45,7 @@ MODEL_PROFILES = {
     ),
     "post_retail": PredictionProfile(
         name="post_retail",
-        description="일반청약 마감 후·상장 전: 검증된 통합 개인 청약 경쟁률을 추가",
+        description="실험 확장: 일반청약 마감 후 검증된 통합 개인 청약 경쟁률을 추가",
         feature_names=(
             "institutional_demand_ratio", "retail_subscription_ratio", "lockup_6m_ratio",
             "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio", "lockup_weighted_score",
@@ -110,7 +110,7 @@ def build_stage_dataset(
     # 공지가 이벤트에 정합된 경우에만 post_retail 후보가 될 수 있다.
     if "retail_subscription_eligible" not in frame.columns:
         frame["retail_subscription_eligible"] = pd.NA
-    retail_eligible = frame["retail_subscription_eligible"].fillna(False).astype(bool)
+    retail_eligible = frame["retail_subscription_eligible"].astype("boolean").fillna(False).astype(bool)
     frame["stage_retail_eligibility_verified"] = (
         retail_eligible if profile.name == "post_retail" else True
     )

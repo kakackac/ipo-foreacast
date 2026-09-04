@@ -775,6 +775,10 @@ class FeatureEngineer:
                 if pd.isna(validation) or str(validation).strip() == "":
                     validation = "needs_review"
                 validation = str(validation)
+                deferred_retail_feature = (
+                    feature_name == "retail_subscription_ratio"
+                    and validation == "retail_feature_deferred_not_collected"
+                )
                 records.append({
                     "event_id": values.get("event_id"),
                     "corp_name": values.get("corp_name"),
@@ -788,12 +792,12 @@ class FeatureEngineer:
                     "available_at": available_at,
                     "collected_at": pd.Timestamp.now(tz="Asia/Seoul"),
                     "validation_status": validation,
-                    "human_review_required": bool(missing or validation not in {
+                    "human_review_required": bool(not deferred_retail_feature and (missing or validation not in {
                         "verified_currency_unit", "verified_text_and_structured",
                         "verified_structured_api", "manual_verified",
                         "official_source_krx_code_enriched", "official_source_collected",
                         "official_dart_issuer_total_retail_ratio", "official_dart_and_notice_match",
-                    }),
+                    })),
                 })
         return pd.DataFrame(records)
 

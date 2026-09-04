@@ -399,7 +399,7 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
         self.assertEqual(merged.loc[0, "retail_subscription_ratio"], 1000.0)
         self.assertEqual(merged.loc[0, "retail_subscription_eligibility_status"], "verified_official_notice")
 
-    def test_pipeline_uses_pre_listing_verified_dart_result_before_notice(self):
+    def test_pipeline_keeps_dart_offering_result_out_of_retail_feature(self):
         dart = pd.DataFrame({
             "event_id": ["a"], "corp_name": ["A"], "listing_date": ["2026-01-20"],
             "retail_available_at": ["2026-01-15"],
@@ -409,11 +409,10 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
 
         merged = HistoricalIPOPipeline._merge_official_underwriter_results(dart, pd.DataFrame())
 
-        self.assertEqual(merged.loc[0, "retail_subscription_ratio"], 123.0)
-        self.assertEqual(merged.loc[0, "retail_subscription_eligibility_status"], "verified_official_dart")
-        self.assertTrue(merged.loc[0, "retail_subscription_eligible"])
+        self.assertTrue(pd.isna(merged.loc[0, "retail_subscription_ratio"]))
+        self.assertTrue(pd.isna(merged.loc[0, "retail_subscription_eligible"]))
 
-    def test_pipeline_quarantines_conflicting_dart_and_notice_results(self):
+    def test_pipeline_uses_verified_notice_without_promoting_dart_audit_value(self):
         dart = pd.DataFrame({
             "event_id": ["a"], "corp_name": ["A"], "listing_date": ["2026-01-20"],
             "retail_available_at": ["2026-01-15"],
@@ -431,11 +430,8 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
 
         merged = HistoricalIPOPipeline._merge_official_underwriter_results(dart, notices)
 
-        self.assertTrue(pd.isna(merged.loc[0, "retail_subscription_ratio"]))
-        self.assertEqual(
-            merged.loc[0, "retail_subscription_eligibility_status"],
-            "official_source_conflict_review_required",
-        )
+        self.assertEqual(merged.loc[0, "retail_subscription_ratio"], 456.0)
+        self.assertEqual(merged.loc[0, "retail_subscription_eligibility_status"], "verified_official_notice")
 
     def test_pipeline_does_not_trust_legacy_notice_without_event_validation(self):
         dart = pd.DataFrame({"event_id": ["a"], "corp_name": ["A"]})
