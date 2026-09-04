@@ -473,6 +473,18 @@ def run_collect(start_year: int, end_year: int, phase: str = "phase2"):
         summary.get("listing_price_target_eligible_rows", 0),
         summary.get("listing_price_target_blocked_rows", 0),
     )
+    coverage = summary.get("feature_coverage", {})
+    important_features = (
+        "institutional_demand_ratio", "offering_price_band_position",
+        "lockup_weighted_score", "float_share_ratio", "secondary_offering_ratio",
+    )
+    coverage_text = " | ".join(
+        f"{feature} {float(coverage[feature].get('coverage_rate', 0.0)):.1%}"
+        for feature in important_features
+        if feature in coverage
+    )
+    if coverage_text:
+        logger.info("핵심 피처 원시 충족률 | %s", coverage_text)
     return summary
 
 
