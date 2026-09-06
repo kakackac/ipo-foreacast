@@ -456,12 +456,22 @@ def run_analyze():
     logger.info(report.summary())
 
 
-def run_collect(start_year: int, end_year: int, phase: str = "phase2"):
+def run_collect(
+    start_year: int,
+    end_year: int,
+    phase: str = "phase2",
+    audit_dart_demand: bool = False,
+):
     """공식 원천 데이터를 수집해 학습용 피처 파일을 생성한다."""
     from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline
 
     logger.info("════ 실제 IPO 데이터 수집 (%d~%d) ════", start_year, end_year)
-    summary = HistoricalIPOPipeline().run(start_year, end_year, feature_set=phase)
+    summary = HistoricalIPOPipeline().run(
+        start_year,
+        end_year,
+        feature_set=phase,
+        include_dart_demand_audit=audit_dart_demand,
+    )
     logger.info(
         "수집 완료 | KRX 일정 %d | DART 정합 %d | 학습 행 %d | 시초가 타깃 %d | 종가 타깃 %d",
         summary["calendar_rows"], summary["dart_matched_rows"], summary["feature_rows"],
@@ -485,6 +495,8 @@ def run_collect(start_year: int, end_year: int, phase: str = "phase2"):
     )
     if coverage_text:
         logger.info("핵심 피처 원시 충족률 | %s", coverage_text)
+    if not audit_dart_demand:
+        logger.info("기관 수요예측·확약 DART 후보 탐색은 기본 수집에서 제외했습니다. 공식 주관사 원천 표본 감사 후 별도 수집기로 연결하세요.")
     return summary
 
 
@@ -519,6 +531,15 @@ def run_prepare_underwriter_notice_review_queue():
     return queue
 
 
+def run_audit_underwriter_source_readiness():
+    """공개 주관사 결과 문서의 검증 전 수집 차단 상태를 요약한다."""
+    from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline
+
+    readiness = HistoricalIPOPipeline().audit_underwriter_source_readiness()
+    logger.info("공식 주관사 원천 준비도 감사 완료 | %d개 주관사", len(readiness))
+    return readiness
+
+
 if __name__ == "__main__":
     import pandas as pd
 
@@ -527,7 +548,8 @@ if __name__ == "__main__":
         "--mode",
         choices=[
             "train", "backtest", "analyze", "demo", "collect", "collect-events",
-            "audit-dart-failures",
+            "audit-dart-failures", "prepare-underwriter-notice-review-queue",
+            "audit-underwriter-source-readiness",
         ],
         default="demo",
         help="실행 모드",
@@ -536,6 +558,11 @@ if __name__ == "__main__":
         "--refresh-events",
         action="store_true",
         help="KRX 공식 이벤트 캐시를 무시하고 요청 기간을 다시 수집",
+    )
+    parser.add_argument(
+        "--audit-dart-demand",
+        action="store_true",
+        help="DART 수요예측 후보 문서를 감사용으로만 재검사합니다. 기본 수집에서는 비활성화됩니다.",
     )
     parser.add_argument(
         "--phase",
@@ -568,7 +595,12 @@ if __name__ == "__main__":
         run_backtest(phase=args.phase, prediction_stage=args.prediction_stage)
     elif args.mode == "collect":
         try:
-            run_collect(args.start_year, args.end_year, phase=args.phase)
+            run_collect(
+                args.start_year,
+                args.end_year,
+                phase=args.phase,
+                audit_dart_demand=args.audit_dart_demand,
+            )
         except RuntimeError as exc:
             logger.error("실제 데이터 수집 중단: %s", exc)
             sys.exit(2)
@@ -583,6 +615,18 @@ if __name__ == "__main__":
             run_audit_dart_failures()
         except RuntimeError as exc:
             logger.error("DART 원문 실패 재감사 중단: %s", exc)
+            sys.exit(2)
+    elif args.mode == "prepare-underwriter-notice-review-queue":
+        try:
+            run_prepare_underwriter_notice_review_queue()
+        except RuntimeError as exc:
+            logger.error("주관사 공식 공지 검토 대기열 생성 중단: %s", exc)
+            sys.exit(2)
+    elif args.mode == "audit-underwriter-source-readiness":
+        try:
+            run_audit_underwriter_source_readiness()
+        except RuntimeError as exc:
+            logger.error("주관사 공식 원천 준비도 감사 중단: %s", exc)
             sys.exit(2)
     else:
         logger.error("지원하지 않는 모드: %s", args.mode)

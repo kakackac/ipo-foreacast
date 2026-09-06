@@ -15,6 +15,7 @@ from data.collectors.underwriter_collector import OfficialUnderwriterCollector, 
 from data.collectors.underwriter_registry import (
     OFFICIAL_UNDERWRITER_REGISTRY,
     build_underwriter_priorities,
+    build_underwriter_source_readiness,
     normalize_underwriter,
 )
 from data.processors.feature_engineer import FeatureEngineer
@@ -77,6 +78,7 @@ class HistoricalIPOPipeline:
         end_year: int,
         feature_set: str = "phase2",
         include_retail_audit: bool = False,
+        include_dart_demand_audit: bool = False,
     ) -> dict[str, Any]:
         """수집 결과와 데이터 품질 요약을 반환하고 산출물을 디스크에 저장한다."""
         if start_year > end_year:
@@ -103,6 +105,10 @@ class HistoricalIPOPipeline:
         underwriter_priorities.to_parquet(
             self.raw_dir / "official_underwriter_priorities.parquet", index=False
         )
+        source_readiness = build_underwriter_source_readiness(krx_ipo)
+        source_readiness.to_parquet(
+            self.raw_dir / "official_underwriter_source_readiness.parquet", index=False
+        )
 
         kospi = self._collect_index_with_cache("1", start_year, end_year, "kospi_index.parquet")
         kosdaq = self._collect_index_with_cache("2", start_year, end_year, "kosdaq_index.parquet")
@@ -110,7 +116,11 @@ class HistoricalIPOPipeline:
         kosdaq.to_parquet(self.raw_dir / "kosdaq_index.parquet", index=False)
 
         dart_ipo, financials = self._collect_dart_records(
-            calendar, start_year, end_year, include_retail_audit=include_retail_audit
+            calendar,
+            start_year,
+            end_year,
+            include_retail_audit=include_retail_audit,
+            include_dart_demand_audit=include_dart_demand_audit,
         )
         self._flush_document_cache_updates()
         if include_retail_audit:
@@ -400,6 +410,28 @@ class HistoricalIPOPipeline:
         queue.to_parquet(self.raw_dir / "official_underwriter_notice_review_queue.parquet", index=False)
         queue.to_csv(self.manual_dir / "underwriter_notice_review_queue.csv", index=False, encoding="utf-8-sig")
         return queue
+
+    def audit_underwriter_source_readiness(self) -> pd.DataFrame:
+        """공식 주관사 결과 원천의 표본 감사 상태를 이벤트 규모와 함께 저장한다.
+
+        공개 경로가 있다는 사실과 기관 경쟁률·확약 값을 공개적으로 제공한다는
+        사실은 다르다. 이 감사는 후자가 검증되기 전 자동 수집을 차단한다.
+        """
+        event_path = self.raw_dir / "krx_official_event_master.parquet"
+        if not event_path.exists():
+            raise RuntimeError(
+                "공식 KRX 이벤트 마스터가 없습니다. 먼저 collect-events 또는 collect를 실행하세요."
+            )
+        readiness = build_underwriter_source_readiness(pd.read_parquet(event_path))
+        readiness.to_parquet(
+            self.raw_dir / "official_underwriter_source_readiness.parquet", index=False
+        )
+        readiness.to_csv(
+            self.manual_dir / "official_underwriter_source_readiness.csv",
+            index=False,
+            encoding="utf-8-sig",
+        )
+        return readiness
 
     def _load_official_source_resolutions(self) -> pd.DataFrame:
         """공식 원천을 확인한 뒤 확정한 결측 사유만 관측 원장에 반영한다."""
@@ -902,6 +934,7 @@ class HistoricalIPOPipeline:
         end_year: int,
         *,
         include_retail_audit: bool,
+        include_dart_demand_audit: bool,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         disclosures = []
         for year in range(start_year, end_year + 1):
@@ -1148,44 +1181,55 @@ class HistoricalIPOPipeline:
                 offering[f"{source_group}_rcept_dt"] = source_candidate.rcept_dt
 
             demand_candidates: list[dict[str, Any]] = []
-            try:
-                demand_records_method = getattr(self.dart, "find_demand_forecast_disclosure_records", None)
-                search_start = (pd.Timestamp(listing.listing_date) - pd.Timedelta(days=MAX_FILING_TO_LISTING_DAYS))
-                if callable(demand_records_method):
-                    demand_candidates.extend(demand_records_method(
-                        str(filing.corp_code),
-                        search_start.strftime("%Y%m%d"),
-                        pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
-                    ))
-                else:
-                    demand_record_method = getattr(self.dart, "find_demand_forecast_disclosure_record", None)
-                    if callable(demand_record_method):
-                        record = demand_record_method(
-                            str(filing.corp_code), search_start.strftime("%Y%m%d"),
+            # 기관 경쟁률·확약은 DART의 공통 구조화 원천이 아니다. 기본 수집에서
+            # 후보 문서를 전수 파싱하지 않고, 명시적인 원천 적합성 감사 때만 읽는다.
+            if include_dart_demand_audit:
+                try:
+                    demand_records_method = getattr(
+                        self.dart, "find_demand_forecast_disclosure_records", None
+                    )
+                    search_start = pd.Timestamp(listing.listing_date) - pd.Timedelta(
+                        days=MAX_FILING_TO_LISTING_DAYS
+                    )
+                    if callable(demand_records_method):
+                        demand_candidates.extend(demand_records_method(
+                            str(filing.corp_code),
+                            search_start.strftime("%Y%m%d"),
                             pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
-                        )
-                        if record:
-                            demand_candidates.append(record)
+                        ))
                     else:
-                        legacy_demand_method = getattr(self.dart, "find_demand_forecast_disclosure", None)
-                        if callable(legacy_demand_method):
-                            receipt = legacy_demand_method(
+                        demand_record_method = getattr(
+                            self.dart, "find_demand_forecast_disclosure_record", None
+                        )
+                        if callable(demand_record_method):
+                            record = demand_record_method(
                                 str(filing.corp_code), search_start.strftime("%Y%m%d"),
                                 pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
                             )
-                            if receipt:
-                                demand_candidates.append({"rcept_no": str(receipt)})
-            except RuntimeError as exc:
-                logger.warning("수요예측 공시 계보 조회 실패 (%s): %s", filing.corp_name, exc)
+                            if record:
+                                demand_candidates.append(record)
+                        else:
+                            legacy_demand_method = getattr(
+                                self.dart, "find_demand_forecast_disclosure", None
+                            )
+                            if callable(legacy_demand_method):
+                                receipt = legacy_demand_method(
+                                    str(filing.corp_code), search_start.strftime("%Y%m%d"),
+                                    pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
+                                )
+                                if receipt:
+                                    demand_candidates.append({"rcept_no": str(receipt)})
+                except RuntimeError as exc:
+                    logger.warning("수요예측 공시 계보 조회 실패 (%s): %s", filing.corp_name, exc)
 
-            # 목록 API 제목이 누락·축약된 경우에도 이미 연결한 증권신고서 계보는
-            # 수요예측 결과를 담을 수 있다. 후보를 합치되 접수번호별로 한 번만 읽는다.
-            demand_candidates.extend({
-                "rcept_no": str(candidate.rcept_no),
-                "rcept_dt": candidate.rcept_dt,
-                "report_nm": candidate.report_nm,
-                "candidate_score": 80 if bool(candidate.is_final_conditions) else 5,
-            } for candidate in candidates.itertuples(index=False))
+                # 목록 API 제목이 누락·축약된 경우에도 이미 연결한 증권신고서 계보는
+                # 수요예측 결과를 담을 수 있다. 후보를 합치되 접수번호별로 한 번만 읽는다.
+                demand_candidates.extend({
+                    "rcept_no": str(candidate.rcept_no),
+                    "rcept_dt": candidate.rcept_dt,
+                    "report_nm": candidate.report_nm,
+                    "candidate_score": 80 if bool(candidate.is_final_conditions) else 5,
+                } for candidate in candidates.itertuples(index=False))
             deduped_demand_candidates: list[dict[str, Any]] = []
             seen_demand_receipts: set[str] = set()
             for candidate in demand_candidates:
@@ -1401,22 +1445,26 @@ class HistoricalIPOPipeline:
                 "institutional_available_at": institutional_rcept_dt,
                 "lockup_available_at": lockup_rcept_dt,
                 "institutional_validation_status": (
-                    "dart_demand_document_parsed" if demand.get("institutional_demand_ratio") is not None
-                    else ("dart_demand_candidate_not_found" if not demand_candidates else "needs_review_missing_demand_value")
+                    "not_collected_dart_nonstandard_source" if not include_dart_demand_audit
+                    else ("audit_only_dart_nonstandard_source" if demand.get("institutional_demand_ratio") is not None
+                          else ("dart_demand_candidate_not_found" if not demand_candidates else "needs_review_missing_demand_value"))
                 ),
                 "lockup_validation_status": (
-                    "dart_demand_document_parsed" if any(
+                    "not_collected_dart_demand_audit_disabled" if not include_dart_demand_audit
+                    else ("audit_only_dart_nonstandard_source" if any(
                         demand.get(field) is not None for field in (
                             "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
                         )
-                    ) else ("dart_demand_candidate_not_found" if not demand_candidates else "needs_review_missing_demand_value")
+                    ) else ("dart_demand_candidate_not_found" if not demand_candidates else "needs_review_missing_demand_value"))
                 ),
                 **offering,
                 # 이 행은 현재 KRX 상장 이벤트에 맞춰 수집한 공시다. 원문에
                 # 기재된 상장예정일은 별도 보존하고, 병합 키는 실제 상장일을 쓴다.
                 "disclosed_listing_date": offering.get("listing_date"),
                 "listing_date": listing.listing_date,
-                **{key: value for key, value in demand.items() if key not in {"corp_code", "parse_success"}},
+                # DART 수요예측 문서 파싱은 원천 적합성 감사로만 보관한다. DART가
+                # 기관 경쟁률·확약의 표준 원천임이 검증되기 전에는 모델 원시 행에
+                # 값을 복사하지 않아, 감사 옵션이 학습 입력을 우회하지 못하게 한다.
                 **{key: value for key, value in retail_result.items() if key != "corp_code"},
                 **self._compare_offering_sources(offering, demand),
                 "financial_as_of_year": financial_summary.get("financial_as_of_year"),

@@ -169,6 +169,16 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertTrue((raw_dir / "official_underwriter_notice_review_queue.parquet").exists())
             self.assertTrue((manual_dir / "underwriter_notice_review_queue.csv").exists())
 
+            readiness = HistoricalIPOPipeline(
+                dart_collector=_FakeDART(), krx_collector=_FakeKRX(), raw_dir=raw_dir,
+                processed_dir=root / "processed",
+            ).audit_underwriter_source_readiness()
+            self.assertEqual(set(readiness["lead_underwriter"]), {
+                "한국투자증권", "미래에셋증권", "NH투자증권", "KB증권",
+            })
+            self.assertTrue((raw_dir / "official_underwriter_source_readiness.parquet").exists())
+            self.assertTrue((manual_dir / "official_underwriter_source_readiness.csv").exists())
+
     def test_dart_no_data_status_is_normalised_to_an_empty_list(self):
         response = Mock()
         response.raise_for_status.return_value = None
@@ -287,7 +297,7 @@ class ActualDataPipelineTests(unittest.TestCase):
                 krx_collector=_FakeKRX(),
                 raw_dir=root / "raw",
                 processed_dir=root / "processed",
-            ).run(2024, 2024, feature_set="phase2")
+            ).run(2024, 2024, feature_set="phase2", include_dart_demand_audit=True)
 
             features = pd.read_parquet(root / "processed" / "features_all.parquet")
             self.assertEqual(summary["feature_rows"], 1)
@@ -325,8 +335,46 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertNotIn("retail_subscription_ratio", observations["feature_name"].tolist())
             self.assertIn("institutional_demand_ratio", summary["feature_coverage"])
             demand_coverage = coverage.set_index("feature_name").loc["institutional_demand_ratio"]
-            self.assertEqual(demand_coverage["observed_rows"], 1)
-            self.assertEqual(demand_coverage["missing_rows"], 0)
+            self.assertEqual(demand_coverage["observed_rows"], 0)
+            self.assertEqual(demand_coverage["missing_rows"], 1)
+            raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
+            self.assertEqual(
+                raw.loc[0, "institutional_validation_status"],
+                "audit_only_dart_nonstandard_source",
+            )
+
+    def test_default_collection_skips_nonstandard_dart_demand_audit(self):
+        class DemandAuditSpy(_FakeDART):
+            def __init__(self):
+                self.demand_lookup_calls = 0
+                self.demand_parse_calls = 0
+
+            def find_demand_forecast_disclosure(self, corp_code, start_date, end_date):
+                self.demand_lookup_calls += 1
+                raise AssertionError("기본 수집은 DART 수요예측 후보를 조회하면 안 됩니다.")
+
+            def get_demand_forecast(self, corp_code, rcept_no):
+                self.demand_parse_calls += 1
+                raise AssertionError("기본 수집은 DART 수요예측 원문을 파싱하면 안 됩니다.")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            dart = DemandAuditSpy()
+            HistoricalIPOPipeline(
+                dart_collector=dart,
+                krx_collector=_FakeKRX(),
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+            ).run(2024, 2024, feature_set="phase2")
+
+            raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
+            self.assertEqual(dart.demand_lookup_calls, 0)
+            self.assertEqual(dart.demand_parse_calls, 0)
+            self.assertNotIn("institutional_demand_ratio", raw.columns)
+            self.assertEqual(
+                raw.loc[0, "institutional_validation_status"],
+                "not_collected_dart_nonstandard_source",
+            )
 
     def test_default_collection_skips_retail_audit_sources(self):
         class RetailAuditSpy(_FakeDART):
@@ -599,14 +647,14 @@ class ActualDataPipelineTests(unittest.TestCase):
                 raw_dir=root / "raw",
                 processed_dir=root / "processed",
             )
-            first.run(2024, 2024, feature_set="phase2")
+            first.run(2024, 2024, feature_set="phase2", include_dart_demand_audit=True)
             second = HistoricalIPOPipeline(
                 dart_collector=DemandZipMissingDART(),
                 krx_collector=_FakeKRX(),
                 raw_dir=root / "raw",
                 processed_dir=root / "processed",
             )
-            second.run(2024, 2024, feature_set="phase2")
+            second.run(2024, 2024, feature_set="phase2", include_dart_demand_audit=True)
 
             demand_failures = pd.read_parquet(root / "raw" / "dart_demand_document_failures.parquet")
             self.assertEqual(DemandZipMissingDART.demand_calls, 2)
@@ -644,11 +692,14 @@ class ActualDataPipelineTests(unittest.TestCase):
                 krx_collector=_FakeKRX(),
                 raw_dir=root / "raw",
                 processed_dir=root / "processed",
-            ).run(2024, 2024, feature_set="phase2")
+            ).run(2024, 2024, feature_set="phase2", include_dart_demand_audit=True)
 
             raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
             failures = pd.read_parquet(root / "raw" / "dart_demand_document_failures.parquet")
-            self.assertEqual(raw.loc[0, "institutional_demand_ratio"], 850.0)
+            cache = pd.read_parquet(root / "raw" / "dart_demand_document_cache.parquet")
+            self.assertNotIn("institutional_demand_ratio", raw.columns)
+            self.assertEqual(raw.loc[0, "institutional_validation_status"], "audit_only_dart_nonstandard_source")
+            self.assertEqual(cache.loc[cache["rcept_no"] == "20240101000001", "institutional_demand_ratio"].iloc[0], 850.0)
             self.assertEqual(raw.loc[0, "institutional_rcept_no"], "20240101000001")
             self.assertEqual(raw.loc[0, "lockup_rcept_no"], "20240101000001")
             self.assertIn("20240201000001", set(failures["rcept_no"].astype(str)))

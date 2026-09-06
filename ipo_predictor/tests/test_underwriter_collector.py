@@ -7,7 +7,10 @@ from data.collectors.underwriter_collector import (
     OfficialNoticeSource,
     OfficialUnderwriterCollector,
 )
-from data.collectors.underwriter_registry import build_underwriter_priorities
+from data.collectors.underwriter_registry import (
+    build_underwriter_priorities,
+    build_underwriter_source_readiness,
+)
 from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline
 
 
@@ -332,6 +335,25 @@ class OfficialUnderwriterCollectorTests(unittest.TestCase):
         ])
         self.assertEqual(priorities["priority"].tolist(), [1, 2, 3, 4])
         self.assertTrue(priorities["collection_policy"].str.startswith("manual_url_only").all())
+
+    def test_source_readiness_blocks_collection_until_public_result_fields_are_verified(self):
+        events = pd.DataFrame({
+            "event_class": ["general_ipo", "general_ipo", "spac_ipo"],
+            "lead_underwriter": ["한국투자증권(주)", "KB증권(주)", "한국투자증권(주)"],
+        })
+
+        readiness = build_underwriter_source_readiness(events).set_index("lead_underwriter")
+
+        self.assertEqual(readiness.loc["한국투자증권", "general_ipo_event_count"], 1)
+        self.assertEqual(
+            readiness.loc["한국투자증권", "institutional_result_availability"],
+            "not_verified_from_public_sample",
+        )
+        self.assertTrue(
+            readiness["next_action"].eq(
+                "verify_public_sample_before_any_automated_collection"
+            ).all()
+        )
 
     def test_pipeline_merges_only_unambiguous_integrated_result(self):
         dart = pd.DataFrame({

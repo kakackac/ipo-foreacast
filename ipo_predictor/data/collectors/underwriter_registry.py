@@ -15,6 +15,12 @@ OFFICIAL_UNDERWRITER_REGISTRY = {
         "document_formats": "public_html",
         "automatic_url_discovery": False,
         "collection_policy": "manual_url_only_current_or_authenticated_ratio_screen",
+        # 2026-09-07 공개 공지 표본 감사: 목록과 확정발행가·일정은 확인했지만,
+        # 기관 통합 경쟁률·확약을 공개 결과 문서에서 확인하지 못했다.
+        "source_readiness": "public_listing_verified_result_fields_incomplete",
+        "institutional_result_availability": "not_verified_from_public_sample",
+        "lockup_availability": "not_verified_from_public_sample",
+        "audit_basis": "public_notice_listing_and_final_price_sample_checked",
     },
     "미래에셋증권": {
         "aliases": ("미래에셋증권", "미래에셋"),
@@ -23,6 +29,10 @@ OFFICIAL_UNDERWRITER_REGISTRY = {
         "document_formats": "public_html_or_pdf",
         "automatic_url_discovery": False,
         "collection_policy": "manual_url_only_current_or_authenticated_ratio_screen",
+        "source_readiness": "not_yet_sample_audited",
+        "institutional_result_availability": "not_verified",
+        "lockup_availability": "not_verified",
+        "audit_basis": "public_route_known_sample_audit_pending",
     },
     "NH투자증권": {
         "aliases": ("NH투자증권", "엔에이치투자증권", "NH"),
@@ -31,6 +41,10 @@ OFFICIAL_UNDERWRITER_REGISTRY = {
         "document_formats": "public_html_or_pdf",
         "automatic_url_discovery": False,
         "collection_policy": "manual_url_only_public_result_route_not_yet_verified",
+        "source_readiness": "not_yet_sample_audited",
+        "institutional_result_availability": "not_verified",
+        "lockup_availability": "not_verified",
+        "audit_basis": "public_route_known_sample_audit_pending",
     },
     "KB증권": {
         "aliases": ("KB증권", "KB"),
@@ -39,6 +53,10 @@ OFFICIAL_UNDERWRITER_REGISTRY = {
         "document_formats": "public_html_or_pdf",
         "automatic_url_discovery": False,
         "collection_policy": "manual_url_only_public_notice_pdf_scope_review_required",
+        "source_readiness": "not_yet_sample_audited",
+        "institutional_result_availability": "not_verified",
+        "lockup_availability": "not_verified",
+        "audit_basis": "public_notice_scope_sample_audit_pending",
     },
 }
 
@@ -105,3 +123,47 @@ def build_underwriter_priorities(events: pd.DataFrame, top_n: int = 5) -> pd.Dat
     result = result.sort_values("general_ipo_event_count", ascending=False).head(top_n).reset_index(drop=True)
     result.insert(0, "priority", range(1, len(result) + 1))
     return result
+
+
+def build_underwriter_source_readiness(events: pd.DataFrame) -> pd.DataFrame:
+    """주관사 공식 결과 원천을 전수 수집 전에 표본 감사 상태로 요약한다.
+
+    이 파일은 URL을 추측하거나 웹을 자동 호출하지 않는다. 공개 결과 문서에서
+    기관 경쟁률·확약의 실제 제공 여부가 확인되기 전에는 ``not_verified``로
+    남겨, DART 보조 파싱 결과를 모델용 공식 원천으로 오인하지 않게 한다.
+    """
+    columns = [
+        "lead_underwriter", "general_ipo_event_count", "public_discovery_url",
+        "document_formats", "automatic_url_discovery", "collection_policy",
+        "source_readiness", "institutional_result_availability", "lockup_availability",
+        "audit_basis", "next_action",
+    ]
+    if events.empty or "lead_underwriter" not in events.columns:
+        return pd.DataFrame(columns=columns)
+    candidates = events.copy()
+    if "event_class" in candidates.columns:
+        candidates = candidates[candidates["event_class"].eq("general_ipo")]
+    candidates["lead_underwriter"] = candidates["lead_underwriter"].map(normalize_underwriter)
+    counts = candidates["lead_underwriter"].value_counts()
+    records: list[dict[str, object]] = []
+    for underwriter, config in OFFICIAL_UNDERWRITER_REGISTRY.items():
+        readiness = config["source_readiness"]
+        records.append({
+            "lead_underwriter": underwriter,
+            "general_ipo_event_count": int(counts.get(underwriter, 0)),
+            "public_discovery_url": config["public_discovery_url"],
+            "document_formats": config["document_formats"],
+            "automatic_url_discovery": bool(config["automatic_url_discovery"]),
+            "collection_policy": config["collection_policy"],
+            "source_readiness": readiness,
+            "institutional_result_availability": config["institutional_result_availability"],
+            "lockup_availability": config["lockup_availability"],
+            "audit_basis": config["audit_basis"],
+            "next_action": (
+                "verify_public_sample_before_any_automated_collection"
+                if readiness != "verified_for_model_source" else "controlled_collection_allowed"
+            ),
+        })
+    return pd.DataFrame(records, columns=columns).sort_values(
+        "general_ipo_event_count", ascending=False
+    ).reset_index(drop=True)
