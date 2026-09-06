@@ -376,6 +376,41 @@ class ActualDataPipelineTests(unittest.TestCase):
                 "not_collected_dart_nonstandard_source",
             )
 
+    def test_offering_parser_v4_reparses_v3_cached_float_value(self):
+        class VersionedOfferingDART(_FakeDART):
+            def __init__(self):
+                self.offering_calls = 0
+
+            def get_offering_info(self, rcept_no):
+                self.offering_calls += 1
+                return super().get_offering_info(rcept_no)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            raw_dir = root / "raw"
+            raw_dir.mkdir()
+            pd.DataFrame([{
+                "rcept_no": "20240101000001",
+                "offering_price": 12000,
+                "public_float_shares": 999_999,
+                "structured_price_check_version": 3,
+                "offering_price_parser_version": 3,
+            }]).to_parquet(raw_dir / "dart_offering_document_cache.parquet", index=False)
+
+            dart = VersionedOfferingDART()
+            HistoricalIPOPipeline(
+                dart_collector=dart,
+                krx_collector=_FakeKRX(),
+                raw_dir=raw_dir,
+                processed_dir=root / "processed",
+            ).run(2024, 2024, feature_set="phase2")
+
+            cache = pd.read_parquet(raw_dir / "dart_offering_document_cache.parquet")
+            latest = cache.loc[cache["rcept_no"] == "20240101000001"].iloc[-1]
+            self.assertEqual(dart.offering_calls, 1)
+            self.assertEqual(latest["offering_price_parser_version"], 4)
+            self.assertNotEqual(latest["public_float_shares"], 999_999)
+
     def test_default_collection_skips_retail_audit_sources(self):
         class RetailAuditSpy(_FakeDART):
             def __init__(self):
