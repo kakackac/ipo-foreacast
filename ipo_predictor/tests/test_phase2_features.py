@@ -363,6 +363,19 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(len(prediction), 1)
         self.assertEqual(float(prediction.iloc[0]["up_probability"]), 0.8)
 
+    def test_blank_offering_type_uses_event_class_fallback(self):
+        frame = pd.DataFrame({
+            "corp_name": ["일반기업", "테스트스팩"],
+            "event_class": ["general_ipo", "spac_ipo"],
+            "offering_type": [None, ""],
+        })
+
+        result = FeatureEngineer()._calc_offering_type_features(frame)
+
+        self.assertEqual(result["offering_type"].tolist(), ["common_stock_ipo", "spac_ipo"])
+        self.assertFalse(result["offering_type_spac_ipo"].iloc[0])
+        self.assertTrue(result["offering_type_spac_ipo"].iloc[1])
+
 
 if __name__ == "__main__":
     unittest.main()

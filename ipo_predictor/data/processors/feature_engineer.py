@@ -252,13 +252,18 @@ class FeatureEngineer:
         외국기업 분류는 KIND 사후 이벤트 마스터 기반이므로 감사/평가용으로만
         보존하고, 모델 프로필에는 넣지 않는다.
         """
+        event_class = df.get("event_class", pd.Series(index=df.index, dtype=object))
+        fallback = event_class.map({
+            "general_ipo": "common_stock_ipo",
+            "spac_ipo": "spac_ipo",
+            "foreign_listing": "foreign_common_stock_listing",
+            "relisting": "relisting",
+        }).fillna("review_required")
         if "offering_type" not in df.columns:
-            event_class = df.get("event_class", pd.Series(index=df.index, dtype=object))
-            df["offering_type"] = event_class.map({
-                "general_ipo": "common_stock_ipo",
-                "spac_ipo": "spac_ipo",
-                "foreign_listing": "foreign_common_stock_listing",
-            }).fillna("review_required")
+            df["offering_type"] = fallback
+        else:
+            missing_type = df["offering_type"].isna() | df["offering_type"].astype(str).str.strip().eq("")
+            df.loc[missing_type, "offering_type"] = fallback[missing_type]
         offering_type = df["offering_type"].fillna("review_required").astype(str)
         pre_listing_name = df.get("corp_name", pd.Series("", index=df.index)).fillna("").astype(str)
         df["offering_type_spac_ipo"] = pre_listing_name.str.contains("스팩|SPAC", case=False, regex=True)

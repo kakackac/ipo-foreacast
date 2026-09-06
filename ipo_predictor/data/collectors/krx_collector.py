@@ -29,6 +29,9 @@ KIND_LISTING_URL = "https://kind.krx.co.kr/listinvstg/listingcompany.do"
 KIND_LISTING_PAGE_URL = (
     "https://kind.krx.co.kr/listinvstg/listingcompany.do?method=searchListingTypeMain"
 )
+# KIND 원천 필드에서 다시 계산할 수 있는 분류임을 표시한다. 이전 캐시에
+# 분류 열이 없거나 비어 있을 때도, 네트워크 재호출 없이 안전하게 보정한다.
+LISTING_CLASSIFICATION_RULE_VERSION = 2
 
 MARKETS = {
     "KOSPI": {
@@ -521,6 +524,24 @@ class KRXCollector:
             )
         return result("unclassified_review", "공식 분류 필드가 부족하거나 규칙 미포함", "low", True)
 
+    @classmethod
+    def reclassify_official_listing_events(cls, frame: pd.DataFrame) -> pd.DataFrame:
+        """KIND 원천 필드로 이벤트 분류 열을 일관되게 다시 생성한다.
+
+        과거 캐시에는 초기 스키마에서 빠졌던 ``offering_type``이 비어 있을 수
+        있다. 이 메서드는 상장유형·증권구분·국적·회사명이라는 같은 공식 원천
+        필드만 사용하므로, 캐시 보정 과정에서 새로운 사실을 추정하지 않는다.
+        """
+        if frame.empty:
+            return frame.copy()
+
+        result = frame.copy()
+        classified = result.apply(cls._classify_official_listing_event, axis=1, result_type="expand")
+        for column in classified.columns:
+            result[column] = classified[column]
+        result["classification_rule_version"] = LISTING_CLASSIFICATION_RULE_VERSION
+        return result
+
     @staticmethod
     def _kind_column(frame: pd.DataFrame, *candidates: str) -> pd.Series:
         for candidate in candidates:
@@ -543,6 +564,7 @@ class KRXCollector:
             "lead_underwriter", "industry_name", "industry_code", "country", "face_value",
             "offering_amount", "event_class", "classification_reason", "classification_confidence",
             "classification_review_required", "offering_type", "retail_subscription_eligibility_status",
+            "classification_rule_version",
             "source_name", "source_url", "source_request_id",
             "collected_at", "verification_status", "listing_segment",
         ]
@@ -609,8 +631,7 @@ class KRXCollector:
             result["market"] = None
             result["industry_code"] = None
             result["listing_segment"] = None
-            classified = result.apply(self._classify_official_listing_event, axis=1, result_type="expand")
-            result = pd.concat([result, classified], axis=1)
+            result = self.reclassify_official_listing_events(result)
             result["source_name"] = "KRX_KIND_new_listing_company"
             result["source_url"] = KIND_LISTING_PAGE_URL
             result["source_request_id"] = request_id

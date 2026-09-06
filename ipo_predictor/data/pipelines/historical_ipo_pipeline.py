@@ -533,6 +533,7 @@ class HistoricalIPOPipeline:
             "cache_used_years": [],
             "fetched_years": [],
             "yearly_rows": {},
+            "classification_cache_repaired_rows": 0,
             "status": "started",
         }
         manifest_dir = self.raw_dir / "collection_manifests"
@@ -580,6 +581,15 @@ class HistoricalIPOPipeline:
                 calendar = pd.concat(frames, ignore_index=True)
                 calendar["listing_date"] = pd.to_datetime(calendar["listing_date"], errors="coerce")
                 calendar = calendar.drop_duplicates(subset=["event_id"], keep="last")
+                prior_offering_type = calendar.get(
+                    "offering_type", pd.Series(index=calendar.index, dtype=object)
+                ).copy()
+                calendar = self._refresh_official_event_classification(calendar)
+                repaired = (
+                    prior_offering_type.fillna("").astype(str).str.strip()
+                    != calendar["offering_type"].fillna("").astype(str).str.strip()
+                )
+                manifest["classification_cache_repaired_rows"] = int(repaired.sum())
                 calendar["same_day_ipo_count"] = calendar.groupby("listing_date")["event_id"].transform("size")
                 calendar = calendar.sort_values("listing_date").reset_index(drop=True)
                 calendar.to_parquet(self.raw_dir / "krx_official_event_master.parquet", index=False)
@@ -602,6 +612,28 @@ class HistoricalIPOPipeline:
                 json.dump(manifest, file, ensure_ascii=False, indent=2, default=str)
             with open(self.raw_dir / "latest_collection_manifest.json", "w", encoding="utf-8") as file:
                 json.dump(manifest, file, ensure_ascii=False, indent=2, default=str)
+
+    def _refresh_official_event_classification(self, calendar: pd.DataFrame) -> pd.DataFrame:
+        """공식 이벤트 캐시의 누락된 유형 분류를 원천 필드에서 복구한다."""
+        reclassify = getattr(self.krx, "reclassify_official_listing_events", None)
+        if callable(reclassify):
+            return reclassify(calendar)
+
+        # 테스트용 또는 이전 호환 수집기는 분류 함수를 제공하지 않을 수 있다.
+        # 그 경우에도 이미 보유한 event_class에서 확정 가능한 최소 유형만 채워
+        # 빈 값이 학습 준비도 집계에서 review_required로 뭉개지지 않게 한다.
+        result = calendar.copy()
+        if "offering_type" not in result:
+            result["offering_type"] = pd.NA
+        fallback = result.get("event_class", pd.Series(index=result.index, dtype=object)).map({
+            "general_ipo": "common_stock_ipo",
+            "spac_ipo": "spac_ipo",
+            "foreign_listing": "foreign_common_stock_listing",
+            "relisting": "relisting",
+        })
+        missing = result["offering_type"].isna() | result["offering_type"].astype(str).str.strip().eq("")
+        result.loc[missing, "offering_type"] = fallback[missing].fillna("review_required")
+        return result
 
     def _write_legacy_comparison(self, official: pd.DataFrame, legacy: pd.DataFrame) -> None:
         """공식 이벤트와 기존 LIST_DD 후보의 행 단위 대조를 저장한다."""

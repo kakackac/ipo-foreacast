@@ -111,6 +111,26 @@ class KRXOpenAPICollectorTests(unittest.TestCase):
         self.assertEqual(events.loc[0, "source_name"], "KRX_KIND_new_listing_company")
         self.assertEqual(collector.official_listing_requests[-1]["status"], "success")
 
+    def test_reclassification_repairs_blank_cached_offering_types(self):
+        cached = pd.DataFrame([
+            {
+                "corp_name": "테스트기업", "listing_type": "신규상장", "security_type": "주권",
+                "stock_type": None, "country": "대한민국", "event_class": "general_ipo",
+                "offering_type": None,
+            },
+            {
+                "corp_name": "테스트제1호스팩", "listing_type": "신규상장", "security_type": "주권",
+                "stock_type": None, "country": "대한민국", "event_class": "spac_ipo",
+                "offering_type": None,
+            },
+        ])
+
+        repaired = KRXCollector.reclassify_official_listing_events(cached)
+
+        self.assertEqual(repaired["offering_type"].tolist(), ["common_stock_ipo", "spac_ipo"])
+        self.assertEqual(repaired["event_class"].tolist(), ["general_ipo", "spac_ipo"])
+        self.assertTrue((repaired["classification_rule_version"] == 2).all())
+
     def test_foreign_listing_uses_company_name_after_code_match_fails(self):
         session = Mock()
         session.get.return_value = _response({"OutBlock_1": [{
