@@ -787,28 +787,36 @@ class DARTCollector:
             "public_float_parse_evidence": None,
         }
         label = r"상장\s*(?:직후\s*)?유통\s*가능\s*(?:주식\s*)?(?:수|물량)|유통\s*가능\s*(?:주식\s*)?(?:수|물량)"
-        share_match = re.search(
-            rf"(?:{label})[^0-9]{{0,120}}([0-9][0-9,]*)\s*주", text
+        # 문서에 유통가능물량을 설명한 뒤 다른 문단의 자기주식·일반투자자
+        # 수량이 나오는 사례가 있다. 따라서 라벨 뒤 임의의 120자를 탐색하지
+        # 않고, 라벨과 수량이 바로 이어지거나 "보호예수 제외"라는 계산식이
+        # 같은 문맥에 직접 있는 경우만 승인한다.
+        share_patterns = (
+            rf"(?:{label})\s*(?:은|는|:|=)?\s*(?:공모\s*후\s*주식수\s*기준)?\s*([0-9][0-9,]*)\s*주",
+            rf"(?:{label})[^.&]{{0,80}}보호예수\s*및\s*매도금지물량\s*을?\s*제외한\s*([0-9][0-9,]*)\s*주",
         )
-        if share_match:
+        for pattern in share_patterns:
+            share_match = re.search(pattern, text)
+            if not share_match:
+                continue
             shares = cls._parse_int(share_match.group(1))
             if shares is not None and shares > 0:
                 result.update({
                     "public_float_shares": shares,
-                    "public_float_parse_method": "disclosed_public_float_shares_same_context",
+                    "public_float_parse_method": "disclosed_public_float_shares_direct_context",
                     "public_float_parse_evidence": share_match.group(0)[:300],
                 })
                 return result
 
         ratio_match = re.search(
-            rf"(?:{label})[^0-9]{{0,120}}([0-9][0-9,]*(?:\.[0-9]+)?)\s*%", text
+            rf"(?:{label})\s*(?:은|는|:|=)?\s*(?:전체\s*(?:상장\s*)?주식\s*대비)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*%", text
         )
         if ratio_match:
             ratio = float(ratio_match.group(1).replace(",", "")) / 100
             if 0 <= ratio <= 1:
                 result.update({
                     "public_float_ratio_disclosed": round(ratio, 6),
-                    "public_float_parse_method": "disclosed_public_float_ratio_same_context",
+                    "public_float_parse_method": "disclosed_public_float_ratio_direct_context",
                     "public_float_parse_evidence": ratio_match.group(0)[:300],
                 })
         return result

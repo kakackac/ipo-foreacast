@@ -225,6 +225,16 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(ratio["public_float_ratio_disclosed"], 0.3125)
         self.assertIsNone(ratio["public_float_shares"])
 
+    def test_dart_offering_parser_rejects_unrelated_share_after_public_float_explanation(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "상장 직후 유통가능물량으로 주가 하락의 원인이 될 수 있습니다. "
+            "증권신고서 제출일 현재 자기주식 15,000주를 보유하고 있습니다.",
+            "20250101000010",
+        )
+
+        self.assertIsNone(parsed["public_float_shares"])
+        self.assertIsNone(parsed["public_float_ratio_disclosed"])
+
     def test_dart_offering_parser_ignores_table_number_before_price(self):
         html = """
         확정 공모가 4 제 1 호 45,000 원
