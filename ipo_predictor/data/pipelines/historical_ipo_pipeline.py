@@ -24,9 +24,11 @@ logger = logging.getLogger(__name__)
 
 MAX_FILING_TO_LISTING_DAYS = 400
 STRUCTURED_PRICE_CHECK_VERSION = 3
-OFFERING_PRICE_PARSER_VERSION = 2
+OFFERING_PRICE_PARSER_VERSION = 3
 DART_LINEAGE_VERSION = 1
 DART_OFFERING_RESULT_PARSER_VERSION = 2
+DART_DEMAND_PARSER_VERSION = 2
+MAX_DEMAND_DOCUMENT_CANDIDATES = 8
 DOCUMENT_RETRY_AFTER_DAYS = 7
 OFFICIAL_SOURCE_RESOLUTION_COLUMNS = [
     "event_id", "feature_name", "resolution_status", "checked_at", "checked_sources",
@@ -60,6 +62,10 @@ class HistoricalIPOPipeline:
         self.manual_dir.mkdir(parents=True, exist_ok=True)
         self._document_failures = self._load_cached_frame("dart_document_failures.parquet")
         self._demand_document_failures = self._load_cached_frame("dart_demand_document_failures.parquet")
+        self._demand_document_cache = self._load_cached_frame("dart_demand_document_cache.parquet")
+        self._offering_document_cache = self._load_cached_frame("dart_offering_document_cache.parquet")
+        self._demand_document_cache_updates: list[dict[str, Any]] = []
+        self._offering_document_cache_updates: list[dict[str, Any]] = []
         self._offering_result_document_failures = self._load_cached_frame(
             "dart_offering_result_document_failures.parquet"
         )
@@ -106,6 +112,7 @@ class HistoricalIPOPipeline:
         dart_ipo, financials = self._collect_dart_records(
             calendar, start_year, end_year, include_retail_audit=include_retail_audit
         )
+        self._flush_document_cache_updates()
         if include_retail_audit:
             underwriter_results = self._collect_official_underwriter_results(krx_ipo)
             underwriter_results.to_parquet(
@@ -119,6 +126,12 @@ class HistoricalIPOPipeline:
         self._document_failures.to_parquet(self.raw_dir / "dart_document_failures.parquet", index=False)
         self._demand_document_failures.to_parquet(
             self.raw_dir / "dart_demand_document_failures.parquet", index=False
+        )
+        self._demand_document_cache.to_parquet(
+            self.raw_dir / "dart_demand_document_cache.parquet", index=False
+        )
+        self._offering_document_cache.to_parquet(
+            self.raw_dir / "dart_offering_document_cache.parquet", index=False
         )
         self._offering_result_document_failures.to_parquet(
             self.raw_dir / "dart_offering_result_document_failures.parquet", index=False
@@ -857,6 +870,31 @@ class HistoricalIPOPipeline:
         result = krx_ipo.drop(columns=columns[1:], errors="ignore")
         return result.merge(resolution, on="event_id", how="left")
 
+    def _queue_document_cache(self, cache_kind: str, record: dict[str, Any]) -> None:
+        """원문 파싱 캐시를 실행 종료 시 한 번에 저장하도록 누적한다."""
+        if cache_kind == "demand":
+            self._demand_document_cache_updates.append(record)
+        elif cache_kind == "offering":
+            self._offering_document_cache_updates.append(record)
+        else:
+            raise ValueError(f"지원하지 않는 문서 캐시 종류입니다: {cache_kind}")
+
+    def _flush_document_cache_updates(self) -> None:
+        """신규 문서 캐시를 기존 파일 캐시와 한 번만 병합한다."""
+        cache_specs = (
+            ("_demand_document_cache", "_demand_document_cache_updates"),
+            ("_offering_document_cache", "_offering_document_cache_updates"),
+        )
+        for cache_attr, updates_attr in cache_specs:
+            updates = getattr(self, updates_attr)
+            if not updates:
+                continue
+            cached = getattr(self, cache_attr)
+            rows = [] if cached.empty else cached.to_dict(orient="records")
+            rows.extend(updates)
+            setattr(self, cache_attr, pd.DataFrame.from_records(rows))
+            updates.clear()
+
     def _collect_dart_records(
         self,
         calendar: pd.DataFrame,
@@ -883,6 +921,30 @@ class HistoricalIPOPipeline:
             cached_by_receipt = {
                 str(row.rcept_no): row._asdict()
                 for row in cached_records.drop_duplicates("rcept_no", keep="last").itertuples(index=False)
+            }
+        offering_cache_by_receipt: dict[str, dict[str, Any]] = {}
+        reusable_offering_columns = {
+            "rcept_no", "offering_price_parser_version", "structured_price_check_version",
+        }
+        for frame in (self._offering_document_cache, cached_records):
+            if frame.empty or not reusable_offering_columns.issubset(frame.columns):
+                continue
+            reusable_offerings = frame[
+                frame["offering_price_parser_version"].eq(OFFERING_PRICE_PARSER_VERSION)
+                & frame["structured_price_check_version"].eq(STRUCTURED_PRICE_CHECK_VERSION)
+            ].drop_duplicates("rcept_no", keep="last")
+            offering_cache_by_receipt.update({
+                str(row.rcept_no): row._asdict() for row in reusable_offerings.itertuples(index=False)
+            })
+        demand_cache_by_receipt: dict[str, dict[str, Any]] = {}
+        if not self._demand_document_cache.empty and {
+            "rcept_no", "demand_parser_version",
+        }.issubset(self._demand_document_cache.columns):
+            reusable_demand = self._demand_document_cache[
+                self._demand_document_cache["demand_parser_version"].eq(DART_DEMAND_PARSER_VERSION)
+            ].drop_duplicates("rcept_no", keep="last")
+            demand_cache_by_receipt = {
+                str(row.rcept_no): row._asdict() for row in reusable_demand.itertuples(index=False)
             }
         cached_retail_by_receipt = {}
         required_retail_cache_columns = {
@@ -994,32 +1056,33 @@ class HistoricalIPOPipeline:
                 lineage_entries.append(entry)
                 self._lineage_rows.append(entry)
 
-            filing = None
-            offering: dict[str, Any] | None = None
+            offering_documents: list[tuple[pd.Series, dict[str, Any]]] = []
             for rank, candidate in candidates.iterrows():
                 entry = lineage_entries[rank]
-                cached = cached_by_receipt.get(str(candidate.rcept_no))
-                if (
-                    cached is not None
-                    and cached.get("structured_price_check_version") == STRUCTURED_PRICE_CHECK_VERSION
+                receipt = str(candidate.rcept_no)
+                cached = offering_cache_by_receipt.get(receipt) or cached_by_receipt.get(receipt)
+                if cached is not None and (
+                    cached.get("structured_price_check_version") == STRUCTURED_PRICE_CHECK_VERSION
                     and cached.get("offering_price_parser_version") == OFFERING_PRICE_PARSER_VERSION
                 ):
-                    filing = candidate
-                    offering = cached
+                    offering_documents.append((candidate, cached))
                     entry["attempt_status"] = "cached_verified_record"
-                    break
-                if not self._should_retry_document(str(candidate.rcept_no)):
+                    continue
+                if not self._should_retry_document(receipt):
                     entry["attempt_status"] = "retry_deferred"
                     continue
                 try:
-                    offering = self.dart.get_offering_info(str(candidate.rcept_no))
-                    filing = candidate
+                    parsed_offering = self.dart.get_offering_info(receipt)
+                    parsed_offering["structured_price_check_version"] = STRUCTURED_PRICE_CHECK_VERSION
+                    parsed_offering["offering_price_parser_version"] = OFFERING_PRICE_PARSER_VERSION
+                    self._queue_document_cache("offering", parsed_offering)
+                    offering_cache_by_receipt[receipt] = parsed_offering
+                    offering_documents.append((candidate, parsed_offering))
                     entry["attempt_status"] = "document_parsed"
-                    break
                 except RuntimeError as exc:
                     if "<status>014</status>" in str(exc):
                         has_structured = any(
-                            item.get("rcept_no") == str(candidate.rcept_no) for item in structured_prices
+                            item.get("rcept_no") == receipt for item in structured_prices
                         )
                         reason = "structured_value_zip_missing" if has_structured else "zip_file_missing_retry_required"
                         self._record_document_failure(
@@ -1034,8 +1097,13 @@ class HistoricalIPOPipeline:
                     )
                     entry["attempt_status"] = "document_parse_retry_required"
                     logger.warning("신고서 원문 파싱 실패 (%s): %s", candidate.corp_name, exc)
-            if filing is None or offering is None:
+            if not offering_documents:
                 continue
+
+            # 최종 확정 공모가의 승인 문서는 최신 우선순위로 선택하되, 희망
+            # 밴드·공모 구조는 같은 계보의 다른 신고서에만 있는 경우가 있어
+            # 값별로 가장 최신의 실제 원문 값을 보완한다.
+            filing, offering = offering_documents[0]
 
             structured = next(
                 (item for item in structured_prices if item["rcept_no"] == str(filing.rcept_no)), None
@@ -1053,45 +1121,163 @@ class HistoricalIPOPipeline:
             )
             offering["structured_price_check_version"] = STRUCTURED_PRICE_CHECK_VERSION
             offering["offering_price_parser_version"] = OFFERING_PRICE_PARSER_VERSION
+            field_source_groups = {
+                "price_band": ("price_band_low", "price_band_high"),
+                "offering_structure": (
+                    "new_shares", "secondary_shares", "total_post_listing_shares",
+                    "lead_underwriter", "major_shareholder_lockup_months", "risk_factor_count",
+                ),
+            }
+            for source_group, fields in field_source_groups.items():
+                source_candidate = next(
+                    (candidate for candidate, document in offering_documents if any(
+                        document.get(field) is not None for field in fields
+                    )),
+                    None,
+                )
+                if source_candidate is None:
+                    continue
+                source_document = next(
+                    document for candidate, document in offering_documents
+                    if str(candidate.rcept_no) == str(source_candidate.rcept_no)
+                )
+                for field in fields:
+                    if offering.get(field) is None and source_document.get(field) is not None:
+                        offering[field] = source_document[field]
+                offering[f"{source_group}_rcept_no"] = str(source_candidate.rcept_no)
+                offering[f"{source_group}_rcept_dt"] = source_candidate.rcept_dt
 
-            demand_rcept_no = None
-            demand_rcept_dt = None
-            demand = {}
+            demand_candidates: list[dict[str, Any]] = []
             try:
-                demand_record_method = getattr(self.dart, "find_demand_forecast_disclosure_record", None)
-                if callable(demand_record_method):
-                    demand_record = demand_record_method(
+                demand_records_method = getattr(self.dart, "find_demand_forecast_disclosure_records", None)
+                search_start = (pd.Timestamp(listing.listing_date) - pd.Timedelta(days=MAX_FILING_TO_LISTING_DAYS))
+                if callable(demand_records_method):
+                    demand_candidates.extend(demand_records_method(
                         str(filing.corp_code),
-                        pd.Timestamp(filing.rcept_dt).strftime("%Y%m%d"),
+                        search_start.strftime("%Y%m%d"),
                         pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
-                    )
-                    if demand_record:
-                        demand_rcept_no = str(demand_record["rcept_no"])
-                        demand_rcept_dt = demand_record.get("rcept_dt")
+                    ))
                 else:
-                    demand_rcept_no = self.dart.find_demand_forecast_disclosure(
-                        str(filing.corp_code),
-                        pd.Timestamp(filing.rcept_dt).strftime("%Y%m%d"),
-                        pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
-                    )
-                if demand_rcept_no:
-                    if self._should_retry_demand_document(demand_rcept_no):
-                        demand = self.dart.get_demand_forecast(str(filing.corp_code), demand_rcept_no)
-                    else:
-                        logger.info(
-                            "수요예측 원문 재시도 보류 (%s, %s)", filing.corp_name, demand_rcept_no
+                    demand_record_method = getattr(self.dart, "find_demand_forecast_disclosure_record", None)
+                    if callable(demand_record_method):
+                        record = demand_record_method(
+                            str(filing.corp_code), search_start.strftime("%Y%m%d"),
+                            pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
                         )
+                        if record:
+                            demand_candidates.append(record)
+                    else:
+                        legacy_demand_method = getattr(self.dart, "find_demand_forecast_disclosure", None)
+                        if callable(legacy_demand_method):
+                            receipt = legacy_demand_method(
+                                str(filing.corp_code), search_start.strftime("%Y%m%d"),
+                                pd.Timestamp(listing.listing_date).strftime("%Y%m%d"),
+                            )
+                            if receipt:
+                                demand_candidates.append({"rcept_no": str(receipt)})
             except RuntimeError as exc:
-                if demand_rcept_no:
+                logger.warning("수요예측 공시 계보 조회 실패 (%s): %s", filing.corp_name, exc)
+
+            # 목록 API 제목이 누락·축약된 경우에도 이미 연결한 증권신고서 계보는
+            # 수요예측 결과를 담을 수 있다. 후보를 합치되 접수번호별로 한 번만 읽는다.
+            demand_candidates.extend({
+                "rcept_no": str(candidate.rcept_no),
+                "rcept_dt": candidate.rcept_dt,
+                "report_nm": candidate.report_nm,
+                "candidate_score": 80 if bool(candidate.is_final_conditions) else 5,
+            } for candidate in candidates.itertuples(index=False))
+            deduped_demand_candidates: list[dict[str, Any]] = []
+            seen_demand_receipts: set[str] = set()
+            for candidate in demand_candidates:
+                receipt = str(candidate.get("rcept_no", "")).strip()
+                if not receipt or receipt in seen_demand_receipts:
+                    continue
+                seen_demand_receipts.add(receipt)
+                deduped_demand_candidates.append(candidate)
+            demand_candidates = deduped_demand_candidates[:MAX_DEMAND_DOCUMENT_CANDIDATES]
+
+            demand: dict[str, Any] = {}
+            institutional_rcept_no = None
+            institutional_rcept_dt = None
+            lockup_rcept_no = None
+            lockup_rcept_dt = None
+            for rank, demand_candidate in enumerate(demand_candidates, start=1):
+                candidate_receipt = str(demand_candidate["rcept_no"])
+                candidate_dt = demand_candidate.get("rcept_dt")
+                self._lineage_rows.append({
+                    "event_id": event_id,
+                    "ticker": getattr(listing, "ticker", None),
+                    "krx_standard_code": getattr(listing, "krx_standard_code", None),
+                    "listing_date": listing.listing_date,
+                    "corp_name": filing.corp_name,
+                    "corp_code": str(filing.corp_code),
+                    "rcept_no": candidate_receipt,
+                    "rcept_dt": candidate_dt,
+                    "filing_report_nm": demand_candidate.get("report_nm"),
+                    "lineage_role": "demand_forecast_candidate",
+                    "selection_rank": rank,
+                    "match_method": "dart_corp_code_pre_listing_demand_lineage",
+                    "lineage_validation_status": "pre_listing_demand_candidate",
+                    "source_name": "OpenDART_list",
+                    "source_url": "https://opendart.fss.or.kr/api/list.json",
+                    "lineage_version": DART_LINEAGE_VERSION,
+                    "attempt_status": "not_attempted",
+                    "recorded_at": pd.Timestamp.now(tz="Asia/Seoul"),
+                })
+                try:
+                    cached_demand = demand_cache_by_receipt.get(candidate_receipt)
+                    if cached_demand is not None:
+                        parsed_demand = cached_demand
+                        self._lineage_rows[-1]["attempt_status"] = "cached_parser_v2"
+                    elif not self._should_retry_demand_document(candidate_receipt):
+                        self._lineage_rows[-1]["attempt_status"] = "retry_deferred"
+                        logger.info("수요예측 원문 재시도 보류 (%s, %s)", filing.corp_name, candidate_receipt)
+                        continue
+                    else:
+                        parsed_demand = self.dart.get_demand_forecast(str(filing.corp_code), candidate_receipt)
+                        cache_record = {
+                            "rcept_no": candidate_receipt,
+                            "corp_code": str(filing.corp_code),
+                            "corp_name": filing.corp_name,
+                            "rcept_dt": candidate_dt,
+                            "report_nm": demand_candidate.get("report_nm"),
+                            "demand_parser_version": DART_DEMAND_PARSER_VERSION,
+                            "parsed_at": pd.Timestamp.now(tz="Asia/Seoul"),
+                            **{key: value for key, value in parsed_demand.items() if key != "corp_code"},
+                        }
+                        self._queue_document_cache("demand", cache_record)
+                        demand_cache_by_receipt[candidate_receipt] = cache_record
+                        self._lineage_rows[-1]["attempt_status"] = "document_parsed"
+                except RuntimeError as exc:
                     self._record_demand_document_failure(
-                        rcept_no=demand_rcept_no,
+                        rcept_no=candidate_receipt,
                         corp_code=str(filing.corp_code),
                         corp_name=filing.corp_name,
                         event_id=event_id,
                         listing_date=listing.listing_date,
                         error=exc,
                     )
-                logger.warning("수요예측 원문 파싱 실패 (%s): %s", filing.corp_name, exc)
+                    self._lineage_rows[-1]["attempt_status"] = "document_failure_recorded"
+                    logger.warning("수요예측 원문 파싱 실패 (%s, %s): %s", filing.corp_name, candidate_receipt, exc)
+                    continue
+
+                if demand.get("institutional_demand_ratio") is None and parsed_demand.get("institutional_demand_ratio") is not None:
+                    demand["institutional_demand_ratio"] = parsed_demand["institutional_demand_ratio"]
+                    demand["institutional_demand_parse_method"] = parsed_demand.get("institutional_demand_parse_method")
+                    demand["institutional_demand_evidence"] = parsed_demand.get("institutional_demand_evidence")
+                    institutional_rcept_no = candidate_receipt
+                    institutional_rcept_dt = candidate_dt
+                # 기간별 확약은 서로 다른 문서의 부분값을 섞지 않는다. 같은 표에서
+                # 네 기간이 모두 확인된 문서만 모델용 묶음으로 채택한다.
+                lockup_fields = ("lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio")
+                if lockup_rcept_no is None and all(parsed_demand.get(field) is not None for field in lockup_fields):
+                    for field in (*lockup_fields, "lockup_none_ratio", "lockup_parse_method", "lockup_parse_evidence"):
+                        demand[field] = parsed_demand.get(field)
+                    lockup_rcept_no = candidate_receipt
+                    lockup_rcept_dt = candidate_dt
+
+            demand_rcept_no = institutional_rcept_no or lockup_rcept_no
+            demand_rcept_dt = institutional_rcept_dt or lockup_rcept_dt
 
             retail_result_rcept_no = None
             retail_result_rcept_dt = None
@@ -1201,6 +1387,10 @@ class HistoricalIPOPipeline:
                 "feature_available_at": filing.rcept_dt,
                 "demand_rcept_no": demand_rcept_no,
                 "demand_rcept_dt": demand_rcept_dt,
+                "institutional_rcept_no": institutional_rcept_no,
+                "institutional_rcept_dt": institutional_rcept_dt,
+                "lockup_rcept_no": lockup_rcept_no,
+                "lockup_rcept_dt": lockup_rcept_dt,
                 "retail_result_rcept_no": retail_result_rcept_no,
                 "retail_result_rcept_dt": retail_result_rcept_dt,
                 "retail_available_at": retail_result_rcept_dt,
@@ -1208,18 +1398,18 @@ class HistoricalIPOPipeline:
                     f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={retail_result_rcept_no}"
                     if retail_result_rcept_no else None
                 ),
-                "institutional_available_at": demand_rcept_dt,
-                "lockup_available_at": demand_rcept_dt,
+                "institutional_available_at": institutional_rcept_dt,
+                "lockup_available_at": lockup_rcept_dt,
                 "institutional_validation_status": (
                     "dart_demand_document_parsed" if demand.get("institutional_demand_ratio") is not None
-                    else "needs_review_missing_demand_value"
+                    else ("dart_demand_candidate_not_found" if not demand_candidates else "needs_review_missing_demand_value")
                 ),
                 "lockup_validation_status": (
                     "dart_demand_document_parsed" if any(
                         demand.get(field) is not None for field in (
                             "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
                         )
-                    ) else "needs_review_missing_demand_value"
+                    ) else ("dart_demand_candidate_not_found" if not demand_candidates else "needs_review_missing_demand_value")
                 ),
                 **offering,
                 # 이 행은 현재 KRX 상장 이벤트에 맞춰 수집한 공시다. 원문에
@@ -1656,9 +1846,14 @@ class HistoricalIPOPipeline:
             "offering_price_finality", "offering_price_parse_method", "offering_price_range_warning",
             "offering_price_parser_version",
             "offering_price_audit_context", "price_band_low", "price_band_high",
+            "price_band_rcept_no", "price_band_rcept_dt",
+            "offering_structure_rcept_no", "offering_structure_rcept_dt",
             "price_band_check", "dart_structured_offering_price", "dart_structured_security_type",
             "structured_price_check", "structured_price_record_count", "structured_price_check_version",
-            "demand_offering_price", "demand_price_check",
+            "institutional_rcept_no", "institutional_rcept_dt",
+            "lockup_rcept_no", "lockup_rcept_dt", "institutional_demand_ratio",
+            "institutional_demand_parse_method", "institutional_demand_evidence",
+            "lockup_parse_method", "lockup_parse_evidence", "demand_offering_price", "demand_price_check",
             "demand_offering_price_context",
         ]
         return dart_ipo.reindex(columns=columns).copy()

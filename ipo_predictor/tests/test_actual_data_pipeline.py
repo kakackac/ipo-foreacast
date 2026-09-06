@@ -225,6 +225,29 @@ class ActualDataPipelineTests(unittest.TestCase):
         self.assertEqual(record["rcept_no"], "20240201000001")
         self.assertEqual(record["rcept_dt"], pd.Timestamp("2024-02-01"))
 
+    def test_demand_forecast_candidates_keep_final_and_alternative_documents(self):
+        collector = DARTCollector(api_key="a" * 40)
+        collector.get_company_disclosure_list = Mock(return_value=pd.DataFrame([
+            {
+                "rcept_no": "20240201000001", "rcept_dt": pd.Timestamp("2024-02-01"),
+                "report_nm": "증권신고서(지분증권)", "corp_code": "12345678",
+            },
+            {
+                "rcept_no": "20240210000001", "rcept_dt": pd.Timestamp("2024-02-10"),
+                "report_nm": "[발행조건확정]증권신고서(지분증권)", "corp_code": "12345678",
+            },
+            {
+                "rcept_no": "20240212000001", "rcept_dt": pd.Timestamp("2024-02-12"),
+                "report_nm": "수요예측결과", "corp_code": "12345678",
+            },
+        ]))
+
+        records = collector.find_demand_forecast_disclosure_records("12345678", "20240101", "20240501")
+
+        self.assertEqual([record["rcept_no"] for record in records], [
+            "20240212000001", "20240210000001", "20240201000001",
+        ])
+
     def test_offering_result_candidate_requires_statutory_report_title(self):
         collector = DARTCollector(api_key="a" * 40)
         collector.get_company_disclosure_list = Mock(return_value=pd.DataFrame([
@@ -504,6 +527,50 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertIn("zip_file_missing_retry_required", set(audit["failure_classification"]))
             self.assertEqual(raw.loc[0, "rcept_no"], "20240101000001")
 
+    def test_lineage_uses_prior_filing_for_price_band_without_replacing_final_price_source(self):
+        class LineageFieldsDART(_FakeDART):
+            def get_ipo_disclosure_list(self, start_date, end_date):
+                return pd.DataFrame([
+                    {
+                        "corp_code": "12345678", "corp_name": "테스트(주)",
+                        "rcept_no": "20240101000002", "rcept_dt": pd.Timestamp("2024-02-01"),
+                        "report_nm": "[발행조건확정]증권신고서(지분증권)",
+                    },
+                    {
+                        "corp_code": "12345678", "corp_name": "테스트(주)",
+                        "rcept_no": "20240101000001", "rcept_dt": pd.Timestamp("2024-01-01"),
+                        "report_nm": "증권신고서(지분증권)",
+                    },
+                ])
+
+            def get_offering_info(self, rcept_no):
+                base = super().get_offering_info(rcept_no)
+                if rcept_no == "20240101000002":
+                    base.update({"price_band_low": None, "price_band_high": None, "offering_price": 12000})
+                else:
+                    base.update({"price_band_low": 9000, "price_band_high": 11000, "offering_price": None})
+                return base
+
+            def get_equity_offering_prices(self, corp_code, start_date, end_date):
+                return []
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            HistoricalIPOPipeline(
+                dart_collector=LineageFieldsDART(),
+                krx_collector=_FakeKRX(),
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+            ).run(2024, 2024, feature_set="phase2")
+
+            raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
+            self.assertEqual(raw.loc[0, "rcept_no"], "20240101000002")
+            self.assertEqual(raw.loc[0, "offering_price"], 12000)
+            self.assertEqual(raw.loc[0, "price_band_low"], 9000)
+            self.assertEqual(raw.loc[0, "price_band_high"], 11000)
+            self.assertEqual(raw.loc[0, "price_band_rcept_no"], "20240101000001")
+            self.assertEqual(raw.loc[0, "price_band_rcept_dt"], pd.Timestamp("2024-01-01"))
+
     def test_feature_time_audit_blocks_post_listing_feature(self):
         features = pd.DataFrame({
             "event_id": ["a", "b"],
@@ -542,9 +609,49 @@ class ActualDataPipelineTests(unittest.TestCase):
             second.run(2024, 2024, feature_set="phase2")
 
             demand_failures = pd.read_parquet(root / "raw" / "dart_demand_document_failures.parquet")
-            self.assertEqual(DemandZipMissingDART.demand_calls, 1)
-            self.assertEqual(len(demand_failures), 1)
-            self.assertEqual(demand_failures.loc[0, "reason"], "zip_file_missing_retry_required")
+            self.assertEqual(DemandZipMissingDART.demand_calls, 2)
+            self.assertEqual(len(demand_failures), 2)
+            self.assertTrue((demand_failures["reason"] == "zip_file_missing_retry_required").all())
+
+    def test_demand_014_does_not_block_another_candidate_in_the_same_lineage(self):
+        class AlternateDemandDART(_FakeDART):
+            def find_demand_forecast_disclosure_records(self, corp_code, start_date, end_date):
+                return [
+                    {
+                        "rcept_no": "20240201000001", "rcept_dt": pd.Timestamp("2024-02-01"),
+                        "report_nm": "수요예측결과", "candidate_score": 100,
+                    },
+                    {
+                        "rcept_no": "20240101000001", "rcept_dt": pd.Timestamp("2024-01-01"),
+                        "report_nm": "[발행조건확정]증권신고서(지분증권)", "candidate_score": 80,
+                    },
+                ]
+
+            def get_demand_forecast(self, corp_code, rcept_no):
+                if rcept_no == "20240201000001":
+                    raise RuntimeError("DART 원문 ZIP 응답이 아닙니다: <status>014</status>")
+                return {
+                    "corp_code": corp_code, "institutional_demand_ratio": 850.0,
+                    "lockup_6m_ratio": 0.1, "lockup_3m_ratio": 0.2,
+                    "lockup_1m_ratio": 0.3, "lockup_15d_ratio": 0.4,
+                    "lockup_none_ratio": 0.0, "parse_success": True,
+                }
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            HistoricalIPOPipeline(
+                dart_collector=AlternateDemandDART(),
+                krx_collector=_FakeKRX(),
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+            ).run(2024, 2024, feature_set="phase2")
+
+            raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
+            failures = pd.read_parquet(root / "raw" / "dart_demand_document_failures.parquet")
+            self.assertEqual(raw.loc[0, "institutional_demand_ratio"], 850.0)
+            self.assertEqual(raw.loc[0, "institutional_rcept_no"], "20240101000001")
+            self.assertEqual(raw.loc[0, "lockup_rcept_no"], "20240101000001")
+            self.assertIn("20240201000001", set(failures["rcept_no"].astype(str)))
 
     def test_manual_price_override_promotes_audited_record_for_training(self):
         with tempfile.TemporaryDirectory() as temp_dir:

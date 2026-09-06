@@ -79,6 +79,20 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertTrue(pd.isna(result.loc[0, "secondary_offering_ratio"]))
         self.assertTrue(pd.isna(result.loc[0, "float_share_ratio"]))
 
+    def test_float_share_ratio_requires_disclosed_float_amount_or_ratio(self):
+        result = FeatureEngineer()._calc_supply_structure_features(pd.DataFrame({
+            "new_shares": [1_000_000, 1_000_000, 1_000_000],
+            "secondary_shares": [200_000, 200_000, 200_000],
+            "total_post_listing_shares": [5_000_000, 5_000_000, 5_000_000],
+            "public_float_shares": [None, 1_500_000, None],
+            "public_float_ratio_disclosed": [None, None, 0.42],
+        }))
+
+        # 공모 물량은 기존 주주의 즉시 유통분을 포함하지 않으므로 대체값이 될 수 없다.
+        self.assertTrue(pd.isna(result.loc[0, "float_share_ratio"]))
+        self.assertEqual(result.loc[1, "float_share_ratio"], 0.3)
+        self.assertEqual(result.loc[2, "float_share_ratio"], 0.42)
+
     def test_partial_lockup_periods_do_not_create_a_weighted_score(self):
         result = FeatureEngineer()._calc_lockup_features(pd.DataFrame({
             "lockup_6m_ratio": [0.2],
@@ -197,6 +211,20 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(parsed["major_shareholder_lockup_months"], 30)
         self.assertEqual(parsed["risk_factor_count"], 3)
 
+    def test_dart_offering_parser_uses_only_disclosed_public_float_amount_or_ratio(self):
+        collector = DARTCollector(api_key="test")
+        shares = collector._parse_offering_html(
+            "상장 직후 유통가능 주식수는 1,500,000주입니다.", "20250101000008"
+        )
+        ratio = collector._parse_offering_html(
+            "상장 직후 유통가능물량은 31.25%입니다.", "20250101000009"
+        )
+
+        self.assertEqual(shares["public_float_shares"], 1_500_000)
+        self.assertIsNone(shares["public_float_ratio_disclosed"])
+        self.assertEqual(ratio["public_float_ratio_disclosed"], 0.3125)
+        self.assertIsNone(ratio["public_float_shares"])
+
     def test_dart_offering_parser_ignores_table_number_before_price(self):
         html = """
         확정 공모가 4 제 1 호 45,000 원
@@ -262,6 +290,37 @@ class Phase2FeatureTests(unittest.TestCase):
         )
 
         self.assertEqual(parsed["demand_offering_price"], 45_000)
+
+    def test_demand_forecast_uses_institutional_row_and_lockup_table_columns(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            """
+            <table><tr><th>기관 수요예측 경쟁률</th><td>1,234.56 : 1</td></tr></table>
+            <table>
+              <tr><th>의무보유확약기간</th><th>신청주식수</th><th>비율</th></tr>
+              <tr><td>6개월</td><td>1,000주</td><td>10.0%</td></tr>
+              <tr><td>3개월</td><td>2,000주</td><td>20.0%</td></tr>
+              <tr><td>1개월</td><td>3,000주</td><td>30.0%</td></tr>
+              <tr><td>15일</td><td>4,000주</td><td>40.0%</td></tr>
+              <tr><td>확약없음</td><td>0주</td><td>0.0%</td></tr>
+            </table>
+            """,
+            "12345678",
+        )
+
+        self.assertEqual(parsed["institutional_demand_ratio"], 1234.56)
+        self.assertEqual(parsed["lockup_6m_ratio"], 0.1)
+        self.assertEqual(parsed["lockup_3m_ratio"], 0.2)
+        self.assertEqual(parsed["lockup_1m_ratio"], 0.3)
+        self.assertEqual(parsed["lockup_15d_ratio"], 0.4)
+        self.assertEqual(parsed["lockup_parse_method"], "lockup_same_table_row_percent")
+
+    def test_demand_forecast_rejects_unstructured_lockup_numbers(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            "의무보유확약 6개월 100주, 3개월 200주, 1개월 300주, 15일 400주", "12345678"
+        )
+
+        self.assertIsNone(parsed["lockup_6m_ratio"])
+        self.assertIsNone(parsed["lockup_15d_ratio"])
 
     def test_dart_offering_result_approves_only_explicit_total_general_investor_subscription_ratio(self):
         parsed = DARTCollector(api_key="test")._parse_offering_result_html(

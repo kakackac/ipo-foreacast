@@ -49,13 +49,17 @@ class _TableRowParser(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.rows: list[str] = []
+        self.tables: list[list[list[str]]] = []
         self._table_depth = 0
+        self._table_rows: list[list[str]] | None = None
         self._row: list[str] | None = None
         self._cell: list[str] | None = None
 
     def handle_starttag(self, tag: str, attrs):
         tag = tag.lower()
         if tag == "table":
+            if self._table_depth == 0:
+                self._table_rows = []
             self._table_depth += 1
         elif self._table_depth and tag == "tr":
             self._row = []
@@ -72,9 +76,14 @@ class _TableRowParser(HTMLParser):
         elif self._table_depth and tag == "tr" and self._row is not None:
             if self._row:
                 self.rows.append(" | ".join(self._row))
+                if self._table_rows is not None:
+                    self._table_rows.append(self._row)
             self._row = None
         elif tag == "table" and self._table_depth:
             self._table_depth -= 1
+            if self._table_depth == 0 and self._table_rows:
+                self.tables.append(self._table_rows)
+                self._table_rows = None
 
     def handle_data(self, data: str):
         if self._cell is not None:
@@ -267,28 +276,51 @@ class DARTCollector:
         end_date: str,
     ) -> Optional[dict]:
         """수요예측 후보의 접수번호와 공개 시각을 함께 반환한다."""
+        records = self.find_demand_forecast_disclosure_records(corp_code, start_date, end_date)
+        return records[0] if records else None
+
+    def find_demand_forecast_disclosure_records(
+        self,
+        corp_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[dict]:
+        """수요예측·확약 값이 있을 수 있는 공시 계보 후보를 순서대로 반환한다.
+
+        기관 수요예측 결과는 독립 제목 공시, 발행조건확정 신고서, 투자설명서
+        중 어느 곳에나 들어갈 수 있다. 단일 제목을 "정답"으로 고르면 한 ZIP
+        실패나 문서 형식 차이로 회사 전체의 값을 잃으므로, 제목 근거와 접수일을
+        보존한 후보 목록을 반환한다.
+        """
         disclosures = self.get_company_disclosure_list(corp_code, start_date, end_date)
         if disclosures.empty:
-            return None
+            return []
 
-        title = disclosures["report_nm"].fillna("")
-        score = (
-            title.str.contains("수요예측", regex=False).astype(int) * 10
-            + title.str.contains("기관투자자", regex=False).astype(int) * 4
-            + title.str.contains("투자설명서", regex=False).astype(int) * 2
-            + title.str.contains("증권신고서", regex=False).astype(int)
+        title = disclosures["report_nm"].fillna("").astype(str)
+        eligible = (
+            title.str.contains("수요예측|발행조건확정|투자설명서|증권신고서", regex=True)
         )
-        candidates = disclosures.assign(_score=score).sort_values(["_score", "rcept_dt"], ascending=[False, False])
-        best = candidates.iloc[0]
-        # 단순 증권신고서만 있는 경우에는 같은 원문을 수요예측 결과로 오인하지
-        # 않는다. 수요예측 또는 투자설명서 단서가 있는 경우만 원문 파싱한다.
-        if int(best["_score"]) < 2:
-            return None
-        return {
-            "rcept_no": str(best["rcept_no"]),
-            "rcept_dt": best["rcept_dt"],
-            "report_nm": best["report_nm"],
-        }
+        candidates = disclosures.loc[eligible].copy()
+        if candidates.empty:
+            return []
+        candidate_title = candidates["report_nm"].fillna("").astype(str)
+        candidates["candidate_score"] = (
+            candidate_title.str.contains("수요예측", regex=False).astype(int) * 100
+            + candidate_title.str.contains("발행조건확정", regex=False).astype(int) * 80
+            + candidate_title.str.contains("기관투자자", regex=False).astype(int) * 40
+            + candidate_title.str.contains("투자설명서", regex=False).astype(int) * 30
+            + candidate_title.str.contains("정정", regex=False).astype(int) * 10
+            + candidate_title.str.contains("증권신고서", regex=False).astype(int) * 5
+        )
+        candidates = candidates.sort_values(
+            ["candidate_score", "rcept_dt", "rcept_no"], ascending=[False, False, False]
+        ).drop_duplicates("rcept_no", keep="first")
+        return [{
+            "rcept_no": str(row.rcept_no),
+            "rcept_dt": row.rcept_dt,
+            "report_nm": row.report_nm,
+            "candidate_score": int(row.candidate_score),
+        } for row in candidates.itertuples(index=False)]
 
     def find_offering_result_disclosure_record(
         self,
@@ -469,6 +501,10 @@ class DARTCollector:
             "lockup_1m_ratio":        None,
             "lockup_15d_ratio":       None,
             "lockup_none_ratio":      None,
+            "institutional_demand_parse_method": None,
+            "institutional_demand_evidence": None,
+            "lockup_parse_method": None,
+            "lockup_parse_evidence": None,
             "parse_success":          False,
         }
 
@@ -481,32 +517,37 @@ class DARTCollector:
         result["demand_offering_price_context"] = demand_price["offering_price_audit_context"]
 
         # "경쟁률"만으로는 일반 청약·비례배정 경쟁률을 잘못 잡을 수 있다.
-        # 기관/수요예측 라벨과 숫자가 직접 연결된 경우에만 승인 후보로 만든다.
-        for label in ("기관투자자 경쟁률", "기관 수요예측 경쟁률", "수요예측 경쟁률"):
-            match = re.search(
-                rf"{label}\s*(?:은|는|:|：)?\s*([0-9,]+(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b",
-                text,
-            )
+        # 기관 또는 수요예측 라벨과 숫자가 같은 표 행/문장에 직접 연결되고,
+        # 개인·일반청약·비례배정 문맥이 없는 경우만 기관 수요로 승인한다.
+        demand_blocks = self._extract_table_rows(html) + self._split_sentences(text)
+        for block in demand_blocks:
+            normalized = re.sub(r"\s+", " ", block).strip()
+            if re.search(r"비례\s*배정|일반\s*청약|개인\s*청약", normalized):
+                continue
+            if not re.search(r"기관\s*(?:투자자)?\s*(?:수요\s*예측\s*)?경쟁률|수요\s*예측\s*경쟁률", normalized):
+                continue
+            match = re.search(r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b", normalized)
             if match:
                 result["institutional_demand_ratio"] = float(match.group(1).replace(",", ""))
+                result["institutional_demand_parse_method"] = "demand_ratio_same_table_row_or_sentence"
+                result["institutional_demand_evidence"] = normalized[:300]
                 break
 
-        # 확약 비율 파싱 — 각 행의 신청주식수를 추출해 합계 대비 비율 계산
-        total_shares = self._extract_share_after(text, "합계")
-        lockup_shares = {
-            "lockup_6m_ratio":   self._extract_share_after(text, "6개월"),
-            "lockup_3m_ratio":   self._extract_share_after(text, "3개월"),
-            "lockup_1m_ratio":   self._extract_share_after(text, "1개월"),
-            "lockup_15d_ratio":  self._extract_share_after(text, "15일"),
-            "lockup_none_ratio": self._extract_share_after(text, "확약없음|미확약"),
-        }
-        if total_shares and total_shares > 0:
-            for key, shares in lockup_shares.items():
-                if shares is not None:
-                    result[key] = round(min(max(shares / total_shares, 0), 1), 6)
+        lockup = self._extract_lockup_ratios_from_tables(html)
+        for key in (
+            "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio",
+            "lockup_15d_ratio", "lockup_none_ratio",
+        ):
+            result[key] = lockup.get(key)
+        result["lockup_parse_method"] = lockup.get("parse_method")
+        result["lockup_parse_evidence"] = lockup.get("evidence")
 
         # 파싱 성공 여부만 플래그 설정 (실제 비율 계산은 수집된 데이터로)
-        if result["institutional_demand_ratio"] is not None or total_shares:
+        if result["institutional_demand_ratio"] is not None or any(
+            result[field] is not None for field in (
+                "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
+            )
+        ):
             result["parse_success"] = True
 
         return result
@@ -633,6 +674,10 @@ class DARTCollector:
             "new_shares":         None,
             "secondary_shares":   None,
             "total_post_listing_shares": None,
+            "public_float_shares": None,
+            "public_float_ratio_disclosed": None,
+            "public_float_parse_method": None,
+            "public_float_parse_evidence": None,
             "lead_underwriter":   None,
             "listing_date":       None,
             "major_shareholder_lockup_months": None,
@@ -664,6 +709,8 @@ class DARTCollector:
             text,
             "상장예정주식수|상장\\s*예정\\s*주식수|상장\\s*후\\s*총\\s*발행주식수|발행주식총수",
         )
+        public_float = self._extract_public_float_details(text)
+        result.update(public_float)
 
         # 대표 주관사
         underwriter_pattern = (
@@ -708,6 +755,8 @@ class DARTCollector:
                 "new_shares",
                 "secondary_shares",
                 "total_post_listing_shares",
+                "public_float_shares",
+                "public_float_ratio_disclosed",
                 "lead_underwriter",
                 "listing_date",
                 "major_shareholder_lockup_months",
@@ -722,6 +771,47 @@ class DARTCollector:
         text = re.sub(r"<[^>]+>", " ", raw_html)
         text = html_unescape(text)
         return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _extract_public_float_details(cls, text: str) -> dict:
+        """상장 직후 실제 유통가능 물량을 공시 문맥에서만 읽는다.
+
+        신주와 구주매출은 공모 물량일 뿐 기존주주의 즉시 유통 물량을 포함하지
+        않는다. 따라서 두 값을 더해 유통가능 비율로 추정하지 않고, 신고서가
+        직접 밝힌 주식 수 또는 전체 주식 대비 비율만 사용한다.
+        """
+        result = {
+            "public_float_shares": None,
+            "public_float_ratio_disclosed": None,
+            "public_float_parse_method": None,
+            "public_float_parse_evidence": None,
+        }
+        label = r"상장\s*(?:직후\s*)?유통\s*가능\s*(?:주식\s*)?(?:수|물량)|유통\s*가능\s*(?:주식\s*)?(?:수|물량)"
+        share_match = re.search(
+            rf"(?:{label})[^0-9]{{0,120}}([0-9][0-9,]*)\s*주", text
+        )
+        if share_match:
+            shares = cls._parse_int(share_match.group(1))
+            if shares is not None and shares > 0:
+                result.update({
+                    "public_float_shares": shares,
+                    "public_float_parse_method": "disclosed_public_float_shares_same_context",
+                    "public_float_parse_evidence": share_match.group(0)[:300],
+                })
+                return result
+
+        ratio_match = re.search(
+            rf"(?:{label})[^0-9]{{0,120}}([0-9][0-9,]*(?:\.[0-9]+)?)\s*%", text
+        )
+        if ratio_match:
+            ratio = float(ratio_match.group(1).replace(",", "")) / 100
+            if 0 <= ratio <= 1:
+                result.update({
+                    "public_float_ratio_disclosed": round(ratio, 6),
+                    "public_float_parse_method": "disclosed_public_float_ratio_same_context",
+                    "public_float_parse_evidence": ratio_match.group(0)[:300],
+                })
+        return result
 
     @staticmethod
     def _extract_share_after(text: str, label_pattern: str) -> Optional[int]:
@@ -741,6 +831,93 @@ class DARTCollector:
             logger.debug("DART 표 행 파싱을 건너뜁니다: %s", exc)
             return []
         return parser.rows
+
+    @staticmethod
+    def _extract_table_cells(raw_html: str) -> list[list[list[str]]]:
+        parser = _TableRowParser()
+        try:
+            parser.feed(raw_html)
+            parser.close()
+        except Exception as exc:
+            logger.debug("DART 표 셀 파싱을 건너뜁니다: %s", exc)
+            return []
+        return parser.tables
+
+    @classmethod
+    def _extract_lockup_ratios_from_tables(cls, raw_html: str) -> dict:
+        """의무보유확약 표의 비율 열 또는 신청주식수 열만 사용한다.
+
+        기존의 "6개월 뒤 첫 숫자" 방식은 다른 표의 번호·건수까지 가져올 수
+        있었다. 이제 확약 표라는 문맥과 같은 행/열의 백분율 또는 신청주식수
+        합계를 모두 확인할 때만 값을 만든다.
+        """
+        result = {
+            "lockup_6m_ratio": None, "lockup_3m_ratio": None,
+            "lockup_1m_ratio": None, "lockup_15d_ratio": None,
+            "lockup_none_ratio": None, "parse_method": None, "evidence": None,
+        }
+        label_map = (
+            (r"6\s*개월", "lockup_6m_ratio"),
+            (r"3\s*개월", "lockup_3m_ratio"),
+            (r"1\s*개월", "lockup_1m_ratio"),
+            (r"15\s*일", "lockup_15d_ratio"),
+            (r"확약\s*없음|미확약", "lockup_none_ratio"),
+        )
+        for table in cls._extract_table_cells(raw_html):
+            table_text = " ".join(" ".join(row) for row in table)
+            period_rows = [row for row in table if any(re.search(pattern, " ".join(row)) for pattern, _ in label_map)]
+            if len(period_rows) < 2 or not re.search(r"의무\s*보유|보유\s*확약|확약\s*기간", table_text):
+                continue
+
+            direct_values: dict[str, float] = {}
+            for row in period_rows:
+                row_text = " | ".join(row)
+                field = next((field for pattern, field in label_map if re.search(pattern, row_text)), None)
+                percent = re.search(r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*%", row_text)
+                if field and percent:
+                    value = float(percent.group(1).replace(",", "")) / 100
+                    if 0 <= value <= 1:
+                        direct_values[field] = round(value, 6)
+            if direct_values:
+                result.update(direct_values)
+                result["parse_method"] = "lockup_same_table_row_percent"
+                result["evidence"] = table_text[:500]
+                return result
+
+            header_index = next((
+                index for index, row in enumerate(table)
+                if any(re.search(r"신청\s*주식\s*수|신청주식수", cell) for cell in row)
+            ), None)
+            if header_index is None:
+                continue
+            header = table[header_index]
+            share_index = next(
+                (index for index, cell in enumerate(header) if re.search(r"신청\s*주식\s*수|신청주식수", cell)),
+                None,
+            )
+            if share_index is None:
+                continue
+            total_row = next((row for row in table[header_index + 1:] if re.search(r"합계|총계", " ".join(row))), None)
+            if total_row is None or len(total_row) <= share_index:
+                continue
+            total = cls._parse_int(re.sub(r"[^0-9,]", "", total_row[share_index]))
+            if not total:
+                continue
+            calculated: dict[str, float] = {}
+            for row in period_rows:
+                row_text = " | ".join(row)
+                field = next((field for pattern, field in label_map if re.search(pattern, row_text)), None)
+                if field is None or len(row) <= share_index:
+                    continue
+                shares = cls._parse_int(re.sub(r"[^0-9,]", "", row[share_index]))
+                if shares is not None and 0 <= shares <= total:
+                    calculated[field] = round(shares / total, 6)
+            if calculated:
+                result.update(calculated)
+                result["parse_method"] = "lockup_table_share_column_over_total"
+                result["evidence"] = table_text[:500]
+                return result
+        return result
 
     @staticmethod
     def _extract_offering_price_details(text: str, table_rows: Optional[list[str]] = None) -> dict:

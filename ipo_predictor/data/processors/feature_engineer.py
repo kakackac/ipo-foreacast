@@ -338,6 +338,7 @@ class FeatureEngineer:
             "new_shares",
             "secondary_shares",
             "public_float_shares",
+            "public_float_ratio_disclosed",
             "total_post_listing_shares",
         ]
         for col in numeric_cols:
@@ -359,18 +360,19 @@ class FeatureEngineer:
 
         if "float_share_ratio" not in df.columns:
             total_shares = df.get("total_post_listing_shares", pd.Series(np.nan, index=df.index))
-            if "public_float_shares" in df.columns:
-                float_shares = df["public_float_shares"]
-            else:
-                new_shares = df.get("new_shares", pd.Series(np.nan, index=df.index))
-                secondary_shares = df.get("secondary_shares", pd.Series(np.nan, index=df.index))
-                float_shares = new_shares + secondary_shares
-
-            df["float_share_ratio"] = np.where(
+            float_shares = df.get("public_float_shares", pd.Series(np.nan, index=df.index))
+            disclosed_ratio = df.get("public_float_ratio_disclosed", pd.Series(np.nan, index=df.index))
+            calculated_ratio = pd.Series(np.where(
                 total_shares.notna() & float_shares.notna() & (total_shares > 0),
                 float_shares / total_shares,
                 np.nan,
+            ), index=df.index)
+            valid_disclosed_ratio = disclosed_ratio.where(
+                disclosed_ratio.notna() & disclosed_ratio.between(0, 1)
             )
+            # 신주+구주매출은 실제 유통가능 물량의 하한일 뿐이다. 기존주주
+            # 유통 가능분이 빠질 수 있어 대체값으로 쓰지 않는다.
+            df["float_share_ratio"] = valid_disclosed_ratio.combine_first(calculated_ratio)
         df["float_share_ratio"] = pd.to_numeric(
             df["float_share_ratio"], errors="coerce"
         ).clip(0, 1)
@@ -738,6 +740,14 @@ class FeatureEngineer:
         records: list[dict[str, object]] = []
         for row in features.itertuples(index=False):
             values = row._asdict()
+
+            def first_present(*names: str):
+                for name in names:
+                    candidate = values.get(name)
+                    if candidate is not None and not pd.isna(candidate):
+                        return candidate
+                return None
+
             for feature_name in self.feature_names:
                 if feature_name not in features.columns:
                     continue
@@ -762,11 +772,20 @@ class FeatureEngineer:
                     source_ref = values.get("event_source_url")
                     available_at = pd.NA
                 if feature_name == "institutional_demand_ratio":
-                    source_ref = values.get("demand_rcept_no")
+                    source_ref = first_present("institutional_rcept_no", "demand_rcept_no")
                     available_at = values.get("institutional_available_at")
                 if feature_name.startswith("lockup_"):
-                    source_ref = values.get("demand_rcept_no")
+                    source_ref = first_present("lockup_rcept_no", "demand_rcept_no")
                     available_at = values.get("lockup_available_at")
+                if feature_name in {"offering_price_band_position", "band_exceeded"}:
+                    source_ref = first_present("price_band_rcept_no", "rcept_no")
+                    available_at = first_present("price_band_rcept_dt", "feature_available_at")
+                if feature_name in {
+                    "float_share_ratio", "secondary_offering_ratio",
+                    "major_shareholder_lockup_months", "risk_factor_count",
+                }:
+                    source_ref = first_present("offering_structure_rcept_no", "rcept_no")
+                    available_at = first_present("offering_structure_rcept_dt", "feature_available_at")
                 if source.startswith("KRX"):
                     event_source_url = values.get("event_source_url")
                     source_ref = (

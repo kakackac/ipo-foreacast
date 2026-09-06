@@ -233,7 +233,7 @@ SECONDARY_FEATURES: list[FeatureDef] = [
         dtype       = "float",
         description = "상장 직후 유통 가능 물량 비율",
         source      = "DART 증권신고서 주식분포표",
-        formula     = "(공모 신주 + 구주매출) / 상장 후 총 발행주식수",
+        formula     = "공시된 상장 직후 유통가능주식수 / 상장 후 총 발행주식수 (또는 공시 유통가능비율)",
         fill_na     = "median",
         clip        = (0, 1),
     ),
