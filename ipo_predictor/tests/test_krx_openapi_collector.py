@@ -103,10 +103,7 @@ class KRXOpenAPICollectorTests(unittest.TestCase):
         self.assertEqual(events.loc[1, "event_class"], "spac_ipo")
         self.assertEqual(events.loc[0, "offering_type"], "common_stock_ipo")
         self.assertEqual(events.loc[1, "offering_type"], "spac_ipo")
-        self.assertEqual(
-            events.loc[1, "retail_subscription_eligibility_status"],
-            "candidate_requires_official_notice",
-        )
+        self.assertNotIn("retail_subscription_eligibility_status", events.columns)
         self.assertEqual(events.loc[0, "industry_name"], "소프트웨어 개발 및 공급업")
         self.assertEqual(events.loc[0, "source_name"], "KRX_KIND_new_listing_company")
         self.assertEqual(collector.official_listing_requests[-1]["status"], "success")

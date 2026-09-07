@@ -144,7 +144,6 @@ class IPOFeatures(Base):
 
     # ── CORE 피처 ─────────────────────────────────────────────
     institutional_demand_ratio    = Column(Float, nullable=True)
-    retail_subscription_ratio     = Column(Float, nullable=True)
     lockup_6m_ratio               = Column(Float, nullable=True, default=0.0)
     lockup_3m_ratio               = Column(Float, nullable=True, default=0.0)
     lockup_1m_ratio               = Column(Float, nullable=True, default=0.0)

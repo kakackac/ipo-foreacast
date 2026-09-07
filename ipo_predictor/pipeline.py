@@ -522,12 +522,12 @@ def run_audit_dart_failures():
     return audit
 
 
-def run_prepare_underwriter_notice_review_queue():
-    """저장된 KRX 이벤트 마스터에서 공식 주관사 공지 URL 검토 대기열을 생성한다."""
+def run_prepare_underwriter_institutional_review_queue():
+    """대표주관사 기관 수요예측 결과 URL 검토 대기열을 생성한다."""
     from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline
 
-    queue = HistoricalIPOPipeline().prepare_underwriter_notice_review_queue()
-    logger.info("공식 주관사 공지 검토 대기열 생성 완료 | %d건", len(queue))
+    queue = HistoricalIPOPipeline().prepare_underwriter_institutional_review_queue()
+    logger.info("기관 수요예측 공식 공지 검토 대기열 생성 완료 | %d건", len(queue))
     return queue
 
 
@@ -548,7 +548,7 @@ if __name__ == "__main__":
         "--mode",
         choices=[
             "train", "backtest", "analyze", "demo", "collect", "collect-events",
-            "audit-dart-failures", "prepare-underwriter-notice-review-queue",
+            "audit-dart-failures", "prepare-underwriter-institutional-review-queue",
             "audit-underwriter-source-readiness",
         ],
         default="demo",
@@ -616,11 +616,11 @@ if __name__ == "__main__":
         except RuntimeError as exc:
             logger.error("DART 원문 실패 재감사 중단: %s", exc)
             sys.exit(2)
-    elif args.mode == "prepare-underwriter-notice-review-queue":
+    elif args.mode == "prepare-underwriter-institutional-review-queue":
         try:
-            run_prepare_underwriter_notice_review_queue()
+            run_prepare_underwriter_institutional_review_queue()
         except RuntimeError as exc:
-            logger.error("주관사 공식 공지 검토 대기열 생성 중단: %s", exc)
+            logger.error("기관 수요예측 공식 공지 검토 대기열 생성 중단: %s", exc)
             sys.exit(2)
     elif args.mode == "audit-underwriter-source-readiness":
         try:

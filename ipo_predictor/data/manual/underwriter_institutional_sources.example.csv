@@ -1,0 +1,2 @@
+event_id,corp_name,lead_underwriter,notice_url,source_type,published_at,source_version,revision_of_notice_id,is_correction,notice_title,source_offering_price,notice_underwriter,aggregate_scope_verification
+krx_kind|000000|20260120|example,예시기업,KB증권,https://www.kbsec.com/example,official_institutional_result,2026-01-10,initial,,false,기관 수요예측 결과,10000,KB증권,manual_verified_aggregate_institutional

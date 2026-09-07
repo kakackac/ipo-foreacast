@@ -121,7 +121,7 @@ class _FakeKRX:
 
 
 class ActualDataPipelineTests(unittest.TestCase):
-    def test_underwriter_notice_review_queue_uses_event_master_without_web_discovery(self):
+    def test_underwriter_institutional_review_queue_uses_event_master_without_web_discovery(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             raw_dir = root / "raw"
@@ -151,7 +151,7 @@ class ActualDataPipelineTests(unittest.TestCase):
                     "source_url": "https://kind.krx.co.kr/event-3",
                 },
             ]).to_parquet(raw_dir / "krx_official_event_master.parquet", index=False)
-            (manual_dir / "underwriter_notice_sources.csv").write_text(
+            (manual_dir / "underwriter_institutional_sources.csv").write_text(
                 "event_id,corp_name,lead_underwriter,notice_url\n"
                 "event-1,가나다,한국투자증권,https://securities.koreainvestment.com/notice/1\n",
                 encoding="utf-8",
@@ -160,14 +160,14 @@ class ActualDataPipelineTests(unittest.TestCase):
             queue = HistoricalIPOPipeline(
                 dart_collector=_FakeDART(), krx_collector=_FakeKRX(), raw_dir=raw_dir,
                 processed_dir=root / "processed",
-            ).prepare_underwriter_notice_review_queue()
+            ).prepare_underwriter_institutional_review_queue()
 
             self.assertEqual(queue["event_id"].tolist(), ["event-1", "event-2"])
-            self.assertEqual(queue.loc[0, "review_status"], "official_notice_url_already_linked")
-            self.assertEqual(queue.loc[1, "review_status"], "official_notice_url_required")
+            self.assertEqual(queue.loc[0, "review_status"], "official_institutional_url_already_linked")
+            self.assertEqual(queue.loc[1, "review_status"], "official_institutional_url_required")
             self.assertTrue(queue["collection_policy"].str.startswith("manual_url_only").all())
-            self.assertTrue((raw_dir / "official_underwriter_notice_review_queue.parquet").exists())
-            self.assertTrue((manual_dir / "underwriter_notice_review_queue.csv").exists())
+            self.assertTrue((raw_dir / "official_underwriter_institutional_review_queue.parquet").exists())
+            self.assertTrue((manual_dir / "underwriter_institutional_review_queue.csv").exists())
 
             readiness = HistoricalIPOPipeline(
                 dart_collector=_FakeDART(), krx_collector=_FakeKRX(), raw_dir=raw_dir,
@@ -257,24 +257,6 @@ class ActualDataPipelineTests(unittest.TestCase):
         self.assertEqual([record["rcept_no"] for record in records], [
             "20240212000001", "20240210000001", "20240201000001",
         ])
-
-    def test_offering_result_candidate_requires_statutory_report_title(self):
-        collector = DARTCollector(api_key="a" * 40)
-        collector.get_company_disclosure_list = Mock(return_value=pd.DataFrame([
-            {
-                "rcept_no": "20240201000001", "rcept_dt": pd.Timestamp("2024-02-01"),
-                "report_nm": "유상증자결정", "corp_code": "12345678",
-            },
-            {
-                "rcept_no": "20240202000001", "rcept_dt": pd.Timestamp("2024-02-02"),
-                "report_nm": "증권발행실적보고서", "corp_code": "12345678",
-            },
-        ]))
-
-        record = collector.find_offering_result_disclosure_record("12345678", "20240101", "20240501")
-
-        self.assertEqual(record["rcept_no"], "20240202000001")
-        self.assertEqual(record["report_nm"], "증권발행실적보고서")
 
     def test_document_zip_is_converted_to_plain_text(self):
         content = io.BytesIO()
@@ -483,27 +465,18 @@ class ActualDataPipelineTests(unittest.TestCase):
         self.assertEqual(parsed["institutional_demand_ratio"], 850.0)
         self.assertEqual(parsed["dart_final_terms_demand_parser_version"], 1)
 
-    def test_default_collection_skips_retail_audit_sources(self):
-        class RetailAuditSpy(_FakeDART):
-            def __init__(self):
-                self.offering_result_lookup_calls = 0
-
-            def find_offering_result_disclosure_record(self, corp_code, start_date, end_date):
-                self.offering_result_lookup_calls += 1
-                raise AssertionError("기본 수집은 개인청약 감사 원천을 조회하면 안 됩니다.")
-
+    def test_collection_omits_removed_personal_subscription_artifacts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
-            dart = RetailAuditSpy()
-            summary = HistoricalIPOPipeline(
-                dart_collector=dart,
+            HistoricalIPOPipeline(
+                dart_collector=_FakeDART(),
                 krx_collector=_FakeKRX(),
                 raw_dir=root / "raw",
                 processed_dir=root / "processed",
             ).run(2024, 2024, feature_set="phase2")
 
-            self.assertEqual(summary["retail_audit_mode"], "deferred")
-            self.assertEqual(dart.offering_result_lookup_calls, 0)
+            raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
+            self.assertNotIn("retail_subscription_ratio", raw.columns)
             self.assertFalse((root / "raw" / "dart_offering_result_audit.parquet").exists())
 
     def test_listing_price_audit_resolves_only_verified_target_events(self):
@@ -562,87 +535,6 @@ class ActualDataPipelineTests(unittest.TestCase):
             audit.loc[0, "price_resolution_status"],
             "historical_price_cache_reaudit_required",
         )
-
-    def test_pipeline_keeps_dart_offering_result_as_audit_candidate_only(self):
-        class ResultDART(_FakeDART):
-            def find_offering_result_disclosure_record(self, corp_code, start_date, end_date):
-                return {
-                    "rcept_no": "20240501000001", "rcept_dt": pd.Timestamp("2024-05-01"),
-                    "report_nm": "증권발행실적보고서",
-                }
-
-            def get_offering_result(self, corp_code, rcept_no):
-                return {
-                    "corp_code": corp_code,
-                    "retail_subscription_ratio": 1234.56,
-                    "retail_subscription_ratio_candidate": 1234.56,
-                    "retail_ratio_scope": "dart_issuer_total_general_subscription",
-                    "retail_parse_evidence": "전체 일반청약 경쟁률 1,234.56 : 1",
-                    "retail_parse_method": "dart_offering_result_table_row",
-                    "retail_validation_status": "official_dart_issuer_total_retail_ratio",
-                    "retail_human_review_required": False,
-                    "retail_parse_success": True,
-                }
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            summary = HistoricalIPOPipeline(
-                dart_collector=ResultDART(),
-                krx_collector=_FakeKRX(),
-                raw_dir=root / "raw",
-                processed_dir=root / "processed",
-            ).run(2024, 2024, feature_set="phase2", include_retail_audit=True)
-
-            raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
-            audit = pd.read_parquet(root / "raw" / "dart_offering_result_audit.parquet")
-            observations = pd.read_parquet(root / "processed" / "feature_observations.parquet")
-
-            self.assertEqual(summary["dart_offering_result_candidate_rows"], 1)
-            self.assertEqual(summary["dart_offering_result_approved_retail_rows"], 1)
-            self.assertTrue(pd.isna(raw.loc[0, "retail_subscription_ratio"]))
-            self.assertEqual(raw.loc[0, "retail_subscription_ratio_candidate"], 1234.56)
-            self.assertEqual(audit.loc[0, "retail_result_rcept_no"], "20240501000001")
-            self.assertNotIn("retail_subscription_ratio", observations["feature_name"].tolist())
-
-    def test_second_run_reuses_versioned_dart_offering_result_audit(self):
-        class CachedResultDART(_FakeDART):
-            def __init__(self):
-                self.result_calls = 0
-
-            def find_offering_result_disclosure_record(self, corp_code, start_date, end_date):
-                return {
-                    "rcept_no": "20240501000001", "rcept_dt": pd.Timestamp("2024-05-01"),
-                    "report_nm": "증권발행실적보고서",
-                }
-
-            def get_offering_result(self, corp_code, rcept_no):
-                self.result_calls += 1
-                return {
-                    "corp_code": corp_code,
-                    "retail_parser_version": 2,
-                    "retail_subscription_ratio": None,
-                    "retail_subscription_ratio_candidate": None,
-                    "retail_ratio_scope": None,
-                    "retail_parse_evidence": "일반공모 / 청약현황",
-                    "retail_parse_method": "dart_offering_result_general_offering_table",
-                    "retail_validation_status": "dart_offering_result_general_offering_not_retail_scope",
-                    "retail_human_review_required": True,
-                    "retail_parse_success": True,
-                }
-
-        with tempfile.TemporaryDirectory() as temp_dir:
-            root = Path(temp_dir)
-            dart = CachedResultDART()
-            pipeline = HistoricalIPOPipeline(
-                dart_collector=dart,
-                krx_collector=_FakeKRX(),
-                raw_dir=root / "raw",
-                processed_dir=root / "processed",
-            )
-            pipeline.run(2024, 2024, feature_set="phase2", include_retail_audit=True)
-            pipeline.run(2024, 2024, feature_set="phase2", include_retail_audit=True)
-
-            self.assertEqual(dart.result_calls, 1)
 
     def test_document_014_tries_another_receipt_in_the_same_lineage(self):
         class FallbackDART(_FakeDART):
