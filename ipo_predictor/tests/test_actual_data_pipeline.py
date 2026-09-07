@@ -383,7 +383,7 @@ class ActualDataPipelineTests(unittest.TestCase):
                 "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20240101000001",
             )
 
-    def test_default_collection_skips_secondary_dart_demand_audit(self):
+    def test_default_collection_searches_dart_demand_lineage(self):
         class DemandAuditSpy(_FakeDART):
             def __init__(self):
                 self.demand_lookup_calls = 0
@@ -391,11 +391,12 @@ class ActualDataPipelineTests(unittest.TestCase):
 
             def find_demand_forecast_disclosure(self, corp_code, start_date, end_date):
                 self.demand_lookup_calls += 1
-                raise AssertionError("기본 수집은 DART 수요예측 후보를 조회하면 안 됩니다.")
+                return "20240201000001"
 
             def get_demand_forecast(self, corp_code, rcept_no):
                 self.demand_parse_calls += 1
-                raise AssertionError("기본 수집은 DART 수요예측 원문을 파싱하면 안 됩니다.")
+                return {"corp_code": corp_code, "institutional_demand_ratio": None,
+                        "lockup_commitment_ratio": None, "parse_success": False}
 
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -408,8 +409,8 @@ class ActualDataPipelineTests(unittest.TestCase):
             ).run(2024, 2024, feature_set="phase2")
 
             raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
-            self.assertEqual(dart.demand_lookup_calls, 0)
-            self.assertEqual(dart.demand_parse_calls, 0)
+            self.assertEqual(dart.demand_lookup_calls, 1)
+            self.assertEqual(dart.demand_parse_calls, 2)
             self.assertNotIn("institutional_demand_ratio", raw.columns)
             self.assertEqual(
                 raw.loc[0, "institutional_validation_status"],
@@ -706,6 +707,43 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertTrue(pd.isna(raw.loc[0, "institutional_rcept_no"]))
             self.assertTrue(pd.isna(raw.loc[0, "lockup_rcept_no"]))
             self.assertIn("20240201000001", set(failures["rcept_no"].astype(str)))
+
+    def test_dart_lineage_accepts_latest_valid_institutional_fields_from_separate_documents(self):
+        class SplitInstitutionalDART(_FakeDART):
+            def find_demand_forecast_disclosure_records(self, corp_code, start_date, end_date):
+                return [
+                    {"rcept_no": "20240215000001", "rcept_dt": pd.Timestamp("2024-02-15"),
+                     "report_nm": "수요예측결과", "candidate_score": 100},
+                    {"rcept_no": "20240214000001", "rcept_dt": pd.Timestamp("2024-02-14"),
+                     "report_nm": "[기재정정]투자설명서", "candidate_score": 40},
+                ]
+
+            def get_demand_forecast(self, corp_code, rcept_no):
+                base = {"corp_code": corp_code, "demand_offering_price": 12000,
+                        "institutional_demand_ratio": None, "lockup_commitment_ratio": None,
+                        "parse_success": True}
+                if rcept_no == "20240215000001":
+                    return {**base, "institutional_demand_ratio": 850.0,
+                            "institutional_demand_evidence": "기관투자자 수요예측 경쟁률 850 : 1"}
+                if rcept_no == "20240214000001":
+                    return {**base, "lockup_commitment_ratio": 0.25,
+                            "lockup_parse_evidence": "기관투자자 의무보유확약 25.0%"}
+                return base
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            HistoricalIPOPipeline(
+                dart_collector=SplitInstitutionalDART(), krx_collector=_FakeKRX(),
+                raw_dir=root / "raw", processed_dir=root / "processed",
+            ).run(2024, 2024, feature_set="phase2")
+
+            raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
+            self.assertEqual(raw.loc[0, "institutional_demand_ratio"], 850.0)
+            self.assertEqual(raw.loc[0, "lockup_commitment_ratio"], 0.25)
+            self.assertEqual(raw.loc[0, "institutional_rcept_no"], "20240215000001")
+            self.assertEqual(raw.loc[0, "lockup_rcept_no"], "20240214000001")
+            self.assertEqual(raw.loc[0, "institutional_validation_status"], "verified_dart_lineage_aggregate_institutional")
+            self.assertEqual(raw.loc[0, "lockup_validation_status"], "verified_dart_lineage_aggregate_institutional")
 
     def test_manual_price_override_promotes_audited_record_for_training(self):
         with tempfile.TemporaryDirectory() as temp_dir:

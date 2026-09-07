@@ -31,7 +31,7 @@ MAX_FILING_TO_LISTING_DAYS = 400
 STRUCTURED_PRICE_CHECK_VERSION = 3
 OFFERING_PRICE_PARSER_VERSION = 4
 DART_LINEAGE_VERSION = 1
-DART_DEMAND_PARSER_VERSION = 2
+DART_DEMAND_PARSER_VERSION = 3
 DART_FINAL_TERMS_DEMAND_PARSER_VERSION = 3
 MAX_DEMAND_DOCUMENT_CANDIDATES = 8
 DOCUMENT_RETRY_AFTER_DAYS = 7
@@ -79,7 +79,7 @@ class HistoricalIPOPipeline:
         start_year: int,
         end_year: int,
         feature_set: str = "phase2",
-        include_dart_demand_audit: bool = False,
+        include_dart_demand_audit: bool = True,
     ) -> dict[str, Any]:
         """수집 결과와 데이터 품질 요약을 반환하고 산출물을 디스크에 저장한다."""
         if start_year > end_year:
@@ -453,108 +453,80 @@ class HistoricalIPOPipeline:
     def _merge_official_underwriter_institutional_results(
         dart_ipo: pd.DataFrame, underwriter_results: pd.DataFrame
     ) -> pd.DataFrame:
-        """DART에 완전한 통합 묶음이 없을 때만 대표주관사 묶음을 보완한다.
+        """공식 주관사 결과를 필드별 최신 검증 문서로 보완한다.
 
-        기관 경쟁률과 6/3/1개월·15일 확약이 한 공지에서 모두 검증된 레코드만
-        사용한다. DART와 주관사, 또는 서로 다른 정정본의 부분값은 절대 섞지
-        않는다. 같은 이벤트에 서로 다른 승인 묶음이 있으면 최신 정정본이
-        명시된 경우가 아니면 충돌 검토 상태로 남긴다.
+        기관 경쟁률과 통합 확약은 같은 IPO의 공식 원천·상장 전 공개·공모가
+        정합을 각각 만족하면 서로 다른 문서에서 올 수 있다. 한 문서에 두 값이
+        모두 없다는 이유로 이미 검증된 값을 버리지 않으며, 각 필드의 원문 URL과
+        공개 시각은 독립적으로 보존한다.
         """
         if dart_ipo.empty or underwriter_results.empty:
             return dart_ipo
-        result = dart_ipo.copy()
-        approved = underwriter_results.copy()
-        required = {"event_id", "validation_status", "event_context_validation_status", *LOCKUP_FIELDS}
-        if not required.issubset(approved.columns):
-            return result
-        approved = approved[
-            approved["validation_status"].eq("verified_official_underwriter_aggregate_bundle")
-            & approved["event_context_validation_status"].eq("verified_event_context")
-            & approved["institutional_demand_ratio"].notna()
+        required = {"event_id", "event_context_validation_status", "validation_status"}
+        if not required.issubset(underwriter_results.columns):
+            return dart_ipo
+        candidates = underwriter_results.copy()
+        scope = candidates.get("aggregate_scope_verification", pd.Series(index=candidates.index, dtype=object))
+        bundle_verified = (
+            candidates["validation_status"].eq("verified_official_underwriter_aggregate_bundle")
+            & candidates.get("institutional_demand_ratio", pd.Series(index=candidates.index)).notna()
+            & candidates.get("lockup_commitment_ratio", pd.Series(index=candidates.index)).notna()
+        )
+        candidates = candidates[
+            candidates["event_context_validation_status"].eq("verified_event_context")
+            & (scope.eq("manual_verified_aggregate_institutional") | bundle_verified)
         ].copy()
-        approved = approved.dropna(subset=list(LOCKUP_FIELDS))
-        if approved.empty:
-            return result
-        approved["published_at"] = pd.to_datetime(approved["published_at"], errors="coerce")
-        approved["collected_at"] = pd.to_datetime(approved["collected_at"], errors="coerce")
-        selected_rows: list[pd.Series] = []
-        bundle_columns = ["institutional_demand_ratio", *LOCKUP_FIELDS]
-        for _, group in approved.groupby("event_id", dropna=False):
-            group = group.sort_values(["published_at", "collected_at"], na_position="first")
-            latest = group.iloc[-1]
-            conflicting = len(group[bundle_columns].drop_duplicates()) > 1
-            if conflicting and not bool(latest.get("is_correction")) and not latest.get("revision_of_notice_id"):
-                continue
-            selected_rows.append(latest)
-        if not selected_rows:
-            return result
-        selected = pd.DataFrame(selected_rows).rename(columns={
-            "institutional_demand_ratio": "underwriter_institutional_demand_ratio",
-            "lockup_commitment_ratio": "underwriter_lockup_commitment_ratio",
-            "lockup_6m_ratio": "underwriter_lockup_6m_ratio",
-            "lockup_3m_ratio": "underwriter_lockup_3m_ratio",
-            "lockup_1m_ratio": "underwriter_lockup_1m_ratio",
-            "lockup_15d_ratio": "underwriter_lockup_15d_ratio",
-            "notice_url": "underwriter_institutional_source_url",
-            "available_at": "underwriter_institutional_available_at",
-            "institutional_evidence": "underwriter_institutional_evidence",
-            "lockup_evidence": "underwriter_lockup_evidence",
-        })
-        result = result.merge(
-            selected[[
-                "event_id", "underwriter_institutional_demand_ratio",
-                *[f"underwriter_{field}" for field in LOCKUP_FIELDS],
-                "underwriter_institutional_source_url", "underwriter_institutional_available_at",
-                "underwriter_institutional_evidence", "underwriter_lockup_evidence",
-            ]],
-            on="event_id", how="left", suffixes=("", "_underwriter"),
-        )
-        dart_bundle_missing = (
-            result.get("institutional_validation_status", pd.Series(index=result.index, dtype=object))
-            .eq("dart_final_terms_value_not_found")
-            & result.get("lockup_validation_status", pd.Series(index=result.index, dtype=object))
-            .eq("dart_final_terms_value_not_found")
-        )
-        fallback_ready = result["underwriter_institutional_demand_ratio"].notna()
-        for field in LOCKUP_FIELDS:
-            fallback_ready &= result[f"underwriter_{field}"].notna()
-        use_fallback = dart_bundle_missing & fallback_ready
-        if not use_fallback.any():
-            return result.drop(columns=[
-                "underwriter_institutional_demand_ratio", *[f"underwriter_{field}" for field in LOCKUP_FIELDS],
-                "underwriter_institutional_source_url", "underwriter_institutional_available_at",
-                "underwriter_institutional_evidence", "underwriter_lockup_evidence",
-            ])
-        result.loc[use_fallback, "institutional_demand_ratio"] = result.loc[
-            use_fallback, "underwriter_institutional_demand_ratio"
-        ]
-        for field in LOCKUP_FIELDS:
-            result.loc[use_fallback, field] = result.loc[use_fallback, f"underwriter_{field}"]
-        result.loc[use_fallback, "institutional_source_url"] = result.loc[
-            use_fallback, "underwriter_institutional_source_url"
-        ]
-        result.loc[use_fallback, "lockup_source_url"] = result.loc[
-            use_fallback, "underwriter_institutional_source_url"
-        ]
-        result.loc[use_fallback, "institutional_available_at"] = result.loc[
-            use_fallback, "underwriter_institutional_available_at"
-        ]
-        result.loc[use_fallback, "lockup_available_at"] = result.loc[
-            use_fallback, "underwriter_institutional_available_at"
-        ]
-        result.loc[use_fallback, "institutional_validation_status"] = "verified_official_underwriter_aggregate_bundle"
-        result.loc[use_fallback, "lockup_validation_status"] = "verified_official_underwriter_aggregate_bundle"
-        result.loc[use_fallback, "institutional_demand_evidence"] = result.loc[
-            use_fallback, "underwriter_institutional_evidence"
-        ]
-        result.loc[use_fallback, "lockup_parse_evidence"] = result.loc[
-            use_fallback, "underwriter_lockup_evidence"
-        ]
-        return result.drop(columns=[
-            "underwriter_institutional_demand_ratio", *[f"underwriter_{field}" for field in LOCKUP_FIELDS],
-            "underwriter_institutional_source_url", "underwriter_institutional_available_at",
-            "underwriter_institutional_evidence", "underwriter_lockup_evidence",
-        ])
+        if candidates.empty:
+            return dart_ipo
+        candidates["published_at"] = pd.to_datetime(candidates.get("published_at"), errors="coerce")
+        candidates["collected_at"] = pd.to_datetime(candidates.get("collected_at"), errors="coerce")
+
+        def latest_for(field: str, prefix: str) -> pd.DataFrame:
+            available = candidates[candidates.get(field, pd.Series(index=candidates.index)).notna()].copy()
+            if available.empty:
+                return pd.DataFrame(columns=["event_id"])
+            available = available.sort_values(["published_at", "collected_at"], na_position="first")
+            latest = available.groupby("event_id", dropna=False).tail(1).copy()
+            return latest.rename(columns={
+                field: f"underwriter_{prefix}_value",
+                "notice_url": f"underwriter_{prefix}_source_url",
+                "available_at": f"underwriter_{prefix}_available_at",
+                f"{prefix}_evidence": f"underwriter_{prefix}_evidence",
+            })
+
+        institutional = latest_for("institutional_demand_ratio", "institutional")
+        lockup = latest_for("lockup_commitment_ratio", "lockup")
+        result = dart_ipo.copy()
+        if not institutional.empty:
+            result = result.merge(institutional.reindex(columns=[
+                "event_id", "underwriter_institutional_value", "underwriter_institutional_source_url",
+                "underwriter_institutional_available_at", "underwriter_institutional_evidence",
+            ]), on="event_id", how="left")
+        if not lockup.empty:
+            result = result.merge(lockup.reindex(columns=[
+                "event_id", "underwriter_lockup_value", "underwriter_lockup_source_url",
+                "underwriter_lockup_available_at", "underwriter_lockup_evidence",
+            ]), on="event_id", how="left")
+
+        institutional_missing = result.get(
+            "institutional_demand_ratio", pd.Series(index=result.index, dtype=float)
+        ).isna()
+        if "underwriter_institutional_value" in result:
+            use = institutional_missing & result["underwriter_institutional_value"].notna()
+            result.loc[use, "institutional_demand_ratio"] = result.loc[use, "underwriter_institutional_value"]
+            result.loc[use, "institutional_source_url"] = result.loc[use, "underwriter_institutional_source_url"]
+            result.loc[use, "institutional_available_at"] = result.loc[use, "underwriter_institutional_available_at"]
+            result.loc[use, "institutional_demand_evidence"] = result.loc[use, "underwriter_institutional_evidence"]
+            result.loc[use, "institutional_validation_status"] = "verified_official_underwriter_institutional"
+        lockup_missing = result.get("lockup_commitment_ratio", pd.Series(index=result.index, dtype=float)).isna()
+        if "underwriter_lockup_value" in result:
+            use = lockup_missing & result["underwriter_lockup_value"].notna()
+            result.loc[use, "lockup_commitment_ratio"] = result.loc[use, "underwriter_lockup_value"]
+            result.loc[use, "lockup_source_url"] = result.loc[use, "underwriter_lockup_source_url"]
+            result.loc[use, "lockup_available_at"] = result.loc[use, "underwriter_lockup_available_at"]
+            result.loc[use, "lockup_parse_evidence"] = result.loc[use, "underwriter_lockup_evidence"]
+            result.loc[use, "lockup_validation_status"] = "verified_official_underwriter_lockup"
+        return result.drop(columns=[column for column in result.columns if column.startswith("underwriter_")])
 
     def collect_official_event_master(
         self, start_year: int, end_year: int, force_refresh: bool = False
@@ -981,6 +953,72 @@ class HistoricalIPOPipeline:
             break
         return result, metadata
 
+    @staticmethod
+    def _select_dart_lineage_demand(
+        candidate_documents: list[tuple[dict[str, Any], dict[str, Any]]],
+        expected_offering_price: Any,
+        listing_date: Any,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """DART 공시 계보에서 기관 경쟁률·통합 확약을 각각 최신 원문으로 고른다.
+
+        두 값은 같은 IPO의 공식 DART 문서라는 공통 조건을 만족해야 하지만,
+        법정 공시 양식상 반드시 같은 접수번호에 함께 실릴 필요는 없다. 각 값은
+        회사 고유번호로 연결된 상장 전 문서, 공모가 일치, 명시적 기관 범위라는
+        조건을 독립적으로 통과해야 한다.
+        """
+        result: dict[str, Any] = {}
+        metadata = {
+            "institutional_rcept_no": None,
+            "institutional_rcept_dt": None,
+            "lockup_rcept_no": None,
+            "lockup_rcept_dt": None,
+        }
+        expected_price = pd.to_numeric(pd.Series([expected_offering_price]), errors="coerce").iloc[0]
+        listing_timestamp = pd.to_datetime(listing_date, errors="coerce")
+        def candidate_sort_key(item: tuple[dict[str, Any], dict[str, Any]]) -> tuple[int, int, str]:
+            timestamp = pd.to_datetime(item[0].get("rcept_dt"), errors="coerce")
+            timestamp_value = -1 if pd.isna(timestamp) else int(timestamp.value)
+            return timestamp_value, int(item[0].get("candidate_score") or 0), str(item[0].get("rcept_no", ""))
+
+        ordered = sorted(candidate_documents, key=candidate_sort_key, reverse=True)
+        for candidate, document in ordered:
+            receipt = str(candidate.get("rcept_no", "")).strip()
+            receipt_date = pd.to_datetime(candidate.get("rcept_dt"), errors="coerce")
+            if not receipt or pd.isna(receipt_date) or (not pd.isna(listing_timestamp) and receipt_date >= listing_timestamp):
+                continue
+            document_price = pd.to_numeric(pd.Series([
+                document.get("demand_offering_price", document.get("offering_price"))
+            ]), errors="coerce").iloc[0]
+            if pd.isna(expected_price) or pd.isna(document_price) or document_price != expected_price:
+                continue
+            source_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}"
+            if (
+                result.get("institutional_demand_ratio") is None
+                and document.get("institutional_demand_ratio") is not None
+            ):
+                result.update({
+                    "institutional_demand_ratio": document["institutional_demand_ratio"],
+                    "institutional_demand_parse_method": document.get("institutional_demand_parse_method"),
+                    "institutional_demand_evidence": document.get("institutional_demand_evidence"),
+                    "institutional_source_scope": "dart_lineage_aggregate_institutional",
+                    "institutional_source_url": source_url,
+                })
+                metadata["institutional_rcept_no"] = receipt
+                metadata["institutional_rcept_dt"] = receipt_date
+            if (
+                result.get("lockup_commitment_ratio") is None
+                and document.get("lockup_commitment_ratio") is not None
+            ):
+                for field in (*LOCKUP_FIELDS, "lockup_none_ratio", "lockup_parse_method", "lockup_parse_evidence"):
+                    result[field] = document.get(field)
+                result.update({
+                    "lockup_source_scope": "dart_lineage_aggregate_institutional",
+                    "lockup_source_url": source_url,
+                })
+                metadata["lockup_rcept_no"] = receipt
+                metadata["lockup_rcept_dt"] = receipt_date
+        return result, metadata
+
     def _collect_dart_records(
         self,
         calendar: pd.DataFrame,
@@ -1240,8 +1278,9 @@ class HistoricalIPOPipeline:
             lockup_rcept_dt = verified_demand_metadata["lockup_rcept_dt"]
 
             demand_candidates: list[dict[str, Any]] = []
-            # 별도 DART 후보 탐색은 최종 발행조건 문서에서 값을 못 찾은 경우의
-            # 원천 형식 감사 전용이다. 이 결과는 모델 입력으로 승격하지 않는다.
+            # 최종 발행조건 문서에 두 값이 모두 실린다는 가정을 두지 않는다.
+            # 같은 IPO의 상장 전 DART 계보에서 경쟁률·통합 확약을 각각 찾되,
+            # 각 값은 공모가와 시점까지 독립적으로 검증한다.
             if include_dart_demand_audit:
                 try:
                     demand_records_method = getattr(
@@ -1299,6 +1338,7 @@ class HistoricalIPOPipeline:
                 deduped_demand_candidates.append(candidate)
             demand_candidates = deduped_demand_candidates[:MAX_DEMAND_DOCUMENT_CANDIDATES]
 
+            demand_candidate_documents: list[tuple[dict[str, Any], dict[str, Any]]] = []
             for rank, demand_candidate in enumerate(demand_candidates, start=1):
                 candidate_receipt = str(demand_candidate["rcept_no"])
                 candidate_dt = demand_candidate.get("rcept_dt")
@@ -1324,7 +1364,10 @@ class HistoricalIPOPipeline:
                 })
                 try:
                     cached_demand = demand_cache_by_receipt.get(candidate_receipt)
-                    if cached_demand is not None:
+                    if (
+                        cached_demand is not None
+                        and cached_demand.get("demand_parser_version") == DART_DEMAND_PARSER_VERSION
+                    ):
                         parsed_demand = cached_demand
                         self._lineage_rows[-1]["attempt_status"] = "cached_parser_v2"
                     elif not self._should_retry_demand_document(candidate_receipt):
@@ -1359,10 +1402,29 @@ class HistoricalIPOPipeline:
                     logger.warning("수요예측 원문 파싱 실패 (%s, %s): %s", filing.corp_name, candidate_receipt, exc)
                     continue
 
-                # 감사 결과는 후보별 캐시와 공시 계보에만 남긴다. 이 경로에서
-                # 서로 다른 문서의 기관 경쟁률·확약을 누적하거나 모델 행에
-                # 반영하지 않는다. 모델 승인값은 위의 최종 발행조건 단일 문서
-                # 또는 대표주관사 단일 공식 공지 묶음으로만 정한다.
+                demand_candidate_documents.append((demand_candidate, parsed_demand))
+
+            lineage_demand, lineage_metadata = self._select_dart_lineage_demand(
+                demand_candidate_documents, offering.get("offering_price"), listing.listing_date
+            )
+            if verified_demand.get("institutional_demand_ratio") is None and lineage_demand.get(
+                "institutional_demand_ratio"
+            ) is not None:
+                for field in (
+                    "institutional_demand_ratio", "institutional_demand_parse_method",
+                    "institutional_demand_evidence", "institutional_source_scope", "institutional_source_url",
+                ):
+                    verified_demand[field] = lineage_demand.get(field)
+                institutional_rcept_no = lineage_metadata["institutional_rcept_no"]
+                institutional_rcept_dt = lineage_metadata["institutional_rcept_dt"]
+            if verified_demand.get("lockup_commitment_ratio") is None and lineage_demand.get(
+                "lockup_commitment_ratio"
+            ) is not None:
+                for field in (*LOCKUP_FIELDS, "lockup_none_ratio", "lockup_parse_method", "lockup_parse_evidence",
+                              "lockup_source_scope", "lockup_source_url"):
+                    verified_demand[field] = lineage_demand.get(field)
+                lockup_rcept_no = lineage_metadata["lockup_rcept_no"]
+                lockup_rcept_dt = lineage_metadata["lockup_rcept_dt"]
 
             demand_rcept_no = institutional_rcept_no or lockup_rcept_no
             demand_rcept_dt = institutional_rcept_dt or lockup_rcept_dt
@@ -1407,11 +1469,15 @@ class HistoricalIPOPipeline:
                 "lockup_source_url": verified_demand.get("lockup_source_url"),
                 "institutional_validation_status": (
                     "verified_dart_final_terms_aggregate"
+                    if verified_demand.get("institutional_source_scope") == "dart_final_terms_aggregate_institutional"
+                    else "verified_dart_lineage_aggregate_institutional"
                     if verified_demand.get("institutional_demand_ratio") is not None
                     else "dart_final_terms_value_not_found"
                 ),
                 "lockup_validation_status": (
                     "verified_dart_final_terms_aggregate"
+                    if verified_demand.get("lockup_source_scope") == "dart_final_terms_aggregate_institutional"
+                    else "verified_dart_lineage_aggregate_institutional"
                     if verified_demand.get("lockup_commitment_ratio") is not None
                     else "dart_final_terms_value_not_found"
                 ),

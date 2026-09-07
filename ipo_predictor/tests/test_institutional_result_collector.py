@@ -115,8 +115,37 @@ class OfficialInstitutionalResultCollectorTests(unittest.TestCase):
         self.assertEqual(merged.loc[0, "lockup_commitment_ratio"], 1.0)
         self.assertEqual(
             merged.loc[0, "institutional_validation_status"],
-            "verified_official_underwriter_aggregate_bundle",
+            "verified_official_underwriter_institutional",
         )
+
+    def test_pipeline_uses_separately_verified_official_documents_for_each_field(self):
+        dart = pd.DataFrame([{
+            "event_id": "event-1", "institutional_demand_ratio": None,
+            "lockup_commitment_ratio": None,
+            "institutional_validation_status": "dart_final_terms_value_not_found",
+            "lockup_validation_status": "dart_final_terms_value_not_found",
+        }])
+        common = {
+            "event_id": "event-1", "event_context_validation_status": "verified_event_context",
+            "aggregate_scope_verification": "manual_verified_aggregate_institutional",
+            "validation_status": "official_notice_incomplete_institutional_bundle",
+            "collected_at": "2026-01-10",
+        }
+        underwriter = pd.DataFrame([
+            {**common, "institutional_demand_ratio": 850.0, "lockup_commitment_ratio": None,
+             "notice_url": "https://www.kbsec.com/notice/demand", "available_at": "2026-01-10",
+             "published_at": "2026-01-10", "institutional_evidence": "기관투자자 수요예측 경쟁률 850:1"},
+            {**common, "institutional_demand_ratio": None, "lockup_commitment_ratio": 0.25,
+             "notice_url": "https://www.kbsec.com/notice/lockup", "available_at": "2026-01-11",
+             "published_at": "2026-01-11", "lockup_evidence": "기관투자자 의무보유확약 25%"},
+        ])
+
+        merged = HistoricalIPOPipeline._merge_official_underwriter_institutional_results(dart, underwriter)
+
+        self.assertEqual(merged.loc[0, "institutional_demand_ratio"], 850.0)
+        self.assertEqual(merged.loc[0, "lockup_commitment_ratio"], 0.25)
+        self.assertEqual(merged.loc[0, "institutional_source_url"], "https://www.kbsec.com/notice/demand")
+        self.assertEqual(merged.loc[0, "lockup_source_url"], "https://www.kbsec.com/notice/lockup")
 
     def test_dart_selector_never_combines_partial_values_from_two_receipts(self):
         first_final = pd.Series({"rcept_no": "20260101000001", "rcept_dt": "2026-01-01", "is_final_conditions": True})

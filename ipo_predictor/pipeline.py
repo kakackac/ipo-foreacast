@@ -460,7 +460,7 @@ def run_collect(
     start_year: int,
     end_year: int,
     phase: str = "phase2",
-    audit_dart_demand: bool = False,
+    audit_dart_demand: bool = True,
 ):
     """공식 원천 데이터를 수집해 학습용 피처 파일을 생성한다."""
     from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline
@@ -495,8 +495,8 @@ def run_collect(
     )
     if coverage_text:
         logger.info("핵심 피처 원시 충족률 | %s", coverage_text)
-    if not audit_dart_demand:
-        logger.info("기관 수요예측·통합 의무보유확약은 DART 최종 발행조건 문서에서 기본 수집합니다. 별도 DART 후보 탐색은 감사 옵션에서만 실행합니다.")
+    if audit_dart_demand:
+        logger.info("기관 수요예측·통합 의무보유확약은 같은 IPO의 상장 전 DART 공시 계보를 기본 탐색하며, 값별 공모가·시점 검증을 통과한 문서만 사용합니다.")
     return summary
 
 
@@ -562,7 +562,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--audit-dart-demand",
         action="store_true",
-        help="DART 수요예측 후보 문서를 감사용으로만 재검사합니다. 기본 수집에서는 비활성화됩니다.",
+        default=True,
+        help="호환용 옵션입니다. DART 기관 수요예측 공시 계보 탐색은 기본 수집에서 항상 실행됩니다.",
     )
     parser.add_argument(
         "--phase",
