@@ -39,6 +39,7 @@ class _FakeDART:
     def get_demand_forecast(self, corp_code, rcept_no):
         return {
             "corp_code": corp_code, "institutional_demand_ratio": 850.0,
+            "lockup_commitment_ratio": 0.4,
             "lockup_6m_ratio": 0.1, "lockup_3m_ratio": 0.2,
             "lockup_1m_ratio": 0.1, "lockup_15d_ratio": 0.1,
             "parse_success": True,
@@ -331,6 +332,7 @@ class ActualDataPipelineTests(unittest.TestCase):
                 record = super().get_offering_info(rcept_no)
                 record.update({
                     "institutional_demand_ratio": 850.0,
+                    "lockup_commitment_ratio": 1.0,
                     "institutional_demand_parse_method": "demand_ratio_same_table_row_or_sentence",
                     "institutional_demand_evidence": "기관 수요예측 경쟁률 | 850.00 : 1",
                     "lockup_6m_ratio": 0.1,
@@ -355,6 +357,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
             coverage = pd.read_parquet(root / "processed" / "feature_coverage_audit.parquet")
             self.assertEqual(raw.loc[0, "institutional_demand_ratio"], 850.0)
+            self.assertEqual(raw.loc[0, "lockup_commitment_ratio"], 1.0)
             self.assertEqual(raw.loc[0, "institutional_rcept_no"], "20240101000001")
             self.assertEqual(raw.loc[0, "lockup_rcept_no"], "20240101000001")
             self.assertEqual(
@@ -679,6 +682,7 @@ class ActualDataPipelineTests(unittest.TestCase):
                     raise RuntimeError("DART 원문 ZIP 응답이 아닙니다: <status>014</status>")
                 return {
                     "corp_code": corp_code, "institutional_demand_ratio": 850.0,
+                    "lockup_commitment_ratio": 1.0,
                     "lockup_6m_ratio": 0.1, "lockup_3m_ratio": 0.2,
                     "lockup_1m_ratio": 0.3, "lockup_15d_ratio": 0.4,
                     "lockup_none_ratio": 0.0, "parse_success": True,

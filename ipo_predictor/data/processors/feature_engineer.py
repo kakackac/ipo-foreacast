@@ -104,7 +104,7 @@ class FeatureEngineer:
             df["offering_price_review_status"] = "needs_review_missing_audit"
 
         # 2. 핵심 파생 피처 계산
-        df = self._calc_lockup_features(df)
+        df = self._normalize_lockup_commitment(df)
         df = self._calc_band_position(df)
         df = self._calc_supply_structure_features(df)
         df = self._calc_offering_type_features(df)
@@ -267,24 +267,13 @@ class FeatureEngineer:
 
     # ── 확약 피처 ─────────────────────────────────────────────
 
-    def _calc_lockup_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """의무보유확약 가중 점수 계산"""
-        for col in ["lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio"]:
-            if col not in df.columns:
-                df[col] = np.nan
-            df[col] = pd.to_numeric(df[col], errors="coerce").clip(0, 1)
-
-        weighted = pd.concat([
-            df["lockup_6m_ratio"] * 1.00,
-            df["lockup_3m_ratio"] * 0.75,
-            df["lockup_1m_ratio"] * 0.50,
-            df["lockup_15d_ratio"] * 0.25,
-        ], axis=1)
-        df["lockup_components_missing"] = df[
-            ["lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio"]
-        ].isna().any(axis=1)
-        # 부분 기간만 찾은 경우를 완전한 확약 점수처럼 쓰지 않는다.
-        df["lockup_weighted_score"] = weighted.sum(axis=1, min_count=4)
+    def _normalize_lockup_commitment(self, df: pd.DataFrame) -> pd.DataFrame:
+        """원문에서 승인한 기관 의무보유확약 통합 비율만 모델 피처로 쓴다."""
+        if "lockup_commitment_ratio" not in df.columns:
+            df["lockup_commitment_ratio"] = np.nan
+        df["lockup_commitment_ratio"] = pd.to_numeric(
+            df["lockup_commitment_ratio"], errors="coerce"
+        ).clip(0, 1)
         return df
 
     # ── 공모가 밴드 위치 ───────────────────────────────────────
@@ -845,10 +834,7 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
     dates = pd.date_range("2015-01-01", periods=n, freq="7D")
 
     # 핵심 피처 시뮬레이션 (실제 분포 근사)
-    lockup_6m  = rng.beta(2, 5, n).clip(0, 1)   # 우편향, 대부분 낮음
-    lockup_3m  = rng.beta(2, 4, n).clip(0, 1)
-    lockup_1m  = rng.beta(3, 4, n).clip(0, 1)
-    lockup_15d = rng.beta(2, 3, n).clip(0, 1)
+    lockup_commitment = rng.beta(2, 5, n).clip(0, 1)
 
     institutional_demand = rng.lognormal(5.5, 1.2, n).clip(1, 3000)
     band_position        = rng.uniform(-0.1, 1.3, n)
@@ -867,12 +853,10 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
     operating_margin = rng.normal(0.08, 0.18, n).clip(-0.6, 0.8)
     debt_ratio = rng.lognormal(0.0, 0.55, n).clip(0, 6)
 
-    lockup_score = lockup_6m * 1.0 + lockup_3m * 0.75 + lockup_1m * 0.5 + lockup_15d * 0.25
-
     # 타깃 생성: 실제 관계를 반영한 수익률 시뮬레이션
     # 한국 IPO 실제 통계: 약 65% 양수, 35% 음수 or 0
     signal = (
-        lockup_score          * 30  +
+        lockup_commitment     * 30  +
         np.log1p(institutional_demand) * 3  +
         band_position         * 15  +
         kospi_20d             * 60  +
@@ -891,7 +875,7 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
     signal = signal - signal.mean() + 12.0   # 평균 +12% (실제 통계 근사)
     open_return_pct = signal.clip(-50, 300)
     intraday_move = (
-        lockup_score * 4 +
+        lockup_commitment * 4 +
         kospi_5d * 30 -
         secondary_offering_ratio * 3 +
         rng.normal(0, 10, n)
@@ -902,11 +886,7 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
         "corp_name":                    [f"종목_{i:04d}" for i in range(n)],
         "listing_date":                 dates,
         "offering_price":               rng.integers(5000, 100000, n),
-        "lockup_6m_ratio":              lockup_6m,
-        "lockup_3m_ratio":              lockup_3m,
-        "lockup_1m_ratio":              lockup_1m,
-        "lockup_15d_ratio":             lockup_15d,
-        "lockup_weighted_score":        lockup_score,
+        "lockup_commitment_ratio":      lockup_commitment,
         "institutional_demand_ratio":   institutional_demand,
         "offering_price_band_position": band_position,
         "band_exceeded":                (band_position > 1.0).astype(int),

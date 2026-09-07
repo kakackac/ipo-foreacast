@@ -490,6 +490,7 @@ class HistoricalIPOPipeline:
             return result
         selected = pd.DataFrame(selected_rows).rename(columns={
             "institutional_demand_ratio": "underwriter_institutional_demand_ratio",
+            "lockup_commitment_ratio": "underwriter_lockup_commitment_ratio",
             "lockup_6m_ratio": "underwriter_lockup_6m_ratio",
             "lockup_3m_ratio": "underwriter_lockup_3m_ratio",
             "lockup_1m_ratio": "underwriter_lockup_1m_ratio",
@@ -942,9 +943,7 @@ class HistoricalIPOPipeline:
             "lockup_rcept_no": None,
             "lockup_rcept_dt": None,
         }
-        lockup_fields = (
-            "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
-        )
+        lockup_fields = LOCKUP_FIELDS
         for candidate, document in offering_documents:
             if not bool(getattr(candidate, "is_final_conditions", False)):
                 continue
@@ -1413,11 +1412,8 @@ class HistoricalIPOPipeline:
                 ),
                 "lockup_validation_status": (
                     "verified_dart_final_terms_aggregate"
-                    if any(
-                        verified_demand.get(field) is not None for field in (
-                            "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
-                        )
-                    ) else "dart_final_terms_value_not_found"
+                    if verified_demand.get("lockup_commitment_ratio") is not None
+                    else "dart_final_terms_value_not_found"
                 ),
                 **offering,
                 # 이 행은 현재 KRX 상장 이벤트에 맞춰 수집한 공시다. 원문에
@@ -1827,7 +1823,8 @@ class HistoricalIPOPipeline:
             "institutional_rcept_no", "institutional_rcept_dt",
             "lockup_rcept_no", "lockup_rcept_dt", "institutional_demand_ratio",
             "institutional_demand_parse_method", "institutional_demand_evidence",
-            "lockup_parse_method", "lockup_parse_evidence", "demand_offering_price", "demand_price_check",
+            "lockup_commitment_ratio", "lockup_parse_method", "lockup_parse_evidence",
+            "demand_offering_price", "demand_price_check",
             "demand_offering_price_context",
         ]
         return dart_ipo.reindex(columns=columns).copy()
@@ -1910,7 +1907,7 @@ class HistoricalIPOPipeline:
             "offering_price_manual_verified_rows": int((price_status == "manual_verified").sum()),
             "price_band_rows": int((price_band_low.notna() & price_band_high.notna()).sum()),
             "demand_ratio_rows": int(dart_ipo.get("institutional_demand_ratio", pd.Series(dtype=float)).notna().sum()),
-            "lockup_rows": int(dart_ipo.get("lockup_6m_ratio", pd.Series(dtype=float)).notna().sum()),
+            "lockup_rows": int(dart_ipo.get("lockup_commitment_ratio", pd.Series(dtype=float)).notna().sum()),
             "financial_revenue_rows": int(dart_ipo.get("revenue", pd.Series(dtype=float)).notna().sum()),
             "extreme_open_return_rows": int((open_return.abs() > 200).sum()),
             "source": "OpenDART + KRX OpenAPI",

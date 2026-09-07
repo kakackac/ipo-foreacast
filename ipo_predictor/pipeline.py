@@ -486,7 +486,7 @@ def run_collect(
     coverage = summary.get("feature_coverage", {})
     important_features = (
         "institutional_demand_ratio", "offering_price_band_position",
-        "lockup_weighted_score", "float_share_ratio", "secondary_offering_ratio",
+        "lockup_commitment_ratio", "float_share_ratio", "secondary_offering_ratio",
     )
     coverage_text = " | ".join(
         f"{feature} {float(coverage[feature].get('coverage_rate', 0.0)):.1%}"

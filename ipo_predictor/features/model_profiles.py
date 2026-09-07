@@ -35,8 +35,7 @@ MODEL_PROFILES = {
         name="post_demand",
         description="수요예측 결과 공개 후: 확정 공모가·기관 수요·확약을 추가",
         feature_names=(
-            "institutional_demand_ratio", "lockup_6m_ratio", "lockup_3m_ratio",
-            "lockup_1m_ratio", "lockup_15d_ratio", "lockup_weighted_score",
+            "institutional_demand_ratio", "lockup_commitment_ratio",
             "offering_price_band_position", "band_exceeded", "kospi_momentum_5d",
             "kospi_momentum_20d", "recent_ipo_avg_return_sector", "recent_ipo_avg_return_all",
             "offering_type_spac_ipo",

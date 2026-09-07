@@ -93,16 +93,15 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(result.loc[1, "float_share_ratio"], 0.3)
         self.assertEqual(result.loc[2, "float_share_ratio"], 0.42)
 
-    def test_partial_lockup_periods_do_not_create_a_weighted_score(self):
-        result = FeatureEngineer()._calc_lockup_features(pd.DataFrame({
+    def test_period_details_do_not_create_a_model_lockup_feature_without_total(self):
+        result = FeatureEngineer()._normalize_lockup_commitment(pd.DataFrame({
             "lockup_6m_ratio": [0.2],
             "lockup_3m_ratio": [0.1],
             "lockup_1m_ratio": [0.1],
             "lockup_15d_ratio": [None],
         }))
 
-        self.assertTrue(result.loc[0, "lockup_components_missing"])
-        self.assertTrue(pd.isna(result.loc[0, "lockup_weighted_score"]))
+        self.assertTrue(pd.isna(result.loc[0, "lockup_commitment_ratio"]))
 
     def test_training_readiness_rejects_small_general_ipo_population(self):
         df = pd.DataFrame({
@@ -322,7 +321,8 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(parsed["lockup_3m_ratio"], 0.2)
         self.assertEqual(parsed["lockup_1m_ratio"], 0.3)
         self.assertEqual(parsed["lockup_15d_ratio"], 0.4)
-        self.assertEqual(parsed["lockup_parse_method"], "lockup_same_table_row_percent")
+        self.assertEqual(parsed["lockup_commitment_ratio"], 1.0)
+        self.assertEqual(parsed["lockup_parse_method"], "lockup_complete_periods_sum")
 
     def test_demand_forecast_rejects_unstructured_lockup_numbers(self):
         parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
@@ -331,6 +331,16 @@ class Phase2FeatureTests(unittest.TestCase):
 
         self.assertIsNone(parsed["lockup_6m_ratio"])
         self.assertIsNone(parsed["lockup_15d_ratio"])
+        self.assertIsNone(parsed["lockup_commitment_ratio"])
+
+    def test_demand_forecast_uses_direct_total_lockup_ratio_without_period_details(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            "기관 수요예측 경쟁률 63.41 : 1. 의무보유확약 0.17%.", "12345678"
+        )
+
+        self.assertEqual(parsed["institutional_demand_ratio"], 63.41)
+        self.assertAlmostEqual(parsed["lockup_commitment_ratio"], 0.0017)
+        self.assertEqual(parsed["lockup_parse_method"], "lockup_direct_total_ratio")
 
     def test_equity_offering_price_flattens_dart_group_response(self):
         collector = DARTCollector(api_key="test")

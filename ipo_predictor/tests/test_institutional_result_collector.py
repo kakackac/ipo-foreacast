@@ -49,6 +49,7 @@ class OfficialInstitutionalResultCollectorTests(unittest.TestCase):
 
         self.assertEqual(record["validation_status"], "verified_official_underwriter_aggregate_bundle")
         self.assertEqual(record["institutional_demand_ratio"], 850.0)
+        self.assertEqual(record["lockup_commitment_ratio"], 1.0)
         self.assertEqual(record["lockup_6m_ratio"], 0.1)
         self.assertEqual(record["lockup_15d_ratio"], 0.4)
         self.assertFalse(record["human_review_required"])
@@ -63,6 +64,16 @@ class OfficialInstitutionalResultCollectorTests(unittest.TestCase):
         self.assertEqual(record["validation_status"], "official_notice_incomplete_institutional_bundle")
         self.assertTrue(record["human_review_required"])
 
+    def test_direct_total_lockup_ratio_is_approved_without_period_details(self):
+        collector = self._collector_with_html(
+            "<html><body>기관투자자 수요예측 경쟁률 63.41 : 1 의무보유확약 0.17%</body></html>"
+        )
+
+        record = collector.collect_notice(self._source(), self._event_context())
+
+        self.assertEqual(record["validation_status"], "verified_official_underwriter_aggregate_bundle")
+        self.assertAlmostEqual(record["lockup_commitment_ratio"], 0.0017)
+
     def test_pipeline_does_not_mix_dart_and_underwriter_partial_values(self):
         dart = pd.DataFrame([{
             "event_id": "event-1", "institutional_validation_status": "dart_final_terms_value_not_found",
@@ -71,6 +82,7 @@ class OfficialInstitutionalResultCollectorTests(unittest.TestCase):
         underwriter = pd.DataFrame([{
             "event_id": "event-1", "validation_status": "verified_official_underwriter_aggregate_bundle",
             "event_context_validation_status": "verified_event_context", "institutional_demand_ratio": 850.0,
+            "lockup_commitment_ratio": None,
             "lockup_6m_ratio": 0.1, "lockup_3m_ratio": None,
             "lockup_1m_ratio": 0.3, "lockup_15d_ratio": 0.4,
         }])
@@ -87,6 +99,7 @@ class OfficialInstitutionalResultCollectorTests(unittest.TestCase):
         underwriter = pd.DataFrame([{
             "event_id": "event-1", "validation_status": "verified_official_underwriter_aggregate_bundle",
             "event_context_validation_status": "verified_event_context", "institutional_demand_ratio": 850.0,
+            "lockup_commitment_ratio": 1.0,
             "lockup_6m_ratio": 0.1, "lockup_3m_ratio": 0.2,
             "lockup_1m_ratio": 0.3, "lockup_15d_ratio": 0.4,
             "notice_url": "https://www.kbsec.com/notice/1", "available_at": "2026-01-10",
@@ -99,7 +112,7 @@ class OfficialInstitutionalResultCollectorTests(unittest.TestCase):
         merged = HistoricalIPOPipeline._merge_official_underwriter_institutional_results(dart, underwriter)
 
         self.assertEqual(merged.loc[0, "institutional_demand_ratio"], 850.0)
-        self.assertEqual(merged.loc[0, "lockup_3m_ratio"], 0.2)
+        self.assertEqual(merged.loc[0, "lockup_commitment_ratio"], 1.0)
         self.assertEqual(
             merged.loc[0, "institutional_validation_status"],
             "verified_official_underwriter_aggregate_bundle",
@@ -111,12 +124,14 @@ class OfficialInstitutionalResultCollectorTests(unittest.TestCase):
         first_document = {
             "dart_final_terms_demand_parser_version": 1,
             "institutional_demand_ratio": 850.0,
+            "lockup_commitment_ratio": None,
             "lockup_6m_ratio": None, "lockup_3m_ratio": None,
             "lockup_1m_ratio": None, "lockup_15d_ratio": None,
         }
         second_document = {
             "dart_final_terms_demand_parser_version": 1,
             "institutional_demand_ratio": None,
+            "lockup_commitment_ratio": 1.0,
             "lockup_6m_ratio": 0.1, "lockup_3m_ratio": 0.2,
             "lockup_1m_ratio": 0.3, "lockup_15d_ratio": 0.4,
         }

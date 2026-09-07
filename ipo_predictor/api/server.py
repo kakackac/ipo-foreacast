@@ -37,10 +37,7 @@ class IPOFeatures(BaseModel):
 
     # 필수 — CORE 피처
     institutional_demand_ratio:    float = Field(...,  ge=0, le=3000,  description="기관 수요예측 경쟁률")
-    lockup_6m_ratio:               float = Field(...,  ge=0, le=1,     description="6개월 확약 비율")
-    lockup_3m_ratio:               float = Field(0.0,  ge=0, le=1)
-    lockup_1m_ratio:               float = Field(0.0,  ge=0, le=1)
-    lockup_15d_ratio:              float = Field(0.0,  ge=0, le=1)
+    lockup_commitment_ratio:       float = Field(...,  ge=0, le=1,     description="기관 의무보유확약 통합 비율")
     offering_price_band_position:  float = Field(...,  description="밴드 위치 (0=하단, 1=상단, >1=초과)")
     kospi_momentum_5d:             float = Field(0.0,  description="KOSPI 5일 수익률")
     kospi_momentum_20d:            float = Field(0.0,  description="KOSPI 20일 수익률")
@@ -64,9 +61,8 @@ class IPOFeatures(BaseModel):
     corp_name:      Optional[str] = None
     listing_date:   Optional[str] = None
 
-    @validator("lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio")
-    def lockup_sum_max_one(cls, v, values):
-        # 개별 비율은 0~1 사이 (합이 1 초과해도 허용 — 실제 DART 데이터에서 발생)
+    @validator("lockup_commitment_ratio")
+    def lockup_ratio_max_one(cls, v):
         return min(v, 1.0)
 
     class Config:
@@ -75,10 +71,7 @@ class IPOFeatures(BaseModel):
                 "corp_name":                     "테스트AI",
                 "listing_date":                  "2025-03-10",
                 "institutional_demand_ratio":    1250.0,
-                "lockup_6m_ratio":               0.42,
-                "lockup_3m_ratio":               0.18,
-                "lockup_1m_ratio":               0.10,
-                "lockup_15d_ratio":              0.05,
+                "lockup_commitment_ratio":       0.42,
                 "offering_price_band_position":  1.1,
                 "kospi_momentum_5d":             0.012,
                 "kospi_momentum_20d":            0.035,
@@ -110,7 +103,7 @@ class PredictionResponse(BaseModel):
     listing_date:         Optional[str]
     opening:              ReturnPrediction
     closing:              ReturnPrediction
-    lockup_weighted_score: float      = Field(..., description="확약 가중 점수")
+    lockup_commitment_ratio: float    = Field(..., description="기관 의무보유확약 통합 비율")
     disclaimer:           str         = "이 예측은 투자 조언이 아닙니다. 과거 성과가 미래를 보장하지 않습니다."
     predicted_at:         str         = Field(default_factory=lambda: datetime.now().isoformat())
 
@@ -188,12 +181,6 @@ def _feature_dict(feat: IPOFeatures) -> dict:
     """요청 피처를 모델 입력용 숫자 사전으로 정리한다."""
     raw = feat.dict(exclude={"corp_name", "listing_date"})
     d = {key: (0.0 if value is None else value) for key, value in raw.items()}
-    d["lockup_weighted_score"] = (
-        d["lockup_6m_ratio"] * 1.00 +
-        d["lockup_3m_ratio"] * 0.75 +
-        d["lockup_1m_ratio"] * 0.50 +
-        d["lockup_15d_ratio"] * 0.25
-    )
     d["band_exceeded"] = int(d["offering_price_band_position"] > 1.0)
     return d
 
@@ -274,10 +261,7 @@ async def predict(feat: IPOFeatures, background_tasks: BackgroundTasks):
             listing_date          = feat.listing_date,
             opening               = _return_prediction(models["opening"], feature_dict),
             closing               = _return_prediction(models["closing"], feature_dict),
-            lockup_weighted_score = round(
-                feat.lockup_6m_ratio * 1.0 + feat.lockup_3m_ratio * 0.75 +
-                feat.lockup_1m_ratio * 0.5 + feat.lockup_15d_ratio * 0.25, 3
-            ),
+            lockup_commitment_ratio = round(feat.lockup_commitment_ratio, 6),
         )
 
         # 로깅은 백그라운드 태스크로 (응답 속도 영향 없음)
@@ -310,7 +294,7 @@ async def predict_batch(batch: BatchRequest):
                 listing_date=feat.listing_date,
                 opening=_return_prediction(models["opening"], feature_dict),
                 closing=_return_prediction(models["closing"], feature_dict),
-                lockup_weighted_score=round(feature_dict["lockup_weighted_score"], 3),
+                lockup_commitment_ratio=round(feature_dict["lockup_commitment_ratio"], 6),
             ))
         return BatchResponse(count=len(responses), predictions=responses)
 

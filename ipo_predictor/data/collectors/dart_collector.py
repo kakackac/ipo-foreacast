@@ -358,6 +358,7 @@ class DARTCollector:
             "institutional_demand_ratio": None,
             "demand_offering_price":  None,
             "demand_offering_price_context": None,
+            "lockup_commitment_ratio": None,
             "lockup_6m_ratio":        None,
             "lockup_3m_ratio":        None,
             "lockup_1m_ratio":        None,
@@ -397,7 +398,7 @@ class DARTCollector:
 
         lockup = self._extract_lockup_ratios_from_tables(html)
         for key in (
-            "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio",
+            "lockup_commitment_ratio", "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio",
             "lockup_15d_ratio", "lockup_none_ratio",
         ):
             result[key] = lockup.get(key)
@@ -407,7 +408,7 @@ class DARTCollector:
         # 파싱 성공 여부만 플래그 설정 (실제 비율 계산은 수집된 데이터로)
         if result["institutional_demand_ratio"] is not None or any(
             result[field] is not None for field in (
-                "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
+                "lockup_commitment_ratio",
             )
         ):
             result["parse_success"] = True
@@ -737,6 +738,7 @@ class DARTCollector:
         합계를 모두 확인할 때만 값을 만든다.
         """
         result = {
+            "lockup_commitment_ratio": None,
             "lockup_6m_ratio": None, "lockup_3m_ratio": None,
             "lockup_1m_ratio": None, "lockup_15d_ratio": None,
             "lockup_none_ratio": None, "parse_method": None, "evidence": None,
@@ -748,8 +750,36 @@ class DARTCollector:
             (r"15\s*일", "lockup_15d_ratio"),
             (r"확약\s*없음|미확약", "lockup_none_ratio"),
         )
+        direct_total = re.search(
+            r"의무\s*보유\s*확약\s*(?:비율|률)?\s*(?:은|는|:|：)?\s*"
+            r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*%",
+            cls._normalize_text(raw_html),
+            flags=re.IGNORECASE,
+        )
+        if direct_total:
+            return {
+                **result,
+                "lockup_commitment_ratio": round(
+                    float(direct_total.group(1).replace(",", "")) / 100, 6
+                ),
+                "parse_method": "lockup_direct_total_ratio",
+                "evidence": direct_total.group(0)[:500],
+            }
         for table in cls._extract_table_cells(raw_html):
             table_text = " ".join(" ".join(row) for row in table)
+            direct_total = re.search(
+                r"의무\s*보유\s*확약\s*(?:비율|률)?\s*(?:은|는|:|：)?\s*"
+                r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*%",
+                table_text,
+                flags=re.IGNORECASE,
+            )
+            if direct_total:
+                result.update({
+                    "lockup_commitment_ratio": round(float(direct_total.group(1).replace(",", "")) / 100, 6),
+                    "parse_method": "lockup_direct_total_ratio",
+                    "evidence": table_text[:500],
+                })
+                return result
             period_rows = [row for row in table if any(re.search(pattern, " ".join(row)) for pattern, _ in label_map)]
             if len(period_rows) < 2 or not re.search(r"의무\s*보유|보유\s*확약|확약\s*기간", table_text):
                 continue
@@ -765,7 +795,17 @@ class DARTCollector:
                         direct_values[field] = round(value, 6)
             if direct_values:
                 result.update(direct_values)
-                result["parse_method"] = "lockup_same_table_row_percent"
+                if all(field in direct_values for field in (
+                    "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
+                )):
+                    result["lockup_commitment_ratio"] = round(sum(
+                        direct_values[field] for field in (
+                            "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
+                        )
+                    ), 6)
+                    result["parse_method"] = "lockup_complete_periods_sum"
+                else:
+                    result["parse_method"] = "lockup_same_table_row_percent_audit_only"
                 result["evidence"] = table_text[:500]
                 return result
 
@@ -799,7 +839,17 @@ class DARTCollector:
                     calculated[field] = round(shares / total, 6)
             if calculated:
                 result.update(calculated)
-                result["parse_method"] = "lockup_table_share_column_over_total"
+                if all(field in calculated for field in (
+                    "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
+                )):
+                    result["lockup_commitment_ratio"] = round(sum(
+                        calculated[field] for field in (
+                            "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
+                        )
+                    ), 6)
+                    result["parse_method"] = "lockup_complete_period_shares_sum"
+                else:
+                    result["parse_method"] = "lockup_table_share_column_audit_only"
                 result["evidence"] = table_text[:500]
                 return result
         return result

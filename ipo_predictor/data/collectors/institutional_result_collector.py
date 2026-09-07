@@ -22,16 +22,18 @@ from data.collectors.underwriter_registry import normalize_underwriter, official
 
 
 OFFICIAL_UNDERWRITER_HOSTS = official_hosts()
-LOCKUP_FIELDS = (
+LOCKUP_PERIOD_FIELDS = (
     "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
 )
+LOCKUP_FIELDS = ("lockup_commitment_ratio",)
 INSTITUTIONAL_RESULT_COLUMNS = [
     "notice_id", "notice_version_id", "source_version", "revision_of_notice_id", "is_correction",
     "event_id", "corp_name", "lead_underwriter", "notice_underwriter", "notice_title", "notice_url",
     "source_host", "source_type", "published_at", "available_at", "collected_at",
     "source_document_sha256", "source_offering_price", "event_listing_date", "event_offering_price",
     "event_context_validation_status", "aggregate_scope_verification", "institutional_demand_ratio",
-    *LOCKUP_FIELDS, "lockup_none_ratio", "institutional_evidence", "lockup_evidence",
+    "lockup_commitment_ratio", *LOCKUP_PERIOD_FIELDS, "lockup_none_ratio",
+    "institutional_evidence", "lockup_evidence",
     "parse_evidence", "validation_status", "missing_reason", "human_review_required",
 ]
 
@@ -123,6 +125,7 @@ class OfficialInstitutionalResultCollector:
     @staticmethod
     def _lockup_bundle(blocks: list[str]) -> tuple[dict[str, float | None], str | None]:
         values: dict[str, float | None] = {
+            "lockup_commitment_ratio": None,
             "lockup_6m_ratio": None,
             "lockup_3m_ratio": None,
             "lockup_1m_ratio": None,
@@ -131,6 +134,16 @@ class OfficialInstitutionalResultCollector:
         }
         if not any(re.search(r"의무\s*보유\s*확약|확약\s*비율", block, re.IGNORECASE) for block in blocks):
             return values, None
+        direct_pattern = re.compile(
+            r"의무\s*보유\s*확약\s*(?:비율|률)?\s*(?:은|는|:|：)?\s*"
+            r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*%",
+            re.IGNORECASE,
+        )
+        for block in blocks:
+            match = direct_pattern.search(re.sub(r"\s+", " ", block).strip())
+            if match:
+                values["lockup_commitment_ratio"] = float(match.group(1).replace(",", "")) / 100
+                return values, match.group(0)[:300]
         periods = (
             (r"6\s*개월", "lockup_6m_ratio"),
             (r"3\s*개월", "lockup_3m_ratio"),
@@ -152,6 +165,8 @@ class OfficialInstitutionalResultCollector:
                 if match:
                     values[field] = float(match.group("ratio").replace(",", "")) / 100
                     evidence.append(normalized[:300])
+        if all(values[field] is not None for field in LOCKUP_PERIOD_FIELDS):
+            values["lockup_commitment_ratio"] = sum(values[field] for field in LOCKUP_PERIOD_FIELDS)
         return values, " | ".join(dict.fromkeys(evidence))[:1000] or None
 
     def _validate_event_context(
@@ -197,7 +212,8 @@ class OfficialInstitutionalResultCollector:
             "event_listing_date": None, "event_offering_price": None,
             "event_context_validation_status": "not_checked_no_event_context",
             "aggregate_scope_verification": source.aggregate_scope_verification,
-            "institutional_demand_ratio": None, "lockup_6m_ratio": None, "lockup_3m_ratio": None,
+            "institutional_demand_ratio": None, "lockup_commitment_ratio": None,
+            "lockup_6m_ratio": None, "lockup_3m_ratio": None,
             "lockup_1m_ratio": None, "lockup_15d_ratio": None, "lockup_none_ratio": None,
             "institutional_evidence": None, "lockup_evidence": None, "parse_evidence": None,
             "validation_status": "needs_review", "missing_reason": None, "human_review_required": True,
@@ -233,13 +249,13 @@ class OfficialInstitutionalResultCollector:
             parse_evidence=" | ".join(value for value in (ratio_evidence, lockup_evidence) if value)[:1200] or None,
             **lockup,
         )
-        complete_bundle = ratio is not None and all(lockup[field] is not None for field in LOCKUP_FIELDS)
+        complete_bundle = ratio is not None and lockup["lockup_commitment_ratio"] is not None
         scope_verified = source.aggregate_scope_verification == "manual_verified_aggregate_institutional"
         if complete_bundle and context_status == "verified_event_context" and scope_verified:
             record.update(validation_status="verified_official_underwriter_aggregate_bundle", human_review_required=False)
         elif complete_bundle:
             record.update(validation_status="official_notice_aggregate_bundle_review_required")
-        elif ratio is not None or any(lockup[field] is not None for field in LOCKUP_FIELDS):
+        elif ratio is not None or lockup["lockup_commitment_ratio"] is not None:
             record.update(validation_status="official_notice_incomplete_institutional_bundle")
         else:
             record.update(validation_status="official_notice_no_supported_institutional_bundle")
