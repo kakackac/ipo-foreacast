@@ -1957,6 +1957,12 @@ class HistoricalIPOPipeline:
         open_return = pd.to_numeric(
             features.get("open_return_pct", pd.Series(dtype=float)), errors="coerce"
         )
+        institutional_statuses = dart_ipo.get(
+            "institutional_validation_status", pd.Series(dtype=str)
+        ).fillna("missing").value_counts().to_dict()
+        lockup_statuses = dart_ipo.get(
+            "lockup_validation_status", pd.Series(dtype=str)
+        ).fillna("missing").value_counts().to_dict()
         return {
             "calendar_rows": len(calendar),
             "dart_matched_rows": len(dart_ipo),
@@ -1974,6 +1980,8 @@ class HistoricalIPOPipeline:
             "price_band_rows": int((price_band_low.notna() & price_band_high.notna()).sum()),
             "demand_ratio_rows": int(dart_ipo.get("institutional_demand_ratio", pd.Series(dtype=float)).notna().sum()),
             "lockup_rows": int(dart_ipo.get("lockup_commitment_ratio", pd.Series(dtype=float)).notna().sum()),
+            "institutional_validation_status_counts": institutional_statuses,
+            "lockup_validation_status_counts": lockup_statuses,
             "financial_revenue_rows": int(dart_ipo.get("revenue", pd.Series(dtype=float)).notna().sum()),
             "extreme_open_return_rows": int((open_return.abs() > 200).sum()),
             "source": "OpenDART + KRX OpenAPI",

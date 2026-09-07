@@ -495,6 +495,11 @@ def run_collect(
     )
     if coverage_text:
         logger.info("핵심 피처 원시 충족률 | %s", coverage_text)
+    logger.info(
+        "기관 피처 원천 검증 상태 | 경쟁률 %s | 통합 확약 %s",
+        summary.get("institutional_validation_status_counts", {}),
+        summary.get("lockup_validation_status_counts", {}),
+    )
     if audit_dart_demand:
         logger.info("기관 수요예측·통합 의무보유확약은 같은 IPO의 상장 전 DART 공시 계보를 기본 탐색하며, 값별 공모가·시점 검증을 통과한 문서만 사용합니다.")
     return summary
