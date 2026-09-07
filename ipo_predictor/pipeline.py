@@ -496,7 +496,7 @@ def run_collect(
     if coverage_text:
         logger.info("핵심 피처 원시 충족률 | %s", coverage_text)
     if not audit_dart_demand:
-        logger.info("기관 수요예측·확약 DART 후보 탐색은 기본 수집에서 제외했습니다. 공식 주관사 원천 표본 감사 후 별도 수집기로 연결하세요.")
+        logger.info("기관 수요예측·통합 의무보유확약은 DART 최종 발행조건 문서에서 기본 수집합니다. 별도 DART 후보 탐색은 감사 옵션에서만 실행합니다.")
     return summary
 
 

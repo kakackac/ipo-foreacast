@@ -533,7 +533,7 @@ class DARTCollector:
         # 공모 구조와 수요예측은 같은 원문을 읽지만, 어느 한쪽이 없다고 다른
         # 쪽의 파싱 성공 상태를 덮어쓰면 안 된다.
         result["dart_final_terms_demand_parse_success"] = demand["parse_success"]
-        result["dart_final_terms_demand_parser_version"] = 1
+        result["dart_final_terms_demand_parser_version"] = 2
         return result
 
     def _parse_offering_html(self, html: str, rcept_no: str) -> dict:
