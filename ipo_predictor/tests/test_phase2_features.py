@@ -305,7 +305,7 @@ class Phase2FeatureTests(unittest.TestCase):
             """
             <table><tr><th>기관 수요예측 경쟁률</th><td>1,234.56 : 1</td></tr></table>
             <table>
-              <tr><th>의무보유확약기간</th><th>신청주식수</th><th>비율</th></tr>
+              <tr><th>기관투자자 의무보유확약기간</th><th>신청주식수</th><th>비율</th></tr>
               <tr><td>6개월</td><td>1,000주</td><td>10.0%</td></tr>
               <tr><td>3개월</td><td>2,000주</td><td>20.0%</td></tr>
               <tr><td>1개월</td><td>3,000주</td><td>30.0%</td></tr>
@@ -341,6 +341,18 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(parsed["institutional_demand_ratio"], 63.41)
         self.assertAlmostEqual(parsed["lockup_commitment_ratio"], 0.0017)
         self.assertEqual(parsed["lockup_parse_method"], "lockup_direct_total_ratio")
+
+    def test_demand_forecast_rejects_market_statistics_and_shareholder_lockup(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            """
+            <table><tr><th>수요예측 경쟁률</th><td>77.1 : 1</td><td>코스닥시장 신규상장기업 평균</td></tr></table>
+            <table><tr><th>최대주주 의무보유확약</th><td>6개월</td><td>20.0%</td></tr></table>
+            """,
+            "12345678",
+        )
+
+        self.assertIsNone(parsed["institutional_demand_ratio"])
+        self.assertIsNone(parsed["lockup_commitment_ratio"])
 
     def test_equity_offering_price_flattens_dart_group_response(self):
         collector = DARTCollector(api_key="test")

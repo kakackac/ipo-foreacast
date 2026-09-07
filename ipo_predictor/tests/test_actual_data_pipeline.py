@@ -449,7 +449,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             latest = cache.loc[cache["rcept_no"] == "20240101000001"].iloc[-1]
             self.assertEqual(dart.offering_calls, 1)
             self.assertEqual(latest["offering_price_parser_version"], 4)
-            self.assertEqual(latest["dart_final_terms_demand_parser_version"], 2)
+            self.assertEqual(latest["dart_final_terms_demand_parser_version"], 3)
             self.assertNotEqual(latest["public_float_shares"], 999_999)
 
     def test_final_terms_document_parses_offering_and_demand_without_cross_overwriting_status(self):
@@ -466,7 +466,7 @@ class ActualDataPipelineTests(unittest.TestCase):
         self.assertTrue(parsed["parse_success"])
         self.assertTrue(parsed["dart_final_terms_demand_parse_success"])
         self.assertEqual(parsed["institutional_demand_ratio"], 850.0)
-        self.assertEqual(parsed["dart_final_terms_demand_parser_version"], 2)
+        self.assertEqual(parsed["dart_final_terms_demand_parser_version"], 3)
 
     def test_collection_omits_removed_personal_subscription_artifacts(self):
         with tempfile.TemporaryDirectory() as temp_dir:

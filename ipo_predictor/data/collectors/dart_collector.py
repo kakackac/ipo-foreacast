@@ -379,15 +379,20 @@ class DARTCollector:
         result["demand_offering_price"] = demand_price["offering_price"]
         result["demand_offering_price_context"] = demand_price["offering_price_audit_context"]
 
-        # "경쟁률"만으로는 일반 청약·비례배정 경쟁률을 잘못 잡을 수 있다.
-        # 기관 또는 수요예측 라벨과 숫자가 같은 표 행/문장에 직접 연결되고,
-        # 개인·일반청약·비례배정 문맥이 없는 경우만 기관 수요로 승인한다.
+        # "수요예측 경쟁률"만으로는 해당 회사의 기관 결과가 아니다. 신고서에는
+        # 과거 시장 평균·공모규모별 통계도 같은 라벨로 들어간다. 기관 문맥과
+        # 숫자가 같은 표 행/문장에 직접 연결되고, 시장 통계 문맥이 아닌 경우만
+        # 기관 수요로 승인한다.
         demand_blocks = self._extract_table_rows(html) + self._split_sentences(text)
         for block in demand_blocks:
             normalized = re.sub(r"\s+", " ", block).strip()
             if re.search(r"비례\s*배정|일반\s*청약|개인\s*청약", normalized):
                 continue
-            if not re.search(r"기관\s*(?:투자자)?\s*(?:수요\s*예측\s*)?경쟁률|수요\s*예측\s*경쟁률", normalized):
+            if not re.search(r"기관\s*(?:투자자)?", normalized):
+                continue
+            if re.search(r"신규\s*상장\s*기업|기업\s*수|평균\s*공모|공모\s*규모", normalized):
+                continue
+            if not re.search(r"(?:수요\s*예측\s*)?경쟁률", normalized):
                 continue
             match = re.search(r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b", normalized)
             if match:
@@ -533,7 +538,7 @@ class DARTCollector:
         # 공모 구조와 수요예측은 같은 원문을 읽지만, 어느 한쪽이 없다고 다른
         # 쪽의 파싱 성공 상태를 덮어쓰면 안 된다.
         result["dart_final_terms_demand_parse_success"] = demand["parse_success"]
-        result["dart_final_terms_demand_parser_version"] = 2
+        result["dart_final_terms_demand_parser_version"] = 3
         return result
 
     def _parse_offering_html(self, html: str, rcept_no: str) -> dict:
@@ -750,13 +755,16 @@ class DARTCollector:
             (r"15\s*일", "lockup_15d_ratio"),
             (r"확약\s*없음|미확약", "lockup_none_ratio"),
         )
+        normalized_document = cls._normalize_text(raw_html)
         direct_total = re.search(
             r"의무\s*보유\s*확약\s*(?:비율|률)?\s*(?:은|는|:|：)?\s*"
             r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*%",
-            cls._normalize_text(raw_html),
+            normalized_document,
             flags=re.IGNORECASE,
         )
-        if direct_total:
+        if direct_total and cls._is_institutional_lockup_context(
+            normalized_document, direct_total.start(), direct_total.end()
+        ):
             return {
                 **result,
                 "lockup_commitment_ratio": round(
@@ -767,6 +775,8 @@ class DARTCollector:
             }
         for table in cls._extract_table_cells(raw_html):
             table_text = " ".join(" ".join(row) for row in table)
+            if not re.search(r"기관\s*(?:투자자)?|수요\s*예측", table_text):
+                continue
             direct_total = re.search(
                 r"의무\s*보유\s*확약\s*(?:비율|률)?\s*(?:은|는|:|：)?\s*"
                 r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*%",
@@ -853,6 +863,14 @@ class DARTCollector:
                 result["evidence"] = table_text[:500]
                 return result
         return result
+
+    @staticmethod
+    def _is_institutional_lockup_context(text: str, start: int, end: int) -> bool:
+        """확약 수치가 기관 수요예측 결과인지 좁은 문맥에서 확인한다."""
+        context = text[max(0, start - 250):min(len(text), end + 250)]
+        if not re.search(r"기관\s*(?:투자자)?|수요\s*예측", context):
+            return False
+        return not re.search(r"최대\s*주주|기존\s*주주|임원|보유\s*주식", context)
 
     @staticmethod
     def _extract_offering_price_details(text: str, table_rows: Optional[list[str]] = None) -> dict:
