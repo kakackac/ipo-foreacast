@@ -340,10 +340,65 @@ class ActualDataPipelineTests(unittest.TestCase):
             raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
             self.assertEqual(
                 raw.loc[0, "institutional_validation_status"],
-                "audit_only_dart_nonstandard_source",
+                "dart_final_terms_value_not_found",
             )
 
-    def test_default_collection_skips_nonstandard_dart_demand_audit(self):
+    def test_default_collection_uses_dart_final_terms_aggregate_demand(self):
+        class FinalTermsDemandDART(_FakeDART):
+            def get_offering_info(self, rcept_no):
+                record = super().get_offering_info(rcept_no)
+                record.update({
+                    "institutional_demand_ratio": 850.0,
+                    "institutional_demand_parse_method": "demand_ratio_same_table_row_or_sentence",
+                    "institutional_demand_evidence": "기관 수요예측 경쟁률 | 850.00 : 1",
+                    "lockup_6m_ratio": 0.1,
+                    "lockup_3m_ratio": 0.2,
+                    "lockup_1m_ratio": 0.3,
+                    "lockup_15d_ratio": 0.4,
+                    "lockup_none_ratio": 0.0,
+                    "lockup_parse_method": "lockup_same_table_row_percent",
+                    "lockup_parse_evidence": "의무보유확약기간 | 6개월 | 10.0%",
+                })
+                return record
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            summary = HistoricalIPOPipeline(
+                dart_collector=FinalTermsDemandDART(),
+                krx_collector=_FakeKRX(),
+                raw_dir=root / "raw",
+                processed_dir=root / "processed",
+            ).run(2024, 2024, feature_set="phase2")
+
+            raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
+            coverage = pd.read_parquet(root / "processed" / "feature_coverage_audit.parquet")
+            self.assertEqual(raw.loc[0, "institutional_demand_ratio"], 850.0)
+            self.assertEqual(raw.loc[0, "institutional_rcept_no"], "20240101000001")
+            self.assertEqual(raw.loc[0, "lockup_rcept_no"], "20240101000001")
+            self.assertEqual(
+                raw.loc[0, "institutional_source_url"],
+                "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20240101000001",
+            )
+            self.assertEqual(
+                raw.loc[0, "institutional_validation_status"],
+                "verified_dart_final_terms_aggregate",
+            )
+            self.assertEqual(
+                coverage.set_index("feature_name").loc["institutional_demand_ratio", "observed_rows"],
+                1,
+            )
+            self.assertEqual(summary["feature_coverage"]["institutional_demand_ratio"]["observed_rows"], 1)
+
+            observations = pd.read_parquet(root / "processed" / "feature_observations.parquet")
+            institutional_observation = observations.loc[
+                observations["feature_name"] == "institutional_demand_ratio"
+            ].iloc[0]
+            self.assertEqual(
+                institutional_observation["source_reference"],
+                "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20240101000001",
+            )
+
+    def test_default_collection_skips_secondary_dart_demand_audit(self):
         class DemandAuditSpy(_FakeDART):
             def __init__(self):
                 self.demand_lookup_calls = 0
@@ -373,7 +428,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertNotIn("institutional_demand_ratio", raw.columns)
             self.assertEqual(
                 raw.loc[0, "institutional_validation_status"],
-                "not_collected_dart_nonstandard_source",
+                "dart_final_terms_value_not_found",
             )
 
     def test_offering_parser_v4_reparses_v3_cached_float_value(self):
@@ -409,7 +464,24 @@ class ActualDataPipelineTests(unittest.TestCase):
             latest = cache.loc[cache["rcept_no"] == "20240101000001"].iloc[-1]
             self.assertEqual(dart.offering_calls, 1)
             self.assertEqual(latest["offering_price_parser_version"], 4)
+            self.assertEqual(latest["dart_final_terms_demand_parser_version"], 1)
             self.assertNotEqual(latest["public_float_shares"], 999_999)
+
+    def test_final_terms_document_parses_offering_and_demand_without_cross_overwriting_status(self):
+        collector = DARTCollector(api_key="a" * 40)
+        collector.get_document_text = Mock(return_value=(
+            "희망 공모가 10,000원 ~ 12,000원. 기관투자자 수요예측 경쟁률 850.00 : 1."
+        ))
+        collector._parse_offering_html = Mock(return_value={
+            "rcept_no": "20240101000001", "parse_success": True,
+        })
+
+        parsed = collector.get_offering_info("20240101000001")
+
+        self.assertTrue(parsed["parse_success"])
+        self.assertTrue(parsed["dart_final_terms_demand_parse_success"])
+        self.assertEqual(parsed["institutional_demand_ratio"], 850.0)
+        self.assertEqual(parsed["dart_final_terms_demand_parser_version"], 1)
 
     def test_default_collection_skips_retail_audit_sources(self):
         class RetailAuditSpy(_FakeDART):
@@ -733,10 +805,10 @@ class ActualDataPipelineTests(unittest.TestCase):
             failures = pd.read_parquet(root / "raw" / "dart_demand_document_failures.parquet")
             cache = pd.read_parquet(root / "raw" / "dart_demand_document_cache.parquet")
             self.assertNotIn("institutional_demand_ratio", raw.columns)
-            self.assertEqual(raw.loc[0, "institutional_validation_status"], "audit_only_dart_nonstandard_source")
+            self.assertEqual(raw.loc[0, "institutional_validation_status"], "dart_final_terms_value_not_found")
             self.assertEqual(cache.loc[cache["rcept_no"] == "20240101000001", "institutional_demand_ratio"].iloc[0], 850.0)
-            self.assertEqual(raw.loc[0, "institutional_rcept_no"], "20240101000001")
-            self.assertEqual(raw.loc[0, "lockup_rcept_no"], "20240101000001")
+            self.assertTrue(pd.isna(raw.loc[0, "institutional_rcept_no"]))
+            self.assertTrue(pd.isna(raw.loc[0, "lockup_rcept_no"]))
             self.assertIn("20240201000001", set(failures["rcept_no"].astype(str)))
 
     def test_manual_price_override_promotes_audited_record_for_training(self):

@@ -29,6 +29,7 @@ OFFERING_PRICE_PARSER_VERSION = 4
 DART_LINEAGE_VERSION = 1
 DART_OFFERING_RESULT_PARSER_VERSION = 2
 DART_DEMAND_PARSER_VERSION = 2
+DART_FINAL_TERMS_DEMAND_PARSER_VERSION = 1
 MAX_DEMAND_DOCUMENT_CANDIDATES = 8
 DOCUMENT_RETRY_AFTER_DAYS = 7
 OFFICIAL_SOURCE_RESOLUTION_COLUMNS = [
@@ -927,6 +928,65 @@ class HistoricalIPOPipeline:
             setattr(self, cache_attr, pd.DataFrame.from_records(rows))
             updates.clear()
 
+    @staticmethod
+    def _select_dart_final_terms_demand(
+        offering_documents: list[tuple[pd.Series, dict[str, Any]]],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """최종 발행조건 DART 문서의 통합 기관 수요 결과만 모델 원천으로 고른다.
+
+        공동주관사별 공지를 합산하지 않는다. 발행회사와 대표주관사가 DART에
+        제출한 최종 발행조건 문서의 기관 수요예측 표가 전체 기관 기준으로
+        직접 기재된 경우만 사용한다. 개별·비례·일반청약 경쟁률은 파서에서
+        이미 제외되고, 다른 접수번호의 기간별 확약을 섞지도 않는다.
+        """
+        result: dict[str, Any] = {}
+        metadata = {
+            "institutional_rcept_no": None,
+            "institutional_rcept_dt": None,
+            "lockup_rcept_no": None,
+            "lockup_rcept_dt": None,
+        }
+        lockup_fields = (
+            "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
+        )
+        for candidate, document in offering_documents:
+            if not bool(getattr(candidate, "is_final_conditions", False)):
+                continue
+            if document.get("dart_final_terms_demand_parser_version") != DART_FINAL_TERMS_DEMAND_PARSER_VERSION:
+                continue
+            receipt = str(candidate.rcept_no)
+            receipt_date = candidate.rcept_dt
+            if (
+                result.get("institutional_demand_ratio") is None
+                and document.get("institutional_demand_ratio") is not None
+            ):
+                result["institutional_demand_ratio"] = document["institutional_demand_ratio"]
+                result["institutional_demand_parse_method"] = document.get(
+                    "institutional_demand_parse_method"
+                )
+                result["institutional_demand_evidence"] = document.get(
+                    "institutional_demand_evidence"
+                )
+                result["institutional_source_scope"] = "dart_final_terms_aggregate_institutional"
+                result["institutional_source_url"] = (
+                    f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}"
+                )
+                metadata["institutional_rcept_no"] = receipt
+                metadata["institutional_rcept_dt"] = receipt_date
+            if (
+                metadata["lockup_rcept_no"] is None
+                and all(document.get(field) is not None for field in lockup_fields)
+            ):
+                for field in (*lockup_fields, "lockup_none_ratio", "lockup_parse_method", "lockup_parse_evidence"):
+                    result[field] = document.get(field)
+                result["lockup_source_scope"] = "dart_final_terms_aggregate_institutional"
+                result["lockup_source_url"] = (
+                    f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}"
+                )
+                metadata["lockup_rcept_no"] = receipt
+                metadata["lockup_rcept_dt"] = receipt_date
+        return result, metadata
+
     def _collect_dart_records(
         self,
         calendar: pd.DataFrame,
@@ -958,6 +1018,7 @@ class HistoricalIPOPipeline:
         offering_cache_by_receipt: dict[str, dict[str, Any]] = {}
         reusable_offering_columns = {
             "rcept_no", "offering_price_parser_version", "structured_price_check_version",
+            "dart_final_terms_demand_parser_version",
         }
         for frame in (self._offering_document_cache, cached_records):
             if frame.empty or not reusable_offering_columns.issubset(frame.columns):
@@ -965,6 +1026,9 @@ class HistoricalIPOPipeline:
             reusable_offerings = frame[
                 frame["offering_price_parser_version"].eq(OFFERING_PRICE_PARSER_VERSION)
                 & frame["structured_price_check_version"].eq(STRUCTURED_PRICE_CHECK_VERSION)
+                & frame["dart_final_terms_demand_parser_version"].eq(
+                    DART_FINAL_TERMS_DEMAND_PARSER_VERSION
+                )
             ].drop_duplicates("rcept_no", keep="last")
             offering_cache_by_receipt.update({
                 str(row.rcept_no): row._asdict() for row in reusable_offerings.itertuples(index=False)
@@ -1097,6 +1161,8 @@ class HistoricalIPOPipeline:
                 if cached is not None and (
                     cached.get("structured_price_check_version") == STRUCTURED_PRICE_CHECK_VERSION
                     and cached.get("offering_price_parser_version") == OFFERING_PRICE_PARSER_VERSION
+                    and cached.get("dart_final_terms_demand_parser_version")
+                    == DART_FINAL_TERMS_DEMAND_PARSER_VERSION
                 ):
                     offering_documents.append((candidate, cached))
                     entry["attempt_status"] = "cached_verified_record"
@@ -1108,6 +1174,9 @@ class HistoricalIPOPipeline:
                     parsed_offering = self.dart.get_offering_info(receipt)
                     parsed_offering["structured_price_check_version"] = STRUCTURED_PRICE_CHECK_VERSION
                     parsed_offering["offering_price_parser_version"] = OFFERING_PRICE_PARSER_VERSION
+                    parsed_offering["dart_final_terms_demand_parser_version"] = (
+                        DART_FINAL_TERMS_DEMAND_PARSER_VERSION
+                    )
                     self._queue_document_cache("offering", parsed_offering)
                     offering_cache_by_receipt[receipt] = parsed_offering
                     offering_documents.append((candidate, parsed_offering))
@@ -1180,9 +1249,20 @@ class HistoricalIPOPipeline:
                 offering[f"{source_group}_rcept_no"] = str(source_candidate.rcept_no)
                 offering[f"{source_group}_rcept_dt"] = source_candidate.rcept_dt
 
+            # DART 최종 발행조건 문서가 통합 기관 수요예측·확약 표를 직접
+            # 제공하면 이것이 1차 모델 원천이다. 공동주관사별 숫자를 모으거나
+            # 합산하지 않는다.
+            verified_demand, verified_demand_metadata = self._select_dart_final_terms_demand(
+                offering_documents
+            )
+            institutional_rcept_no = verified_demand_metadata["institutional_rcept_no"]
+            institutional_rcept_dt = verified_demand_metadata["institutional_rcept_dt"]
+            lockup_rcept_no = verified_demand_metadata["lockup_rcept_no"]
+            lockup_rcept_dt = verified_demand_metadata["lockup_rcept_dt"]
+
             demand_candidates: list[dict[str, Any]] = []
-            # 기관 경쟁률·확약은 DART의 공통 구조화 원천이 아니다. 기본 수집에서
-            # 후보 문서를 전수 파싱하지 않고, 명시적인 원천 적합성 감사 때만 읽는다.
+            # 별도 DART 후보 탐색은 최종 발행조건 문서에서 값을 못 찾은 경우의
+            # 원천 형식 감사 전용이다. 이 결과는 모델 입력으로 승격하지 않는다.
             if include_dart_demand_audit:
                 try:
                     demand_records_method = getattr(
@@ -1241,10 +1321,6 @@ class HistoricalIPOPipeline:
             demand_candidates = deduped_demand_candidates[:MAX_DEMAND_DOCUMENT_CANDIDATES]
 
             demand: dict[str, Any] = {}
-            institutional_rcept_no = None
-            institutional_rcept_dt = None
-            lockup_rcept_no = None
-            lockup_rcept_dt = None
             for rank, demand_candidate in enumerate(demand_candidates, start=1):
                 candidate_receipt = str(demand_candidate["rcept_no"])
                 candidate_dt = demand_candidate.get("rcept_dt")
@@ -1309,16 +1385,12 @@ class HistoricalIPOPipeline:
                     demand["institutional_demand_ratio"] = parsed_demand["institutional_demand_ratio"]
                     demand["institutional_demand_parse_method"] = parsed_demand.get("institutional_demand_parse_method")
                     demand["institutional_demand_evidence"] = parsed_demand.get("institutional_demand_evidence")
-                    institutional_rcept_no = candidate_receipt
-                    institutional_rcept_dt = candidate_dt
                 # 기간별 확약은 서로 다른 문서의 부분값을 섞지 않는다. 같은 표에서
                 # 네 기간이 모두 확인된 문서만 모델용 묶음으로 채택한다.
                 lockup_fields = ("lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio")
                 if lockup_rcept_no is None and all(parsed_demand.get(field) is not None for field in lockup_fields):
                     for field in (*lockup_fields, "lockup_none_ratio", "lockup_parse_method", "lockup_parse_evidence"):
                         demand[field] = parsed_demand.get(field)
-                    lockup_rcept_no = candidate_receipt
-                    lockup_rcept_dt = candidate_dt
 
             demand_rcept_no = institutional_rcept_no or lockup_rcept_no
             demand_rcept_dt = institutional_rcept_dt or lockup_rcept_dt
@@ -1444,29 +1516,29 @@ class HistoricalIPOPipeline:
                 ),
                 "institutional_available_at": institutional_rcept_dt,
                 "lockup_available_at": lockup_rcept_dt,
+                "institutional_source_url": verified_demand.get("institutional_source_url"),
+                "lockup_source_url": verified_demand.get("lockup_source_url"),
                 "institutional_validation_status": (
-                    "not_collected_dart_nonstandard_source" if not include_dart_demand_audit
-                    else ("audit_only_dart_nonstandard_source" if demand.get("institutional_demand_ratio") is not None
-                          else ("dart_demand_candidate_not_found" if not demand_candidates else "needs_review_missing_demand_value"))
+                    "verified_dart_final_terms_aggregate"
+                    if verified_demand.get("institutional_demand_ratio") is not None
+                    else "dart_final_terms_value_not_found"
                 ),
                 "lockup_validation_status": (
-                    "not_collected_dart_demand_audit_disabled" if not include_dart_demand_audit
-                    else ("audit_only_dart_nonstandard_source" if any(
-                        demand.get(field) is not None for field in (
+                    "verified_dart_final_terms_aggregate"
+                    if any(
+                        verified_demand.get(field) is not None for field in (
                             "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
                         )
-                    ) else ("dart_demand_candidate_not_found" if not demand_candidates else "needs_review_missing_demand_value"))
+                    ) else "dart_final_terms_value_not_found"
                 ),
                 **offering,
                 # 이 행은 현재 KRX 상장 이벤트에 맞춰 수집한 공시다. 원문에
                 # 기재된 상장예정일은 별도 보존하고, 병합 키는 실제 상장일을 쓴다.
                 "disclosed_listing_date": offering.get("listing_date"),
                 "listing_date": listing.listing_date,
-                # DART 수요예측 문서 파싱은 원천 적합성 감사로만 보관한다. DART가
-                # 기관 경쟁률·확약의 표준 원천임이 검증되기 전에는 모델 원시 행에
-                # 값을 복사하지 않아, 감사 옵션이 학습 입력을 우회하지 못하게 한다.
+                **verified_demand,
                 **{key: value for key, value in retail_result.items() if key != "corp_code"},
-                **self._compare_offering_sources(offering, demand),
+                **self._compare_offering_sources(offering, verified_demand),
                 "financial_as_of_year": financial_summary.get("financial_as_of_year"),
                 "financial_time_validation_status": financial_time_validation_status,
                 **financial_model_values,

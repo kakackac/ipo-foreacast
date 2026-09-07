@@ -656,7 +656,22 @@ class DARTCollector:
           - 주관사명
           - 최대주주 보호예수 기간
         """
-        return self._parse_offering_html(self.get_document_text(rcept_no), rcept_no)
+        # 최종 발행조건 신고서에는 공모 구조뿐 아니라 대표주관사가 취합한
+        # 기관 수요예측·의무보유확약 표가 함께 실릴 수 있다. 원문을 한 번만
+        # 내려받아 두 파서를 적용해, 같은 접수번호의 통합 결과인지 검증한다.
+        document_text = self.get_document_text(rcept_no)
+        result = self._parse_offering_html(document_text, rcept_no)
+        demand = self._parse_demand_forecast_html(document_text, "")
+        result.update({
+            key: value
+            for key, value in demand.items()
+            if key not in {"corp_code", "parse_success"}
+        })
+        # 공모 구조와 수요예측은 같은 원문을 읽지만, 어느 한쪽이 없다고 다른
+        # 쪽의 파싱 성공 상태를 덮어쓰면 안 된다.
+        result["dart_final_terms_demand_parse_success"] = demand["parse_success"]
+        result["dart_final_terms_demand_parser_version"] = 1
+        return result
 
     def _parse_offering_html(self, html: str, rcept_no: str) -> dict:
         """공모 정보 HTML 파싱"""
@@ -998,7 +1013,14 @@ class DARTCollector:
 
     @staticmethod
     def _split_sentences(text: str) -> list[str]:
-        return [sentence.strip() for sentence in re.split(r"(?<=[.!?。;])", text) if sentence.strip()]
+        # 기관 수요예측 경쟁률은 `850.00 : 1`처럼 소수점을 자주 포함한다.
+        # 숫자 사이의 `.`를 문장 끝으로 분리하면 경쟁률과 `: 1`이 갈라져
+        # 실제 DART 원문 값을 놓치므로, 숫자 뒤 마침표는 보존한다.
+        return [
+            sentence.strip()
+            for sentence in re.split(r"[!?。;]|(?<!\d)\.", text)
+            if sentence.strip()
+        ]
 
     @staticmethod
     def _extract_direct_price_with_currency(context: str) -> Optional[int]:

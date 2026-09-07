@@ -136,7 +136,9 @@ class FeatureEngineer:
             "price_failure_reason", "price_target_validation_status",
             "rcept_no", "corp_code", "feature_available_at", "event_source_url",
             "verification_status", "lineage_validation_status",
-            "demand_rcept_no", "institutional_available_at", "lockup_available_at",
+            "demand_rcept_no", "institutional_rcept_no", "lockup_rcept_no",
+            "institutional_available_at", "lockup_available_at",
+            "institutional_source_url", "lockup_source_url",
             "institutional_validation_status", "lockup_validation_status",
         ]
         for column in identity_columns:
@@ -218,6 +220,8 @@ class FeatureEngineer:
             "demand_rcept_no": ["demand_rcept_no", "demand_rcept_no_dart"],
             "institutional_available_at": ["institutional_available_at", "institutional_available_at_dart"],
             "lockup_available_at": ["lockup_available_at", "lockup_available_at_dart"],
+            "institutional_source_url": ["institutional_source_url", "institutional_source_url_dart"],
+            "lockup_source_url": ["lockup_source_url", "lockup_source_url_dart"],
             "institutional_validation_status": [
                 "institutional_validation_status", "institutional_validation_status_dart",
             ],
@@ -772,10 +776,14 @@ class FeatureEngineer:
                     source_ref = values.get("event_source_url")
                     available_at = pd.NA
                 if feature_name == "institutional_demand_ratio":
-                    source_ref = first_present("institutional_rcept_no", "demand_rcept_no")
+                    source_ref = first_present(
+                        "institutional_source_url", "institutional_rcept_no", "demand_rcept_no"
+                    )
                     available_at = values.get("institutional_available_at")
                 if feature_name.startswith("lockup_"):
-                    source_ref = first_present("lockup_rcept_no", "demand_rcept_no")
+                    source_ref = first_present(
+                        "lockup_source_url", "lockup_rcept_no", "demand_rcept_no"
+                    )
                     available_at = values.get("lockup_available_at")
                 if feature_name in {"offering_price_band_position", "band_exceeded"}:
                     source_ref = first_present("price_band_rcept_no", "rcept_no")
@@ -820,6 +828,7 @@ class FeatureEngineer:
                     "human_review_required": bool(missing or validation not in {
                         "verified_currency_unit", "verified_text_and_structured",
                         "verified_structured_api", "manual_verified",
+                        "verified_dart_final_terms_aggregate",
                         "official_source_krx_code_enriched", "official_source_collected",
                     }),
                 })
