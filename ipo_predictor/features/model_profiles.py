@@ -10,6 +10,14 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from features.source_contracts import (
+    APPROVED_INSTITUTIONAL_DEMAND_STATUSES,
+    APPROVED_LOCKUP_STATUSES,
+    APPROVED_OFFERING_STRUCTURE_STATUSES,
+    APPROVED_PUBLIC_FLOAT_STATUSES,
+    APPROVED_UNDERWRITER_TIER_STATUSES,
+)
+
 
 @dataclass(frozen=True)
 class PredictionProfile:
@@ -26,7 +34,7 @@ MODEL_PROFILES = {
         feature_names=(
             "kospi_momentum_5d", "kospi_momentum_20d", "recent_ipo_avg_return_sector",
             "recent_ipo_avg_return_all", "float_share_ratio", "secondary_offering_ratio",
-            "major_shareholder_lockup_months", "same_day_ipo_count", "risk_factor_count",
+            "major_shareholder_lockup_months", "risk_factor_count",
             "underwriter_tier", "offering_type_spac_ipo",
         ),
         critical_features=("float_share_ratio", "secondary_offering_ratio", "underwriter_tier"),
@@ -60,13 +68,25 @@ VERIFIED_OFFERING_PRICE_STATUSES = frozenset({
 })
 
 FEATURE_SOURCE_APPROVAL = {
+    "float_share_ratio": (
+        "float_share_validation_status",
+        APPROVED_PUBLIC_FLOAT_STATUSES,
+    ),
+    "secondary_offering_ratio": (
+        "offering_structure_validation_status",
+        APPROVED_OFFERING_STRUCTURE_STATUSES,
+    ),
+    "underwriter_tier": (
+        "underwriter_validation_status",
+        APPROVED_UNDERWRITER_TIER_STATUSES,
+    ),
     "institutional_demand_ratio": (
         "institutional_validation_status",
-        frozenset({"verified_dart_structural_aggregate_v1", "verified_official_underwriter_aggregate_bundle"}),
+        APPROVED_INSTITUTIONAL_DEMAND_STATUSES,
     ),
     "lockup_commitment_ratio": (
         "lockup_validation_status",
-        frozenset({"verified_dart_structural_aggregate_v1", "verified_official_underwriter_aggregate_bundle"}),
+        APPROVED_LOCKUP_STATUSES,
     ),
 }
 
@@ -90,6 +110,9 @@ def build_stage_dataset(
 
     frame["prediction_stage"] = profile.name
     frame["stage_features_complete"] = frame[list(profile.feature_names)].notna().all(axis=1)
+    frame["stage_critical_features_complete"] = frame[
+        list(profile.critical_features)
+    ].notna().all(axis=1)
     price_status = frame.get(
         "offering_price_review_status", pd.Series("missing", index=frame.index)
     ).fillna("missing").astype(str)
@@ -104,13 +127,7 @@ def build_stage_dataset(
 
     frame["stage_time_valid"] = _stage_time_valid(frame, profile, feature_time_audit)
     frame["stage_source_valid"] = stage_source_valid(frame, profile)
-    frame["stage_model_candidate"] = (
-        frame["stage_features_complete"]
-        & frame["stage_offering_price_verified"]
-        & frame["stage_dual_target_ready"]
-        & frame["stage_time_valid"]
-        & frame["stage_source_valid"]
-    )
+    frame["stage_model_candidate"] = stage_model_candidate_mask(frame, profile)
     return frame
 
 
@@ -130,6 +147,28 @@ def stage_source_valid(features: pd.DataFrame, profile: PredictionProfile) -> pd
     return valid
 
 
+def stage_model_candidate_mask(features: pd.DataFrame, profile: PredictionProfile) -> pd.Series:
+    """현재 계약으로 학습 후보를 다시 계산한다.
+
+    선택 피처 결측은 훈련 구간에서만 보정하므로 모든 피처의 완비를 요구하지
+    않는다. 대신 단계별 핵심 피처, 공모가, 두 타깃, 공개시각, 원천 승인을
+    모두 요구한다. 저장된 과거 ``stage_model_candidate`` 값은 사용하지 않는다.
+    """
+    required_columns = {
+        "stage_offering_price_verified", "stage_dual_target_ready", "stage_time_valid",
+    }
+    if not required_columns.issubset(features.columns):
+        return pd.Series(False, index=features.index, dtype=bool)
+    critical_complete = features.reindex(columns=profile.critical_features).notna().all(axis=1)
+    return (
+        critical_complete
+        & features["stage_offering_price_verified"].fillna(False).astype(bool)
+        & features["stage_dual_target_ready"].fillna(False).astype(bool)
+        & features["stage_time_valid"].fillna(False).astype(bool)
+        & stage_source_valid(features, profile)
+    ).astype(bool)
+
+
 def _stage_time_valid(
     features: pd.DataFrame, profile: PredictionProfile, feature_time_audit: pd.DataFrame | None
 ) -> pd.Series:
@@ -147,7 +186,7 @@ def _stage_time_valid(
         return valid
     status = observed.get("time_validation_status", pd.Series("", index=observed.index)).astype(str)
     invalid_event_ids = set(
-        observed.loc[status != "pre_listing_or_same_day", "event_id"].dropna().astype(str)
+        observed.loc[status != "pre_listing_verified", "event_id"].dropna().astype(str)
     )
     # 피처가 실제로 채워졌는데 그 피처의 관측 원장이 없으면 검증할 수 없으므로 차단한다.
     observed_pairs = set(zip(observed["event_id"].astype(str), observed["feature_name"].astype(str)))
@@ -179,6 +218,7 @@ def stage_readiness_by_offering_type(dataset: pd.DataFrame) -> list[dict[str, ob
             "verified_offering_price_rows": int(group["stage_offering_price_verified"].sum()),
             "dual_target_rows": int(group["stage_dual_target_ready"].sum()),
             "feature_complete_rows": int(group["stage_features_complete"].sum()),
+            "critical_feature_complete_rows": int(group["stage_critical_features_complete"].sum()),
             "time_valid_rows": int(group["stage_time_valid"].sum()),
             "source_valid_rows": int(group["stage_source_valid"].sum()),
             "model_candidate_rows": int(group["stage_model_candidate"].sum()),

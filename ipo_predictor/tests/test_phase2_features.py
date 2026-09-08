@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,6 +42,54 @@ class Phase2FeatureTests(unittest.TestCase):
 
         self.assertAlmostEqual(result.loc[0, "open_return_pct"], 20.0)
         self.assertAlmostEqual(result.loc[0, "close_return_pct"], 10.0)
+
+    def test_market_momentum_records_the_last_pre_listing_market_date(self):
+        engineer = FeatureEngineer(feature_set="phase2")
+        index = pd.DataFrame({
+            "date": pd.date_range("2024-01-01", periods=30, freq="D"),
+            "close": range(100, 130),
+        })
+        listing = pd.DataFrame({"listing_date": [pd.Timestamp("2024-01-25")]})
+
+        result = engineer._calc_market_momentum(listing, index, "kospi")
+
+        self.assertEqual(
+            result.loc[0, "kospi_momentum_5d_available_at"], pd.Timestamp("2024-01-24")
+        )
+        self.assertLess(
+            result.loc[0, "kospi_momentum_20d_available_at"], result.loc[0, "listing_date"]
+        )
+
+    def test_feature_observation_does_not_inherit_offering_price_approval(self):
+        engineer = FeatureEngineer(feature_set="phase2")
+        features = pd.DataFrame({
+            "event_id": ["event-1"],
+            "corp_name": ["테스트"],
+            "listing_date": [pd.Timestamp("2024-01-10")],
+            "feature_available_at": [pd.Timestamp("2024-01-02")],
+            "offering_price_review_status": ["verified_currency_unit"],
+            "float_share_ratio": [0.25],
+            "kospi_momentum_5d": [0.03],
+            "kospi_momentum_5d_available_at": [pd.Timestamp("2024-01-09")],
+        })
+        for feature_name in engineer.feature_names:
+            if feature_name not in features:
+                features[feature_name] = pd.NA
+
+        observations = engineer.build_feature_observations(features)
+        float_row = observations.loc[
+            observations["feature_name"].eq("float_share_ratio")
+        ].iloc[0]
+        market_row = observations.loc[
+            observations["feature_name"].eq("kospi_momentum_5d")
+        ].iloc[0]
+
+        self.assertEqual(float_row["validation_status"], "needs_review")
+        self.assertTrue(float_row["human_review_required"])
+        self.assertEqual(
+            market_row["validation_status"], "verified_pre_listing_market_derivation_v1"
+        )
+        self.assertFalse(market_row["human_review_required"])
 
     def test_unverified_krx_listing_price_is_not_used_as_target(self):
         df = pd.DataFrame(
@@ -92,6 +141,50 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertTrue(pd.isna(result.loc[0, "float_share_ratio"]))
         self.assertEqual(result.loc[1, "float_share_ratio"], 0.3)
         self.assertEqual(result.loc[2, "float_share_ratio"], 0.42)
+
+    def test_offering_share_counts_require_direct_structural_rows(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            """
+            <table>
+              <tr><th>신주모집 주식수</th><td>1,000,000주</td></tr>
+              <tr><th>구주매출 주식수</th><td>250,000주</td></tr>
+              <tr><th>상장 후 총 발행주식수</th><td>5,000,000주</td></tr>
+            </table>
+            """,
+            "20250101000008",
+        )
+
+        self.assertEqual(parsed["new_shares"], 1_000_000)
+        self.assertEqual(parsed["secondary_shares"], 250_000)
+        self.assertEqual(parsed["new_shares_parser_validation_status"], "structurally_verified")
+        self.assertEqual(
+            parsed["secondary_shares_parser_validation_status"], "structurally_verified"
+        )
+        self.assertEqual(parsed["new_shares_parse_method"], "direct_table_row_v1")
+        self.assertEqual(parsed["total_post_listing_shares"], 5_000_000)
+        self.assertEqual(
+            parsed["total_post_listing_shares_parser_validation_status"],
+            "structurally_verified",
+        )
+
+    def test_offering_share_counts_reject_wide_nearby_number_search(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "신주모집에 관한 설명입니다. 다른 항목의 수량은 999,999주입니다.",
+            "20250101000009",
+        )
+
+        self.assertIsNone(parsed["new_shares"])
+        self.assertEqual(parsed["new_shares_parser_validation_status"], "value_not_found")
+
+    def test_share_dash_is_missing_but_explicit_zero_is_zero(self):
+        collector = DARTCollector(api_key="test")
+        for cell, expected in [("-", None), ("", None), ("0주", 0)]:
+            with self.subTest(cell=cell):
+                parsed = collector._parse_offering_html(
+                    f"<table><tr><th>구주매출</th><td>{cell}</td></tr></table>",
+                    "20250101000010",
+                )
+                self.assertEqual(parsed["secondary_shares"], expected)
 
     def test_period_details_do_not_create_a_model_lockup_feature_without_total(self):
         result = FeatureEngineer()._normalize_lockup_commitment(pd.DataFrame({
@@ -146,10 +239,13 @@ class Phase2FeatureTests(unittest.TestCase):
                 features[feature_name] = 1.0
         features["institutional_validation_status"] = "verified_dart_structural_aggregate_v1"
         features["lockup_validation_status"] = "verified_dart_structural_aggregate_v1"
+        features["float_share_validation_status"] = "verified_dart_public_float_direct_v1"
+        features["offering_structure_validation_status"] = "verified_dart_offering_structure_v1"
+        features["underwriter_validation_status"] = "verified_krx_underwriter_registry_mapping_v1"
         audit = pd.DataFrame([
             {
                 "event_id": event_id, "feature_name": feature_name,
-                "is_missing": False, "time_validation_status": "pre_listing_or_same_day",
+                "is_missing": False, "time_validation_status": "pre_listing_verified",
             }
             for event_id in features["event_id"]
             for feature_name in set().union(*(p.feature_names for p in (
@@ -178,7 +274,7 @@ class Phase2FeatureTests(unittest.TestCase):
             features[feature_name] = 1.0
         audit = pd.DataFrame([
             {"event_id": "legacy", "feature_name": feature_name, "is_missing": False,
-             "time_validation_status": "pre_listing_or_same_day"}
+             "time_validation_status": "pre_listing_verified"}
             for feature_name in profile.feature_names
         ])
 
@@ -186,6 +282,129 @@ class Phase2FeatureTests(unittest.TestCase):
 
         self.assertFalse(dataset.loc[0, "stage_source_valid"])
         self.assertFalse(dataset.loc[0, "stage_model_candidate"])
+
+    def test_stage_dataset_accepts_current_official_underwriter_contract(self):
+        profile = get_model_profile("post_demand")
+        features = pd.DataFrame({
+            "event_id": ["official"], "event_class": ["general_ipo"],
+            "offering_price_review_status": ["verified_currency_unit"],
+            "open_return_pct": [10.0], "close_return_pct": [8.0],
+            "institutional_validation_status": ["verified_official_underwriter_aggregate_v1"],
+            "lockup_validation_status": ["verified_official_underwriter_aggregate_v1"],
+        })
+        for feature_name in profile.feature_names:
+            features[feature_name] = 1.0
+        audit = pd.DataFrame([
+            {"event_id": "official", "feature_name": feature_name, "is_missing": False,
+             "time_validation_status": "pre_listing_verified"}
+            for feature_name in profile.feature_names
+        ])
+
+        dataset = build_stage_dataset(features, "post_demand", audit)
+
+        self.assertTrue(dataset.loc[0, "stage_source_valid"])
+        self.assertTrue(dataset.loc[0, "stage_model_candidate"])
+
+    def test_stage_dataset_allows_optional_missing_values_for_train_only_imputation(self):
+        profile = get_model_profile("post_demand")
+        features = pd.DataFrame({
+            "event_id": ["optional-missing"], "event_class": ["general_ipo"],
+            "offering_price_review_status": ["verified_currency_unit"],
+            "open_return_pct": [10.0], "close_return_pct": [8.0],
+            "institutional_validation_status": ["verified_dart_structural_aggregate_v1"],
+            "lockup_validation_status": ["dart_aggregate_value_not_verified"],
+        })
+        for feature_name in profile.feature_names:
+            features[feature_name] = 1.0
+        features["lockup_commitment_ratio"] = pd.NA
+        audit = pd.DataFrame([
+            {"event_id": "optional-missing", "feature_name": feature_name,
+             "is_missing": feature_name == "lockup_commitment_ratio",
+             "time_validation_status": "pre_listing_verified"}
+            for feature_name in profile.feature_names
+        ])
+
+        dataset = build_stage_dataset(features, "post_demand", audit)
+
+        self.assertFalse(dataset.loc[0, "stage_features_complete"])
+        self.assertTrue(dataset.loc[0, "stage_critical_features_complete"])
+        self.assertTrue(dataset.loc[0, "stage_source_valid"])
+        self.assertTrue(dataset.loc[0, "stage_model_candidate"])
+
+    def test_pre_demand_profile_excludes_same_day_count_without_publication_timestamp(self):
+        self.assertNotIn("same_day_ipo_count", get_model_profile("pre_demand").feature_names)
+
+    def test_pre_demand_blocks_unverified_supply_structure_values(self):
+        profile = get_model_profile("pre_demand")
+        features = pd.DataFrame({
+            "event_id": ["legacy-supply"],
+            "offering_price_review_status": ["verified_currency_unit"],
+            "open_return_pct": [10.0], "close_return_pct": [8.0],
+            "float_share_validation_status": ["public_float_not_structurally_verified"],
+            "offering_structure_validation_status": [
+                "offering_structure_not_structurally_verified"
+            ],
+            "underwriter_validation_status": [
+                "verified_krx_underwriter_registry_mapping_v1"
+            ],
+        })
+        for feature_name in profile.feature_names:
+            features[feature_name] = 1.0
+        audit = pd.DataFrame([
+            {"event_id": "legacy-supply", "feature_name": feature_name,
+             "is_missing": False, "time_validation_status": "pre_listing_verified"}
+            for feature_name in profile.feature_names
+        ])
+
+        dataset = build_stage_dataset(features, "pre_demand", audit)
+
+        self.assertFalse(dataset.loc[0, "stage_source_valid"])
+        self.assertFalse(dataset.loc[0, "stage_model_candidate"])
+
+    def test_training_readiness_recomputes_stale_stage_candidate_flag(self):
+        profile = get_model_profile("post_demand")
+        rows = []
+        for index in range(100):
+            row = {
+                "event_id": f"event-{index}", "event_class": "general_ipo",
+                "listing_date": pd.Timestamp("2020-01-01") + pd.Timedelta(days=index * 15),
+                "offering_price_review_status": "verified_currency_unit",
+                "price_target_validation_status": "official_price_verified",
+                "open_return_pct": 10.0, "close_return_pct": 8.0,
+                "institutional_validation_status": "verified_dart_structural_aggregate_v1",
+                "lockup_validation_status": "verified_dart_structural_aggregate_v1",
+                "stage_offering_price_verified": True, "stage_dual_target_ready": True,
+                "stage_time_valid": True, "stage_model_candidate": False,
+            }
+            row.update({feature: 1.0 for feature in profile.feature_names})
+            rows.append(row)
+
+        readiness = assess_training_readiness(pd.DataFrame(rows), prediction_stage="post_demand")
+
+        self.assertEqual(readiness["current_contract_model_candidate_rows"], 100)
+
+    def test_underwriter_tier_keeps_unknown_and_blank_values_missing(self):
+        self.assertTrue(pd.isna(FeatureEngineer._map_underwriter_tier("")))
+        self.assertTrue(pd.isna(FeatureEngineer._map_underwriter_tier("알수없는증권사")))
+        self.assertEqual(FeatureEngineer._map_underwriter_tier("엔에이치투자증권(주)"), 1)
+        self.assertEqual(FeatureEngineer._map_underwriter_tier("상상인증권(주)"), 3)
+
+    def test_merge_prefers_kind_underwriter_over_dart_text_candidate(self):
+        engineer = FeatureEngineer(feature_set="core")
+        dart = pd.DataFrame({
+            "corp_name": ["테스트"], "listing_date": ["2024-01-10"],
+            "lead_underwriter": ["는 기관투자자가 참여하는 경우 증권"],
+        })
+        krx = pd.DataFrame({
+            "corp_name": ["테스트"], "listing_date": ["2024-01-10"],
+            "lead_underwriter": ["한국투자증권(주)"],
+        })
+
+        merged = engineer._merge_base(dart, krx)
+        ranked = engineer._calc_underwriter_tier(merged)
+
+        self.assertEqual(ranked.loc[0, "lead_underwriter"], "한국투자증권(주)")
+        self.assertEqual(ranked.loc[0, "underwriter_tier"], 1)
 
     def test_merge_excludes_market_transfer_with_different_listing_date(self):
         dart = pd.DataFrame({
@@ -378,6 +597,13 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(parsed["institutional_demand_rule_id"], "DART_DEMAND_TOTAL_COLUMN_V1")
         self.assertIn('"selected_column": 3', parsed["institutional_demand_structured_evidence"])
 
+    def test_structured_table_evidence_is_complete_valid_json(self):
+        evidence = DARTCollector._table_evidence([["x" * 13_000]], selected_row=0)
+
+        decoded = json.loads(evidence)
+        self.assertEqual(len(decoded["table"][0][0]), 13_000)
+        self.assertEqual(decoded["selected_row"], 0)
+
     def test_demand_forecast_rejects_multiple_ratios_without_explicit_total_header(self):
         parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
             "<table><tr><th>기관투자자 경쟁률</th><td>18.40 : 1</td><td>329.47 : 1</td></tr></table>",
@@ -490,6 +716,7 @@ class Phase2FeatureTests(unittest.TestCase):
         X = df[feature_names]
         y = pd.Series([5.0] * len(df))
         model = IPOPriceModel(n_estimators=5, max_depth=1)
+        model.imputation_values = {"institutional_demand_ratio": 700.0}
         model.fit(X, y)
 
         original_model_dir = gradient_boost_model.MODEL_DIR
@@ -504,6 +731,7 @@ class Phase2FeatureTests(unittest.TestCase):
 
         self.assertEqual(len(prediction), 1)
         self.assertEqual(float(prediction.iloc[0]["up_probability"]), 0.8)
+        self.assertEqual(loaded.imputation_values["institutional_demand_ratio"], 700.0)
 
     def test_blank_offering_type_uses_event_class_fallback(self):
         frame = pd.DataFrame({

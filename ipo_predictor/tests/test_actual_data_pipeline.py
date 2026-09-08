@@ -81,7 +81,7 @@ class _FakeKRX:
             "listing_date": pd.Timestamp("2024-05-10"), "market": "KOSDAQ",
             "security_type": "주권", "stock_type": None, "listing_type": "신규상장",
             "offering_price": 12000, "offering_shares": 1_000_000,
-            "lead_underwriter": "테스트증권", "industry_name": "소프트웨어",
+            "lead_underwriter": "한국투자증권(주)", "industry_name": "소프트웨어",
             "industry_code": None, "country": "대한민국", "face_value": 500,
             "offering_amount": 12_000_000, "event_class": "general_ipo",
             "classification_reason": "test", "classification_confidence": "high",
@@ -423,7 +423,7 @@ class ActualDataPipelineTests(unittest.TestCase):
                 "dart_aggregate_value_not_verified",
             )
 
-    def test_offering_parser_v4_reparses_v3_cached_float_value(self):
+    def test_offering_parser_v5_reparses_v3_cached_float_value(self):
         class VersionedOfferingDART(_FakeDART):
             def __init__(self):
                 self.offering_calls = 0
@@ -455,7 +455,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             cache = pd.read_parquet(raw_dir / "dart_offering_document_cache.parquet")
             latest = cache.loc[cache["rcept_no"] == "20240101000001"].iloc[-1]
             self.assertEqual(dart.offering_calls, 1)
-            self.assertEqual(latest["offering_price_parser_version"], 4)
+            self.assertEqual(latest["offering_price_parser_version"], 5)
             self.assertEqual(latest["dart_final_terms_demand_parser_version"], 5)
             self.assertNotEqual(latest["public_float_shares"], 999_999)
 
@@ -640,6 +640,17 @@ class ActualDataPipelineTests(unittest.TestCase):
         self.assertEqual(audit["is_future_information"].tolist(), [False, True])
         self.assertEqual(audit.loc[1, "time_validation_status"], "future_information_blocked")
 
+    def test_feature_time_audit_blocks_same_day_when_publication_time_is_unknown(self):
+        features = pd.DataFrame({
+            "event_id": ["same-day"], "corp_name": ["당일"],
+            "listing_date": ["2024-01-10"], "feature_available_at": ["2024-01-10"],
+        })
+
+        audit = HistoricalIPOPipeline._build_feature_time_audit(features)
+
+        self.assertTrue(audit.loc[0, "is_future_information"])
+        self.assertEqual(audit.loc[0, "time_validation_status"], "future_information_blocked")
+
     def test_demand_document_014_is_cached_for_the_retry_window(self):
         class DemandZipMissingDART(_FakeDART):
             demand_calls = 0
@@ -759,6 +770,10 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertEqual(raw.loc[0, "lockup_rcept_no"], "20240214000001")
             self.assertEqual(raw.loc[0, "institutional_validation_status"], "verified_dart_structural_aggregate_v1")
             self.assertEqual(raw.loc[0, "lockup_validation_status"], "verified_dart_structural_aggregate_v1")
+            self.assertEqual(raw.loc[0, "institutional_demand_rule_id"], "DART_DEMAND_DIRECT_LABEL_V1")
+            self.assertEqual(raw.loc[0, "lockup_rule_id"], "DART_LOCKUP_DIRECT_AGGREGATE_V1")
+            self.assertEqual(raw.loc[0, "institutional_demand_parser_validation_status"], "structurally_verified")
+            self.assertEqual(raw.loc[0, "lockup_parser_validation_status"], "structurally_verified")
 
     def test_manual_price_override_promotes_audited_record_for_training(self):
         with tempfile.TemporaryDirectory() as temp_dir:

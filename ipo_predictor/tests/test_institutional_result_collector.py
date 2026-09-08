@@ -115,7 +115,11 @@ class OfficialInstitutionalResultCollectorTests(unittest.TestCase):
         self.assertEqual(merged.loc[0, "lockup_commitment_ratio"], 1.0)
         self.assertEqual(
             merged.loc[0, "institutional_validation_status"],
-            "verified_official_underwriter_institutional",
+            "verified_official_underwriter_aggregate_v1",
+        )
+        self.assertEqual(
+            merged.loc[0, "lockup_validation_status"],
+            "verified_official_underwriter_aggregate_v1",
         )
 
     def test_pipeline_uses_separately_verified_official_documents_for_each_field(self):
@@ -146,6 +150,14 @@ class OfficialInstitutionalResultCollectorTests(unittest.TestCase):
         self.assertEqual(merged.loc[0, "lockup_commitment_ratio"], 0.25)
         self.assertEqual(merged.loc[0, "institutional_source_url"], "https://www.kbsec.com/notice/demand")
         self.assertEqual(merged.loc[0, "lockup_source_url"], "https://www.kbsec.com/notice/lockup")
+        self.assertEqual(
+            merged.loc[0, "institutional_validation_status"],
+            "verified_official_underwriter_aggregate_v1",
+        )
+        self.assertEqual(
+            merged.loc[0, "lockup_validation_status"],
+            "verified_official_underwriter_aggregate_v1",
+        )
 
     def test_dart_selector_never_combines_partial_values_from_two_receipts(self):
         first_final = pd.Series({"rcept_no": "20260101000001", "rcept_dt": "2026-01-01", "is_final_conditions": True})
@@ -173,6 +185,25 @@ class OfficialInstitutionalResultCollectorTests(unittest.TestCase):
         self.assertEqual(values, {})
         self.assertIsNone(metadata["institutional_rcept_no"])
         self.assertIsNone(metadata["lockup_rcept_no"])
+
+    def test_final_terms_selector_rejects_a_different_offering_price(self):
+        filing = pd.Series({
+            "rcept_no": "20260101000001", "rcept_dt": "2026-01-01",
+            "is_final_conditions": True,
+        })
+        document = {
+            "dart_final_terms_demand_parser_version": 5,
+            "offering_price": 10_000,
+            "institutional_demand_ratio": 850.0,
+            "institutional_demand_parser_validation_status": "structurally_verified",
+            "institutional_demand_rule_id": "DART_DEMAND_DIRECT_LABEL_V1",
+        }
+
+        values, _ = HistoricalIPOPipeline._select_dart_final_terms_demand(
+            [(filing, document)], expected_offering_price=12_000
+        )
+
+        self.assertEqual(values, {})
 
 
 if __name__ == "__main__":

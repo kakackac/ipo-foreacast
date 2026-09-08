@@ -66,6 +66,7 @@ class IPOPriceModel:
         self.classifier = GradientBoostingClassifier(**self.params)
 
         self.feature_names: list[str] = []
+        self.imputation_values: dict[str, float] = {}
         self.calibration_errors: np.ndarray = np.array([])  # Conformal Prediction용
         self._classifier_fallback = False
         self._fitted = False
@@ -277,6 +278,7 @@ class IPOPriceModel:
             "classifier":          self.classifier,
             "classifier_fallback": self._classifier_fallback,
             "feature_names":       self.feature_names,
+            "imputation_values":   self.imputation_values,
             "calibration_errors":  self.calibration_errors,
         }
         with open(path, "wb") as f:
@@ -290,6 +292,7 @@ class IPOPriceModel:
                 "name":          name,
                 "params":        self.params,
                 "feature_names": self.feature_names,
+                "imputation_values": self.imputation_values,
                 "n_features":    len(self.feature_names),
             }, f, indent=2, ensure_ascii=False)
         return path
@@ -305,6 +308,7 @@ class IPOPriceModel:
         model.classifier         = payload["classifier"]
         model._classifier_fallback = payload.get("classifier_fallback", False)
         model.feature_names      = payload["feature_names"]
+        model.imputation_values  = payload.get("imputation_values", {})
         model.calibration_errors = payload["calibration_errors"]
         model._fitted = True
         logger.info("모델 로드: %s (%d features)", name, len(model.feature_names))

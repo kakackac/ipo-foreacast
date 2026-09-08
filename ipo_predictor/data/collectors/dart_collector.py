@@ -632,8 +632,17 @@ class DARTCollector:
             "offering_price_audit_context": None,
             "offering_price_range_warning": False,
             "new_shares":         None,
+            "new_shares_parse_method": None,
+            "new_shares_parse_evidence": None,
+            "new_shares_parser_validation_status": "value_not_found",
             "secondary_shares":   None,
+            "secondary_shares_parse_method": None,
+            "secondary_shares_parse_evidence": None,
+            "secondary_shares_parser_validation_status": "value_not_found",
             "total_post_listing_shares": None,
+            "total_post_listing_shares_parse_method": None,
+            "total_post_listing_shares_parse_evidence": None,
+            "total_post_listing_shares_parser_validation_status": "value_not_found",
             "public_float_shares": None,
             "public_float_ratio_disclosed": None,
             "public_float_parse_method": None,
@@ -662,13 +671,22 @@ class DARTCollector:
         )
         result.update(price_details)
 
-        # 공모 구조
-        result["new_shares"] = self._extract_share_after(text, "신주모집|신주발행|모집주식수")
-        result["secondary_shares"] = self._extract_share_after(text, "구주매출|매출주식수")
-        result["total_post_listing_shares"] = self._extract_share_after(
+        # 공모 구조는 표 행 또는 라벨과 수량이 직접 연결된 문구만 승인한다.
+        # 라벨 뒤 120자를 탐색하던 기존 규칙은 다른 표의 숫자를
+        # 신주·구주 수량으로 오인할 수 있어 학습 승인에 사용하지 않는다.
+        tables = self._extract_table_cells(html)
+        result.update(self._extract_share_details(
+            tables, text, "new_shares", r"신주\s*(?:모집|발행)(?:\s*주식수|\s*수량)?"
+        ))
+        result.update(self._extract_share_details(
+            tables, text, "secondary_shares", r"(?:구주\s*매출|매출\s*주식수)(?:\s*주식수|\s*수량)?"
+        ))
+        result.update(self._extract_share_details(
+            tables,
             text,
-            "상장예정주식수|상장\\s*예정\\s*주식수|상장\\s*후\\s*총\\s*발행주식수|발행주식총수",
-        )
+            "total_post_listing_shares",
+            r"(?:상장\s*예정\s*주식수|상장\s*후\s*총\s*발행주식수|발행\s*주식\s*총수)",
+        ))
         public_float = self._extract_public_float_details(text)
         result.update(public_float)
 
@@ -789,6 +807,60 @@ class DARTCollector:
             return None
         return DARTCollector._parse_int(m.group(1))
 
+    @classmethod
+    def _extract_share_details(
+        cls,
+        tables: list[list[list[str]]],
+        text: str,
+        field: str,
+        label_pattern: str,
+    ) -> dict:
+        """공모 주식 수량을 명시적인 표 행/문구에서만 추출한다."""
+        result = {
+            field: None,
+            f"{field}_parse_method": None,
+            f"{field}_parse_evidence": None,
+            f"{field}_parser_validation_status": "value_not_found",
+        }
+        value_pattern = re.compile(r"\s*([0-9][0-9,]*)\s*주\s*")
+        label = re.compile(label_pattern)
+
+        for table_index, table in enumerate(tables):
+            for row_index, row in enumerate(table):
+                for column_index, cell in enumerate(row):
+                    if not label.fullmatch(cell.strip()):
+                        continue
+                    candidates: list[tuple[int, int]] = []
+                    for value_column, candidate in enumerate(row[column_index + 1:], column_index + 1):
+                        match = value_pattern.fullmatch(candidate)
+                        if match:
+                            candidates.append((value_column, int(match.group(1).replace(",", ""))))
+                    if len(candidates) == 1:
+                        value_column, value = candidates[0]
+                        result.update({
+                            field: value,
+                            f"{field}_parse_method": "direct_table_row_v1",
+                            f"{field}_parse_evidence": cls._table_evidence(
+                                table, selected_row=row_index, label_column=column_index,
+                                value_column=value_column, table_index=table_index,
+                            ),
+                            f"{field}_parser_validation_status": "structurally_verified",
+                        })
+                        return result
+
+        direct = re.search(
+            rf"(?:{label_pattern})\s*(?:은|는|:|=)?\s*([0-9][0-9,]*)\s*주",
+            text,
+        )
+        if direct:
+            result.update({
+                field: int(direct.group(1).replace(",", "")),
+                f"{field}_parse_method": "direct_label_text_v1",
+                f"{field}_parse_evidence": direct.group(0),
+                f"{field}_parser_validation_status": "structurally_verified",
+            })
+        return result
+
     @staticmethod
     def _extract_table_rows(raw_html: str) -> list[str]:
         parser = _TableRowParser()
@@ -814,7 +886,9 @@ class DARTCollector:
     @staticmethod
     def _table_evidence(table: list[list[str]], **metadata) -> str:
         """재감사가 가능하도록 선택 셀과 주변 표 구조를 함께 직렬화한다."""
-        return json.dumps({"table": table, **metadata}, ensure_ascii=False)[:12000]
+        # 중간에서 자른 JSON은 감사 시 다시 읽을 수 없다. Parquet 원장에는
+        # 선택 좌표와 표 격자를 완전한 JSON으로 보존한다.
+        return json.dumps({"table": table, **metadata}, ensure_ascii=False)
 
     @classmethod
     def _extract_aggregate_demand_ratio(cls, table: list[list[str]]) -> Optional[dict]:

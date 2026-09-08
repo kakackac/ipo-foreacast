@@ -26,6 +26,13 @@ from features.definitions import (
     FEATURE_MAP, get_core_feature_names, get_phase2_feature_names,
     fill_na_strategy, FeatureGroup
 )
+from features.source_contracts import (
+    APPROVED_INSTITUTIONAL_DEMAND_STATUSES,
+    APPROVED_LOCKUP_STATUSES,
+    DART_OFFERING_STRUCTURE_STATUS,
+    DART_PUBLIC_FLOAT_STATUS,
+    KRX_UNDERWRITER_TIER_STATUS,
+)
 from config import FEATURE_CFG, PROC_DIR, RAW_DIR
 
 logger = logging.getLogger(__name__)
@@ -56,6 +63,28 @@ UNDERWRITER_TIER_2 = (
     "한화투자증권",
     "SK증권",
 )
+
+UNDERWRITER_TIER_3 = (
+    "BNK투자증권",
+    "다올투자증권",
+    "상상인증권",
+    "iM증권",
+    "LS증권",
+    "케이프투자증권",
+)
+
+UNDERWRITER_ALIASES = {
+    "엔에이치투자증권": "NH투자증권",
+    "케이비증권": "KB증권",
+    "케이비투자증권": "KB증권",
+    "아이비케이투자증권": "IBK투자증권",
+    "디비증권": "DB금융투자",
+    "DB증권": "DB금융투자",
+    "아이엠증권": "iM증권",
+    "엘에스증권": "LS증권",
+    "비엔케이투자증권": "BNK투자증권",
+    "대우증권": "미래에셋증권",
+}
 
 
 class FeatureEngineer:
@@ -140,10 +169,18 @@ class FeatureEngineer:
             "institutional_available_at", "lockup_available_at",
             "institutional_source_url", "lockup_source_url",
             "institutional_validation_status", "lockup_validation_status",
+            "underwriter_validation_status", "float_share_validation_status",
+            "offering_structure_validation_status",
             "institutional_data_contract_version",
             "institutional_demand_rule_id", "lockup_rule_id",
             "institutional_demand_parser_validation_status", "lockup_parser_validation_status",
             "institutional_demand_structured_evidence", "lockup_structured_evidence",
+            "kospi_momentum_5d_available_at", "kospi_momentum_20d_available_at",
+            "kosdaq_momentum_5d_available_at", "kosdaq_momentum_20d_available_at",
+            "recent_ipo_avg_return_sector_available_at",
+            "recent_ipo_avg_return_all_available_at",
+            "public_float_rcept_no", "public_float_rcept_dt",
+            "offering_structure_rcept_no", "offering_structure_rcept_dt",
         ]
         for column in identity_columns:
             if column not in df.columns:
@@ -208,7 +245,9 @@ class FeatureEngineer:
             "offering_type": ["offering_type_krx", "offering_type_dart", "offering_type"],
             "industry_name": ["industry_name_krx", "industry_name_dart", "industry_name"],
             "listing_segment": ["listing_segment_krx", "listing_segment_dart", "sector_krx", "sector"],
-            "lead_underwriter": ["lead_underwriter_dart", "lead_underwriter_krx", "lead_underwriter"],
+            # KIND의 공식 상장주선인 열을 우선한다. DART 평문 정규식은 본문
+            # 속 "...인 경우 증권"을 회사명으로 오인할 수 있다.
+            "lead_underwriter": ["lead_underwriter_krx", "lead_underwriter_dart", "lead_underwriter"],
             "market": ["market", "market_krx", "market_dart"],
             "event_source_url": ["source_url", "source_url_krx", "event_source_url"],
             "verification_status": ["verification_status", "verification_status_krx"],
@@ -346,6 +385,17 @@ class FeatureEngineer:
         df["secondary_offering_ratio"] = pd.to_numeric(
             df["secondary_offering_ratio"], errors="coerce"
         ).clip(0, 1)
+        new_status = df.get("new_shares_parser_validation_status", pd.Series("", index=df.index))
+        secondary_status = df.get(
+            "secondary_shares_parser_validation_status", pd.Series("", index=df.index)
+        )
+        df["offering_structure_validation_status"] = np.where(
+            df["secondary_offering_ratio"].notna()
+            & new_status.eq("structurally_verified")
+            & secondary_status.eq("structurally_verified"),
+            DART_OFFERING_STRUCTURE_STATUS,
+            "offering_structure_not_structurally_verified",
+        )
 
         if "float_share_ratio" not in df.columns:
             total_shares = df.get("total_post_listing_shares", pd.Series(np.nan, index=df.index))
@@ -365,6 +415,24 @@ class FeatureEngineer:
         df["float_share_ratio"] = pd.to_numeric(
             df["float_share_ratio"], errors="coerce"
         ).clip(0, 1)
+        float_method = df.get("public_float_parse_method", pd.Series("", index=df.index))
+        total_status = df.get(
+            "total_post_listing_shares_parser_validation_status",
+            pd.Series("", index=df.index),
+        )
+        structurally_verified_float = (
+            float_method.eq("disclosed_public_float_ratio_direct_context")
+            | (
+                float_method.eq("disclosed_public_float_shares_direct_context")
+                & total_status.eq("structurally_verified")
+            )
+        )
+        df["float_share_validation_status"] = np.where(
+            df["float_share_ratio"].notna()
+            & structurally_verified_float,
+            DART_PUBLIC_FLOAT_STATUS,
+            "public_float_not_structurally_verified",
+        )
         return df
 
     def _calc_same_day_ipo_count(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -389,6 +457,15 @@ class FeatureEngineer:
             df["underwriter_tier"] = pd.to_numeric(
                 df["underwriter_tier"], errors="coerce"
             ).clip(1, 3)
+            krx_underwriter = df.get(
+                "lead_underwriter_krx", pd.Series(index=df.index, dtype=object)
+            )
+            df["underwriter_validation_status"] = np.where(
+                df["underwriter_tier"].notna()
+                & krx_underwriter.fillna("").astype(str).str.strip().ne(""),
+                KRX_UNDERWRITER_TIER_STATUS,
+                "underwriter_not_verified_from_krx",
+            )
             return df
 
         name_col = next(
@@ -397,21 +474,35 @@ class FeatureEngineer:
         )
         if name_col is None:
             df["underwriter_tier"] = np.nan
+            df["underwriter_validation_status"] = "underwriter_source_missing"
             return df
 
         df["underwriter_tier"] = df[name_col].map(self._map_underwriter_tier)
+        krx_underwriter = df.get("lead_underwriter_krx", pd.Series(index=df.index, dtype=object))
+        df["underwriter_validation_status"] = np.where(
+            df["underwriter_tier"].notna()
+            & krx_underwriter.fillna("").astype(str).str.strip().ne(""),
+            KRX_UNDERWRITER_TIER_STATUS,
+            "underwriter_not_verified_from_krx",
+        )
         return df
 
     @staticmethod
     def _map_underwriter_tier(name: object) -> float:
-        if pd.isna(name):
+        if pd.isna(name) or not str(name).strip():
             return np.nan
-        normalized = re.sub(r"\s+", "", str(name))
-        if any(tier_name.replace(" ", "") in normalized for tier_name in UNDERWRITER_TIER_1):
+        # 공동주관사 목록은 첫 상장주선인을 기준으로 한다. 미등록 이름은
+        # 소형사로 추정하지 않고 결측으로 남긴다.
+        first = re.split(r"[,/]", str(name), maxsplit=1)[0]
+        normalized = re.sub(r"\s+|\(주\)|㈜|주식회사|\(구\)", "", first).strip()
+        normalized = UNDERWRITER_ALIASES.get(normalized, normalized)
+        if any(tier_name.replace(" ", "") == normalized for tier_name in UNDERWRITER_TIER_1):
             return 1
-        if any(tier_name.replace(" ", "") in normalized for tier_name in UNDERWRITER_TIER_2):
+        if any(tier_name.replace(" ", "") == normalized for tier_name in UNDERWRITER_TIER_2):
             return 2
-        return 3
+        if any(tier_name.replace(" ", "") == normalized for tier_name in UNDERWRITER_TIER_3):
+            return 3
+        return np.nan
 
     def _calc_risk_factor_count(self, df: pd.DataFrame) -> pd.DataFrame:
         """위험요소 텍스트가 있으면 항목 마커 수를 세고, 이미 있으면 숫자로 정리"""
@@ -460,6 +551,7 @@ class FeatureEngineer:
         for window in windows:
             col_name = f"{index_name}_momentum_{window}d"
             returns = []
+            available_dates = []
 
             for _, row in df.iterrows():
                 listing_dt = pd.to_datetime(row.get("listing_date"))
@@ -467,11 +559,14 @@ class FeatureEngineer:
                 past = closes[closes.index < listing_dt]
                 if len(past) > window:
                     ret = past.iloc[-1] / past.iloc[-1 - window] - 1
+                    available_dates.append(past.index[-1])
                 else:
                     ret = np.nan
+                    available_dates.append(pd.NaT)
                 returns.append(round(ret, 6))
 
             df[col_name] = returns
+            df[f"{col_name}_available_at"] = available_dates
             logger.debug("%s 모멘텀 %dd 계산 완료", index_name.upper(), window)
 
         return df
@@ -496,6 +591,8 @@ class FeatureEngineer:
 
         sector_temps = []
         all_temps    = []
+        sector_available_dates = []
+        all_available_dates = []
 
         for _, row in df.iterrows():
             # 같은 상장일의 다른 종목 수익률도 아직 장 마감 전에는 알 수 없으므로 제외한다.
@@ -505,18 +602,29 @@ class FeatureEngineer:
             past_valid = past["open_return_pct"].dropna()
             all_temp = past_valid.tail(n_all).mean() if len(past_valid) > 0 else np.nan
             all_temps.append(all_temp)
+            all_available_dates.append(
+                past.loc[past_valid.index, "listing_date"].max()
+                if len(past_valid) > 0 else pd.NaT
+            )
 
             # 섹터별
             if "industry_name" in df.columns:
                 sect = row.get("industry_name")
                 past_sect = past[past["industry_name"] == sect]["open_return_pct"].dropna()
                 sect_temp = past_sect.tail(n_sector).mean() if len(past_sect) > 0 else all_temp
+                sector_available_dates.append(
+                    past.loc[past_sect.index, "listing_date"].max()
+                    if len(past_sect) > 0 else all_available_dates[-1]
+                )
             else:
                 sect_temp = all_temp
+                sector_available_dates.append(all_available_dates[-1])
             sector_temps.append(sect_temp)
 
         df["recent_ipo_avg_return_sector"] = sector_temps
         df["recent_ipo_avg_return_all"]    = all_temps
+        df["recent_ipo_avg_return_sector_available_at"] = sector_available_dates
+        df["recent_ipo_avg_return_all_available_at"] = all_available_dates
         return df
 
     # ── 밸류에이션 피처 ───────────────────────────────────────
@@ -765,6 +873,16 @@ class FeatureEngineer:
                         "institutional_source_url", "institutional_rcept_no", "demand_rcept_no"
                     )
                     available_at = values.get("institutional_available_at")
+                if feature_name.startswith(("kospi_momentum_", "kosdaq_momentum_")):
+                    source = "KRX_OpenAPI_index_daily_close"
+                    available_at = values.get(f"{feature_name}_available_at")
+                    source_ref = "KRX_index_daily_close"
+                if feature_name in {
+                    "recent_ipo_avg_return_sector", "recent_ipo_avg_return_all",
+                }:
+                    source = "derived_verified_prior_IPO_targets"
+                    available_at = values.get(f"{feature_name}_available_at")
+                    source_ref = "verified_prior_IPO_targets"
                 if feature_name.startswith("lockup_"):
                     source_ref = first_present(
                         "lockup_source_url", "lockup_rcept_no", "demand_rcept_no"
@@ -777,26 +895,66 @@ class FeatureEngineer:
                     "float_share_ratio", "secondary_offering_ratio",
                     "major_shareholder_lockup_months", "risk_factor_count",
                 }:
-                    source_ref = first_present("offering_structure_rcept_no", "rcept_no")
-                    available_at = first_present("offering_structure_rcept_dt", "feature_available_at")
-                if source.startswith("KRX"):
+                    if feature_name == "float_share_ratio":
+                        source_ref = first_present(
+                            "public_float_rcept_no", "offering_structure_rcept_no", "rcept_no"
+                        )
+                        available_at = first_present(
+                            "public_float_rcept_dt", "offering_structure_rcept_dt",
+                            "feature_available_at",
+                        )
+                    else:
+                        source_ref = first_present("offering_structure_rcept_no", "rcept_no")
+                        available_at = first_present("offering_structure_rcept_dt", "feature_available_at")
+                if source.startswith("KRX") and not feature_name.startswith(
+                    ("kospi_momentum_", "kosdaq_momentum_")
+                ):
                     event_source_url = values.get("event_source_url")
                     source_ref = (
                         event_source_url if pd.notna(event_source_url)
                         else "KRX_KIND_new_listing_company"
                     )
-                validation = values.get("offering_price_review_status")
+                # 검증 상태는 해당 피처의 원천·파생 규칙에서만 결정한다.
+                # 확정 공모가가 검증됐다고 다른 DART 추출값까지 승인하면
+                # 관측 원장이 실제보다 좋게 보이는 오류가 생긴다.
+                validation = None
                 if feature_name == "institutional_demand_ratio":
                     validation = values.get("institutional_validation_status")
                 elif feature_name.startswith("lockup_"):
                     validation = values.get("lockup_validation_status")
-                if pd.isna(validation) or str(validation).strip() == "":
-                    validation = values.get("verification_status")
-                if pd.isna(validation) or str(validation).strip() == "":
-                    validation = values.get("lineage_validation_status")
+                elif feature_name.startswith(("kospi_momentum_", "kosdaq_momentum_")):
+                    if not missing and pd.notna(available_at):
+                        validation = "verified_pre_listing_market_derivation_v1"
+                elif feature_name in {
+                    "recent_ipo_avg_return_sector", "recent_ipo_avg_return_all",
+                }:
+                    if not missing and pd.notna(available_at):
+                        validation = "verified_prior_ipo_target_derivation_v1"
+                elif feature_name == "underwriter_tier":
+                    validation = values.get("underwriter_validation_status")
+                elif feature_name == "float_share_ratio":
+                    validation = values.get("float_share_validation_status")
+                elif feature_name == "secondary_offering_ratio":
+                    validation = values.get("offering_structure_validation_status")
+                elif feature_name == "offering_type_spac_ipo":
+                    if not missing and pd.notna(available_at):
+                        validation = "verified_pre_listing_dart_name_derivation_v1"
                 if pd.isna(validation) or str(validation).strip() == "":
                     validation = "needs_review"
                 validation = str(validation)
+                approved_validation_statuses = {
+                    "verified_currency_unit", "verified_text_and_structured",
+                    "verified_structured_api", "manual_verified",
+                    "official_source_krx_code_enriched", "official_source_collected",
+                    "verified_pre_listing_market_derivation_v1",
+                    "verified_prior_ipo_target_derivation_v1",
+                    "verified_krx_underwriter_registry_mapping_v1",
+                    "verified_pre_listing_dart_name_derivation_v1",
+                    DART_PUBLIC_FLOAT_STATUS,
+                    DART_OFFERING_STRUCTURE_STATUS,
+                    *APPROVED_INSTITUTIONAL_DEMAND_STATUSES,
+                    *APPROVED_LOCKUP_STATUSES,
+                }
                 records.append({
                     "event_id": values.get("event_id"),
                     "corp_name": values.get("corp_name"),
@@ -810,13 +968,9 @@ class FeatureEngineer:
                     "available_at": available_at,
                     "collected_at": pd.Timestamp.now(tz="Asia/Seoul"),
                     "validation_status": validation,
-                    "human_review_required": bool(missing or validation not in {
-                        "verified_currency_unit", "verified_text_and_structured",
-                        "verified_structured_api", "manual_verified",
-                        "verified_dart_structural_aggregate_v1",
-                        "verified_official_underwriter_aggregate_bundle",
-                        "official_source_krx_code_enriched", "official_source_collected",
-                    }),
+                    "human_review_required": bool(
+                        missing or validation not in approved_validation_statuses
+                    ),
                 })
         return pd.DataFrame(records)
 

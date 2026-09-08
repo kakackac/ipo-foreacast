@@ -24,12 +24,16 @@ from data.collectors.underwriter_registry import (
 )
 from data.processors.feature_engineer import FeatureEngineer
 from features.model_profiles import MODEL_PROFILES, build_stage_dataset, stage_readiness_by_offering_type
+from features.source_contracts import (
+    DART_STRUCTURAL_AGGREGATE_STATUS,
+    OFFICIAL_UNDERWRITER_AGGREGATE_STATUS,
+)
 
 logger = logging.getLogger(__name__)
 
 MAX_FILING_TO_LISTING_DAYS = 400
 STRUCTURED_PRICE_CHECK_VERSION = 3
-OFFERING_PRICE_PARSER_VERSION = 4
+OFFERING_PRICE_PARSER_VERSION = 5
 DART_LINEAGE_VERSION = 1
 DART_DEMAND_PARSER_VERSION = DEMAND_PARSER_VERSION
 DART_FINAL_TERMS_DEMAND_PARSER_VERSION = DEMAND_PARSER_VERSION
@@ -294,6 +298,9 @@ class HistoricalIPOPipeline:
                 "verified_offering_price_rows": int(dataset["stage_offering_price_verified"].sum()),
                 "dual_target_rows": int(dataset["stage_dual_target_ready"].sum()),
                 "feature_complete_rows": int(dataset["stage_features_complete"].sum()),
+                "critical_feature_complete_rows": int(
+                    dataset["stage_critical_features_complete"].sum()
+                ),
                 "time_valid_rows": int(dataset["stage_time_valid"].sum()),
                 "source_valid_rows": int(dataset["stage_source_valid"].sum()),
                 "model_candidate_rows": int(dataset["stage_model_candidate"].sum()),
@@ -559,7 +566,7 @@ class HistoricalIPOPipeline:
             result.loc[use, "institutional_source_url"] = result.loc[use, "underwriter_institutional_source_url"]
             result.loc[use, "institutional_available_at"] = result.loc[use, "underwriter_institutional_available_at"]
             result.loc[use, "institutional_demand_evidence"] = result.loc[use, "underwriter_institutional_evidence"]
-            result.loc[use, "institutional_validation_status"] = "verified_official_underwriter_institutional"
+            result.loc[use, "institutional_validation_status"] = OFFICIAL_UNDERWRITER_AGGREGATE_STATUS
         lockup_missing = result.get("lockup_commitment_ratio", pd.Series(index=result.index, dtype=float)).isna()
         if "underwriter_lockup_value" in result:
             use = lockup_missing & result["underwriter_lockup_value"].notna()
@@ -567,7 +574,7 @@ class HistoricalIPOPipeline:
             result.loc[use, "lockup_source_url"] = result.loc[use, "underwriter_lockup_source_url"]
             result.loc[use, "lockup_available_at"] = result.loc[use, "underwriter_lockup_available_at"]
             result.loc[use, "lockup_parse_evidence"] = result.loc[use, "underwriter_lockup_evidence"]
-            result.loc[use, "lockup_validation_status"] = "verified_official_underwriter_lockup"
+            result.loc[use, "lockup_validation_status"] = OFFICIAL_UNDERWRITER_AGGREGATE_STATUS
         return result.drop(columns=[column for column in result.columns if column.startswith("underwriter_")])
 
     def collect_official_event_master(
@@ -942,6 +949,7 @@ class HistoricalIPOPipeline:
     @staticmethod
     def _select_dart_final_terms_demand(
         offering_documents: list[tuple[pd.Series, dict[str, Any]]],
+        expected_offering_price: Any = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         """최종 발행조건 문서에서 구조 검증된 기관 피처를 값별로 고른다.
 
@@ -958,6 +966,9 @@ class HistoricalIPOPipeline:
             "lockup_rcept_dt": None,
         }
         lockup_fields = LOCKUP_FIELDS
+        expected_price = pd.to_numeric(
+            pd.Series([expected_offering_price]), errors="coerce"
+        ).iloc[0]
         ordered = sorted(
             offering_documents,
             key=lambda item: (
@@ -972,12 +983,19 @@ class HistoricalIPOPipeline:
                 continue
             if document.get("dart_final_terms_demand_parser_version") != DART_FINAL_TERMS_DEMAND_PARSER_VERSION:
                 continue
+            if pd.notna(expected_price):
+                document_price = pd.to_numeric(pd.Series([
+                    document.get("demand_offering_price", document.get("offering_price"))
+                ]), errors="coerce").iloc[0]
+                if pd.isna(document_price) or document_price != expected_price:
+                    continue
             receipt = str(candidate.rcept_no)
             receipt_date = candidate.rcept_dt
             if (
                 result.get("institutional_demand_ratio") is None
                 and document.get("institutional_demand_ratio") is not None
                 and document.get("institutional_demand_parser_validation_status") == "structurally_verified"
+                and bool(document.get("institutional_demand_rule_id"))
             ):
                 for field in (
                     "institutional_demand_ratio", "institutional_demand_parse_method",
@@ -996,6 +1014,7 @@ class HistoricalIPOPipeline:
                 result.get("lockup_commitment_ratio") is None
                 and document.get("lockup_commitment_ratio") is not None
                 and document.get("lockup_parser_validation_status") == "structurally_verified"
+                and bool(document.get("lockup_rule_id"))
             ):
                 for field in (
                     *lockup_fields, "lockup_none_ratio", "lockup_parse_method", "lockup_parse_evidence",
@@ -1053,6 +1072,7 @@ class HistoricalIPOPipeline:
                 result.get("institutional_demand_ratio") is None
                 and document.get("institutional_demand_ratio") is not None
                 and document.get("institutional_demand_parser_validation_status") == "structurally_verified"
+                and bool(document.get("institutional_demand_rule_id"))
             ):
                 result.update({
                     "institutional_demand_ratio": document["institutional_demand_ratio"],
@@ -1074,6 +1094,7 @@ class HistoricalIPOPipeline:
                 result.get("lockup_commitment_ratio") is None
                 and document.get("lockup_commitment_ratio") is not None
                 and document.get("lockup_parser_validation_status") == "structurally_verified"
+                and bool(document.get("lockup_rule_id"))
             ):
                 for field in (
                     *LOCKUP_FIELDS, "lockup_none_ratio", "lockup_parse_method", "lockup_parse_evidence",
@@ -1309,10 +1330,58 @@ class HistoricalIPOPipeline:
             )
             offering["structured_price_check_version"] = STRUCTURED_PRICE_CHECK_VERSION
             offering["offering_price_parser_version"] = OFFERING_PRICE_PARSER_VERSION
+            # 신주·구주는 같은 문서의 구조 검증을 동시에 통과한
+            # 경우만 파생 비율에 쓴다. 서로 다른 정정본의 값을
+            # 조합하면 실제 공시에 없는 공모 구조가 만들어진다.
+            share_fields = (
+                "new_shares", "new_shares_parse_method", "new_shares_parse_evidence",
+                "new_shares_parser_validation_status", "secondary_shares",
+                "secondary_shares_parse_method", "secondary_shares_parse_evidence",
+                "secondary_shares_parser_validation_status", "total_post_listing_shares",
+                "total_post_listing_shares_parse_method",
+                "total_post_listing_shares_parse_evidence",
+                "total_post_listing_shares_parser_validation_status",
+            )
+            share_source = next((
+                (candidate, document) for candidate, document in offering_documents
+                if document.get("new_shares_parser_validation_status") == "structurally_verified"
+                and document.get("secondary_shares_parser_validation_status") == "structurally_verified"
+            ), None)
+            if share_source is not None:
+                source_candidate, source_document = share_source
+                for field in share_fields:
+                    offering[field] = source_document.get(field)
+                offering["offering_structure_rcept_no"] = str(source_candidate.rcept_no)
+                offering["offering_structure_rcept_dt"] = source_candidate.rcept_dt
+
+            float_fields = (
+                "public_float_shares", "public_float_ratio_disclosed",
+                "public_float_parse_method", "public_float_parse_evidence",
+                "total_post_listing_shares", "total_post_listing_shares_parse_method",
+                "total_post_listing_shares_parse_evidence",
+                "total_post_listing_shares_parser_validation_status",
+            )
+            float_source = next((
+                (candidate, document) for candidate, document in offering_documents
+                if document.get("public_float_parse_method") ==
+                    "disclosed_public_float_ratio_direct_context"
+                or (
+                    document.get("public_float_parse_method") ==
+                        "disclosed_public_float_shares_direct_context"
+                    and document.get("total_post_listing_shares_parser_validation_status") ==
+                        "structurally_verified"
+                )
+            ), None)
+            if float_source is not None:
+                source_candidate, source_document = float_source
+                for field in float_fields:
+                    offering[field] = source_document.get(field)
+                offering["public_float_rcept_no"] = str(source_candidate.rcept_no)
+                offering["public_float_rcept_dt"] = source_candidate.rcept_dt
+
             field_source_groups = {
                 "price_band": ("price_band_low", "price_band_high"),
-                "offering_structure": (
-                    "new_shares", "secondary_shares", "total_post_listing_shares",
+                "governance_structure": (
                     "lead_underwriter", "major_shareholder_lockup_months", "risk_factor_count",
                 ),
             }
@@ -1339,7 +1408,7 @@ class HistoricalIPOPipeline:
             # 제공하면 이것이 1차 모델 원천이다. 공동주관사별 숫자를 모으거나
             # 합산하지 않는다.
             verified_demand, verified_demand_metadata = self._select_dart_final_terms_demand(
-                offering_documents
+                offering_documents, offering.get("offering_price")
             )
             institutional_rcept_no = verified_demand_metadata["institutional_rcept_no"]
             institutional_rcept_dt = verified_demand_metadata["institutional_rcept_dt"]
@@ -1481,7 +1550,10 @@ class HistoricalIPOPipeline:
             ) is not None:
                 for field in (
                     "institutional_demand_ratio", "institutional_demand_parse_method",
-                    "institutional_demand_evidence", "institutional_source_scope", "institutional_source_url",
+                    "institutional_demand_evidence", "institutional_demand_rule_id",
+                    "institutional_demand_parser_validation_status",
+                    "institutional_demand_structured_evidence", "institutional_source_scope",
+                    "institutional_source_url",
                 ):
                     verified_demand[field] = lineage_demand.get(field)
                 institutional_rcept_no = lineage_metadata["institutional_rcept_no"]
@@ -1489,8 +1561,11 @@ class HistoricalIPOPipeline:
             if verified_demand.get("lockup_commitment_ratio") is None and lineage_demand.get(
                 "lockup_commitment_ratio"
             ) is not None:
-                for field in (*LOCKUP_FIELDS, "lockup_none_ratio", "lockup_parse_method", "lockup_parse_evidence",
-                              "lockup_source_scope", "lockup_source_url"):
+                for field in (
+                    *LOCKUP_FIELDS, "lockup_none_ratio", "lockup_parse_method", "lockup_parse_evidence",
+                    "lockup_rule_id", "lockup_parser_validation_status", "lockup_structured_evidence",
+                    "lockup_source_scope", "lockup_source_url",
+                ):
                     verified_demand[field] = lineage_demand.get(field)
                 lockup_rcept_no = lineage_metadata["lockup_rcept_no"]
                 lockup_rcept_dt = lineage_metadata["lockup_rcept_dt"]
@@ -1538,13 +1613,23 @@ class HistoricalIPOPipeline:
                 "institutional_source_url": verified_demand.get("institutional_source_url"),
                 "lockup_source_url": verified_demand.get("lockup_source_url"),
                 "institutional_validation_status": (
-                    "verified_dart_structural_aggregate_v1"
-                    if verified_demand.get("institutional_demand_ratio") is not None
+                    DART_STRUCTURAL_AGGREGATE_STATUS
+                    if (
+                        verified_demand.get("institutional_demand_ratio") is not None
+                        and verified_demand.get("institutional_demand_parser_validation_status")
+                        == "structurally_verified"
+                        and bool(verified_demand.get("institutional_demand_rule_id"))
+                    )
                     else "dart_aggregate_value_not_verified"
                 ),
                 "lockup_validation_status": (
-                    "verified_dart_structural_aggregate_v1"
-                    if verified_demand.get("lockup_commitment_ratio") is not None
+                    DART_STRUCTURAL_AGGREGATE_STATUS
+                    if (
+                        verified_demand.get("lockup_commitment_ratio") is not None
+                        and verified_demand.get("lockup_parser_validation_status")
+                        == "structurally_verified"
+                        and bool(verified_demand.get("lockup_rule_id"))
+                    )
                     else "dart_aggregate_value_not_verified"
                 ),
                 **offering,
@@ -1854,12 +1939,14 @@ class HistoricalIPOPipeline:
             audit["feature_available_at"] = audit["available_at"]
         listing_date = pd.to_datetime(audit["listing_date"], errors="coerce")
         available_at = pd.to_datetime(audit["available_at"], errors="coerce")
+        # DART/KIND의 날짜 필드는 공시 시각을 제공하지 않는다. 상장 당일 값은
+        # 오전 9시 이전 공개를 증명할 수 없으므로 상장 전 예측에는 사용하지 않는다.
         audit["is_future_information"] = (
-            available_at.notna() & listing_date.notna() & (available_at > listing_date)
+            available_at.notna() & listing_date.notna() & (available_at >= listing_date)
         )
         audit["time_validation_status"] = "missing_feature_available_at_review_required"
         audit.loc[available_at.notna() & listing_date.notna() & ~audit["is_future_information"], "time_validation_status"] = (
-            "pre_listing_or_same_day"
+            "pre_listing_verified"
         )
         audit.loc[audit["is_future_information"], "time_validation_status"] = "future_information_blocked"
         return audit

@@ -15,6 +15,7 @@ api/server.py
 """
 
 import logging
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -22,6 +23,7 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field, validator
 
 logger = logging.getLogger(__name__)
+PREDICTION_STAGE = os.getenv("IPO_PREDICTION_STAGE", "post_demand")
 
 app = FastAPI(
     title="IPO 상장일 수익률 예측 API",
@@ -141,8 +143,8 @@ def get_models() -> dict:
             sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
             from models.baseline.gradient_boost_model import IPOPriceModel
             _models = {
-                "opening": IPOPriceModel.load("baseline_open_v1"),
-                "closing": IPOPriceModel.load("baseline_close_v1"),
+                "opening": IPOPriceModel.load(f"{PREDICTION_STAGE}_open_v1"),
+                "closing": IPOPriceModel.load(f"{PREDICTION_STAGE}_close_v1"),
             }
             logger.info("시초가·종가 모델 로드 완료")
         except Exception as e:
@@ -165,6 +167,9 @@ def _create_demo_models() -> dict:
     models = {}
     for target_name, target_col in [("opening", "open_return_pct"), ("closing", "close_return_pct")]:
         model = IPOPriceModel(n_estimators=100)
+        model.imputation_values = {
+            column: float(X.iloc[:split][column].median()) for column in feat_cols
+        }
         model.fit(
             X.iloc[:split], df[target_col].iloc[:split],
             X.iloc[split:], df[target_col].iloc[split:],
@@ -180,21 +185,36 @@ def _create_demo_models() -> dict:
 def _feature_dict(feat: IPOFeatures) -> dict:
     """요청 피처를 모델 입력용 숫자 사전으로 정리한다."""
     raw = feat.dict(exclude={"corp_name", "listing_date"})
-    d = {key: (0.0 if value is None else value) for key, value in raw.items()}
-    d["band_exceeded"] = int(d["offering_price_band_position"] > 1.0)
+    d = dict(raw)
+    band_position = d.get("offering_price_band_position")
+    d["band_exceeded"] = (
+        None if band_position is None else int(band_position > 1.0)
+    )
     return d
 
 
 def _features_to_df(feature_dict: dict, model):
-    """IPOFeatures → 모델 입력 DataFrame 변환"""
+    """훈련 때 저장한 결측 보정값으로 API 입력을 변환한다."""
     import pandas as pd
-    df = pd.DataFrame([feature_dict])
-
-    # 모델이 요구하는 피처만 선택, 없는 피처는 0으로
+    values = dict(feature_dict)
     for col in model.feature_names:
-        if col not in df.columns:
-            df[col] = 0.0
-    return df[model.feature_names].astype(float).fillna(0.0)
+        if col.endswith("__missing"):
+            base = col.removesuffix("__missing")
+            values[col] = float(base not in values or pd.isna(values.get(base)))
+        elif col not in values:
+            values[col] = pd.NA
+    df = pd.DataFrame([values]).reindex(columns=model.feature_names)
+    df = df.apply(pd.to_numeric, errors="coerce")
+    fill_values = getattr(model, "imputation_values", {})
+    unresolved = [
+        column for column in model.feature_names
+        if df[column].isna().any() and column not in fill_values
+    ]
+    if unresolved:
+        raise RuntimeError(
+            "모델에 결측 보정 메타데이터가 없습니다: " + ", ".join(unresolved)
+        )
+    return df.fillna(fill_values).astype(float)
 
 
 def _return_prediction(model, feature_dict: dict) -> ReturnPrediction:
@@ -208,7 +228,7 @@ def _return_prediction(model, feature_dict: dict) -> ReturnPrediction:
         ci_50_low=float(pred["ci_50_low"]),
         ci_50_high=float(pred["ci_50_high"]),
         risk_grade=pred["risk_grade"],
-        top_features=model.explain_prediction(feature_dict, top_n=5),
+        top_features=model.explain_prediction(X.iloc[0].to_dict(), top_n=5),
     )
 
 
@@ -223,8 +243,8 @@ async def health():
 async def model_info():
     models = get_models()
     return ModelInfo(
-        opening_model = "baseline_open_v1",
-        closing_model = "baseline_close_v1",
+        opening_model = f"{PREDICTION_STAGE}_open_v1",
+        closing_model = f"{PREDICTION_STAGE}_close_v1",
         n_features   = {name: len(model.feature_names) for name, model in models.items()},
         feature_set  = "core+secondary",
         trained_at   = _model_meta.get("trained_at"),

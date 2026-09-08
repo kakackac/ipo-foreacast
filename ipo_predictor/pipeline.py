@@ -66,7 +66,11 @@ def step_load_or_build_data(
             PROC_DIR / "model_stage_datasets" / f"{prediction_stage}.parquet"
             if prediction_stage else None
         )
-        proc_path = stage_path if stage_path and stage_path.exists() else PROC_DIR / "features_all.parquet"
+        if stage_path is not None and not stage_path.exists():
+            raise TrainingReadinessError(
+                f"단계 데이터셋이 없습니다: {stage_path}. collect를 다시 실행하세요."
+            )
+        proc_path = stage_path if stage_path is not None else PROC_DIR / "features_all.parquet"
         if not proc_path.exists():
             logger.error("피처 파일 없음: %s", proc_path)
             logger.error("먼저 collect 모드로 공식 원천과 단계별 피처 파일을 생성하세요.")
@@ -98,7 +102,9 @@ def assess_training_readiness(
     df: pd.DataFrame, phase: str = "core", prediction_stage: str = "post_demand"
 ) -> dict:
     """일반 IPO만 대상으로 학습 가능 여부와 미달 사유를 계산한다."""
-    from features.model_profiles import get_model_profile, stage_source_valid
+    from features.model_profiles import (
+        get_model_profile, stage_model_candidate_mask, stage_source_valid,
+    )
 
     profile = get_model_profile(prediction_stage)
 
@@ -207,10 +213,19 @@ def assess_training_readiness(
         report["reasons"].append("피처 공개시각이 없어 미래 정보 누출을 검증할 수 없습니다.")
     else:
         available_at = pd.to_datetime(candidates["feature_available_at"], errors="coerce")
-        violations = available_at.notna() & candidates["listing_date"].notna() & (available_at > candidates["listing_date"])
+        violations = available_at.notna() & candidates["listing_date"].notna() & (
+            available_at >= candidates["listing_date"]
+        )
         report["future_information_violations"] = int(violations.sum())
         if violations.any():
             report["reasons"].append(f"상장일 이후에 공개된 피처 행이 {int(violations.sum())}건 있습니다.")
+    current_candidate = stage_model_candidate_mask(candidates, profile)
+    report["current_contract_model_candidate_rows"] = int(current_candidate.sum())
+    if int(current_candidate.sum()) < MIN_GENERAL_IPO_TARGET_ROWS:
+        report["reasons"].append(
+            f"현재 단계 계약을 모두 통과한 일반 IPO 학습 후보가 {int(current_candidate.sum())}건으로 "
+            f"최소 {MIN_GENERAL_IPO_TARGET_ROWS}건에 미달합니다."
+        )
     report["eligible"] = not report["reasons"]
     return report
 
@@ -223,9 +238,13 @@ def require_training_ready(
     if not report["eligible"]:
         details = " | ".join(report["reasons"])
         raise TrainingReadinessError(f"학습·성능평가 차단: {details}")
+    from features.model_profiles import get_model_profile, stage_model_candidate_mask
+
     eligible = step_filter_unreviewed_offering_prices(df[df["event_class"].eq("general_ipo")].copy())
-    if "stage_model_candidate" in eligible.columns:
-        eligible = eligible[eligible["stage_model_candidate"].fillna(False).astype(bool)]
+    current_candidate = stage_model_candidate_mask(
+        eligible, get_model_profile(prediction_stage)
+    )
+    eligible = eligible[current_candidate]
     return eligible.reset_index(drop=True)
 
 
@@ -289,6 +308,7 @@ def step_train_final_model(df, feature_cols, target_col: str, model_name: str):
     X_cal = X_cal.fillna(fill_values)
 
     model = IPOPriceModel(n_estimators=300, max_depth=5)
+    model.imputation_values = {key: float(value) for key, value in fill_values.items()}
     model.fit(X_tr, y_tr, X_cal, y_cal)
     model.feature_names = available
 
@@ -422,8 +442,8 @@ def run_train(phase: str = "core", prediction_stage: str = "post_demand"):
     feature_cols = step_feature_selection(df, phase=phase, prediction_stage=prediction_stage)
     results = {}
     model_names = {
-        "open_return_pct": "baseline_open_v1",
-        "close_return_pct": "baseline_close_v1",
+        "open_return_pct": f"{prediction_stage}_open_v1",
+        "close_return_pct": f"{prediction_stage}_close_v1",
     }
     for target_col, model_name in model_names.items():
         bt_result = step_backtest(df, feature_cols, target_col)
