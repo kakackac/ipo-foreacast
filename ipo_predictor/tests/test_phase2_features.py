@@ -324,6 +324,42 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(parsed["lockup_commitment_ratio"], 1.0)
         self.assertEqual(parsed["lockup_parse_method"], "lockup_complete_periods_sum")
 
+    def test_demand_forecast_uses_total_ratio_not_first_institution_group(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            """
+            <table>
+              <tr><th>구분</th><th>국내기관투자자</th><th>외국기관투자자</th><th>합계</th></tr>
+              <tr><td>경쟁률</td><td>18.40 : 1</td><td>21.00 : 1</td><td>329.47 : 1</td></tr>
+            </table>
+            """,
+            "12345678",
+        )
+
+        self.assertEqual(parsed["institutional_demand_ratio"], 329.47)
+        self.assertEqual(parsed["institutional_demand_parse_method"], "demand_ratio_total_table_row")
+
+    def test_demand_forecast_rejects_underwriting_review_threshold(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            "수요예측 결과 기관투자자 유효경쟁률 25:1 이하인 경우 재심의 예정",
+            "12345678",
+        )
+
+        self.assertIsNone(parsed["institutional_demand_ratio"])
+
+    def test_demand_forecast_rejects_shareholder_lockup_table_even_with_institution_text(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            """
+            <table>
+              <tr><th>구분</th><th>기관투자자</th><th>의무보유기간</th><th>지분율</th></tr>
+              <tr><td>최대주주 보유주식</td><td>-</td><td>6개월</td><td>5.91%</td></tr>
+              <tr><td>기존주주 보유주식</td><td>-</td><td>3개월</td><td>2.00%</td></tr>
+            </table>
+            """,
+            "12345678",
+        )
+
+        self.assertIsNone(parsed["lockup_commitment_ratio"])
+
     def test_demand_forecast_rejects_unstructured_lockup_numbers(self):
         parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
             "의무보유확약 6개월 100주, 3개월 200주, 1개월 300주, 15일 400주", "12345678"

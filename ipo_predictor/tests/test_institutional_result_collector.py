@@ -151,14 +151,14 @@ class OfficialInstitutionalResultCollectorTests(unittest.TestCase):
         first_final = pd.Series({"rcept_no": "20260101000001", "rcept_dt": "2026-01-01", "is_final_conditions": True})
         second_final = pd.Series({"rcept_no": "20260102000001", "rcept_dt": "2026-01-02", "is_final_conditions": True})
         first_document = {
-            "dart_final_terms_demand_parser_version": 3,
+            "dart_final_terms_demand_parser_version": 4,
             "institutional_demand_ratio": 850.0,
             "lockup_commitment_ratio": None,
             "lockup_6m_ratio": None, "lockup_3m_ratio": None,
             "lockup_1m_ratio": None, "lockup_15d_ratio": None,
         }
         second_document = {
-            "dart_final_terms_demand_parser_version": 3,
+            "dart_final_terms_demand_parser_version": 4,
             "institutional_demand_ratio": None,
             "lockup_commitment_ratio": 1.0,
             "lockup_6m_ratio": 0.1, "lockup_3m_ratio": 0.2,

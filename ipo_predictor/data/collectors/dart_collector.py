@@ -379,22 +379,38 @@ class DARTCollector:
         result["demand_offering_price"] = demand_price["offering_price"]
         result["demand_offering_price_context"] = demand_price["offering_price_audit_context"]
 
-        # "수요예측 경쟁률"만으로는 해당 회사의 기관 결과가 아니다. 신고서에는
-        # 과거 시장 평균·공모규모별 통계도 같은 라벨로 들어간다. 기관 문맥과
-        # 숫자가 같은 표 행/문장에 직접 연결되고, 시장 통계 문맥이 아닌 경우만
-        # 기관 수요로 승인한다.
-        demand_blocks = self._extract_table_rows(html) + self._split_sentences(text)
-        for block in demand_blocks:
-            normalized = re.sub(r"\s+", " ", block).strip()
-            if re.search(r"비례\s*배정|일반\s*청약|개인\s*청약", normalized):
+        # 기관별 열과 합계 열이 함께 있는 표에서는 경쟁률 행의 마지막 비율이
+        # 전체 기관 합계다. 첫 번째 비율은 국내 특정 기관군일 수 있으므로 쓰지 않는다.
+        for table in self._extract_table_cells(html):
+            table_text = " ".join(" ".join(row) for row in table)
+            if not re.search(r"기관\s*(?:투자자)?", table_text) or not re.search(r"합\s*계|총\s*합계", table_text):
                 continue
-            if not re.search(r"기관\s*(?:투자자)?", normalized):
+            if re.search(r"신규\s*상장\s*기업|기업\s*수|평균\s*공모|공모\s*규모|재심의|예정", table_text):
+                continue
+            ratio_row = next((row for row in table if re.search(r"(?:단순\s*)?경쟁률", " ".join(row))), None)
+            if ratio_row is None:
+                continue
+            row_text = " | ".join(ratio_row)
+            ratios = re.findall(r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b", row_text)
+            if ratios:
+                result["institutional_demand_ratio"] = float(ratios[-1].replace(",", ""))
+                result["institutional_demand_parse_method"] = "demand_ratio_total_table_row"
+                result["institutional_demand_evidence"] = row_text[:500]
+                break
+
+        # 표가 아닌 문장에서는 기관 수요예측 라벨과 비율이 직접 연결된 경우만 허용한다.
+        demand_blocks = self._extract_table_rows(html) + self._split_sentences(text)
+        for block in demand_blocks if result["institutional_demand_ratio"] is None else []:
+            normalized = re.sub(r"\s+", " ", block).strip()
+            if re.search(r"비례\s*배정|일반\s*청약|개인\s*청약|재심의|예정|이하|리스크", normalized):
                 continue
             if re.search(r"신규\s*상장\s*기업|기업\s*수|평균\s*공모|공모\s*규모", normalized):
                 continue
-            if not re.search(r"(?:수요\s*예측\s*)?경쟁률", normalized):
-                continue
-            match = re.search(r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b", normalized)
+            match = re.search(
+                r"기관\s*(?:투자자)?\s*(?:수요\s*예측\s*)?(?:유효\s*)?경쟁률"
+                r"\s*(?:은|는|:|：)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b",
+                normalized,
+            )
             if match:
                 result["institutional_demand_ratio"] = float(match.group(1).replace(",", ""))
                 result["institutional_demand_parse_method"] = "demand_ratio_same_table_row_or_sentence"
@@ -538,7 +554,7 @@ class DARTCollector:
         # 공모 구조와 수요예측은 같은 원문을 읽지만, 어느 한쪽이 없다고 다른
         # 쪽의 파싱 성공 상태를 덮어쓰면 안 된다.
         result["dart_final_terms_demand_parse_success"] = demand["parse_success"]
-        result["dart_final_terms_demand_parser_version"] = 3
+        result["dart_final_terms_demand_parser_version"] = 4
         return result
 
     def _parse_offering_html(self, html: str, rcept_no: str) -> dict:
@@ -775,7 +791,11 @@ class DARTCollector:
             }
         for table in cls._extract_table_cells(raw_html):
             table_text = " ".join(" ".join(row) for row in table)
-            if not re.search(r"기관\s*(?:투자자)?|수요\s*예측", table_text):
+            if not re.search(r"기관\s*(?:투자자)?", table_text):
+                continue
+            if not re.search(r"의무\s*보유\s*확약|보유\s*확약|확약\s*기간", table_text):
+                continue
+            if re.search(r"최대\s*주주|기존\s*주주|주주\s*등|보유\s*주식", table_text):
                 continue
             direct_total = re.search(
                 r"의무\s*보유\s*확약\s*(?:비율|률)?\s*(?:은|는|:|：)?\s*"
@@ -868,7 +888,9 @@ class DARTCollector:
     def _is_institutional_lockup_context(text: str, start: int, end: int) -> bool:
         """확약 수치가 기관 수요예측 결과인지 좁은 문맥에서 확인한다."""
         context = text[max(0, start - 250):min(len(text), end + 250)]
-        if not re.search(r"기관\s*(?:투자자)?|수요\s*예측", context):
+        if not re.search(r"기관\s*(?:투자자)?", context) or not re.search(
+            r"수요\s*예측\s*(?:결과|경쟁률)", context
+        ):
             return False
         return not re.search(r"최대\s*주주|기존\s*주주|임원|보유\s*주식", context)
 
