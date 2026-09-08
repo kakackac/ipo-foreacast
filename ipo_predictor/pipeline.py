@@ -98,7 +98,7 @@ def assess_training_readiness(
     df: pd.DataFrame, phase: str = "core", prediction_stage: str = "post_demand"
 ) -> dict:
     """일반 IPO만 대상으로 학습 가능 여부와 미달 사유를 계산한다."""
-    from features.model_profiles import get_model_profile
+    from features.model_profiles import get_model_profile, stage_source_valid
 
     profile = get_model_profile(prediction_stage)
 
@@ -186,6 +186,15 @@ def assess_training_readiness(
                     f"핵심 원천 피처 {feature} 충족률이 {rate:.1%}로 최소 "
                     f"{MIN_CRITICAL_FEATURE_COMPLETENESS:.0%}에 미달합니다."
                 )
+    source_valid = stage_source_valid(candidates, profile)
+    report["source_validation_pass_rows"] = int(source_valid.sum())
+    source_invalid_rows = int((~source_valid).sum())
+    report["source_validation_blocked_rows"] = source_invalid_rows
+    if source_invalid_rows:
+        report["reasons"].append(
+            f"{profile.name} 단계의 값 중 현재 데이터 계약으로 승인되지 않은 공식 원천·파서 값이 "
+            f"{source_invalid_rows}건 있습니다. collect를 다시 실행해 최신 계약으로 재검증하세요."
+        )
     if "stage_time_valid" in candidates.columns:
         invalid_time_rows = int((~candidates["stage_time_valid"].fillna(False).astype(bool)).sum())
         report["stage_time_unverified_or_future_rows"] = invalid_time_rows

@@ -293,7 +293,9 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertEqual(summary["listing_close_price_rows"], 1)
             self.assertAlmostEqual(features.loc[0, "open_return_pct"], 50.0)
             self.assertAlmostEqual(features.loc[0, "close_return_pct"], 25.0)
+            self.assertEqual(features.loc[0, "underwriter_tier"], 1.0)
             self.assertTrue((root / "raw" / "dart_ipo_raw.parquet").exists())
+            self.assertTrue((root / "raw" / "dart_institutional_extraction_audit.parquet").exists())
             self.assertTrue((root / "processed" / "feature_observations.parquet").exists())
             self.assertTrue((root / "processed" / "feature_coverage_audit.parquet").exists())
             self.assertTrue((root / "processed" / "feature_time_validation.parquet").exists())
@@ -323,7 +325,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
             self.assertEqual(
                 raw.loc[0, "institutional_validation_status"],
-                "dart_final_terms_value_not_found",
+                "dart_aggregate_value_not_verified",
             )
 
     def test_default_collection_uses_dart_final_terms_aggregate_demand(self):
@@ -333,6 +335,10 @@ class ActualDataPipelineTests(unittest.TestCase):
                 record.update({
                     "institutional_demand_ratio": 850.0,
                     "lockup_commitment_ratio": 1.0,
+                    "institutional_demand_parser_validation_status": "structurally_verified",
+                    "lockup_parser_validation_status": "structurally_verified",
+                    "institutional_demand_rule_id": "DART_DEMAND_DIRECT_LABEL_V1",
+                    "lockup_rule_id": "DART_LOCKUP_DIRECT_AGGREGATE_V1",
                     "institutional_demand_parse_method": "demand_ratio_same_table_row_or_sentence",
                     "institutional_demand_evidence": "기관 수요예측 경쟁률 | 850.00 : 1",
                     "lockup_6m_ratio": 0.1,
@@ -366,7 +372,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             )
             self.assertEqual(
                 raw.loc[0, "institutional_validation_status"],
-                "verified_dart_final_terms_aggregate",
+                "verified_dart_structural_aggregate_v1",
             )
             self.assertEqual(
                 coverage.set_index("feature_name").loc["institutional_demand_ratio", "observed_rows"],
@@ -414,7 +420,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertNotIn("institutional_demand_ratio", raw.columns)
             self.assertEqual(
                 raw.loc[0, "institutional_validation_status"],
-                "dart_final_terms_value_not_found",
+                "dart_aggregate_value_not_verified",
             )
 
     def test_offering_parser_v4_reparses_v3_cached_float_value(self):
@@ -450,7 +456,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             latest = cache.loc[cache["rcept_no"] == "20240101000001"].iloc[-1]
             self.assertEqual(dart.offering_calls, 1)
             self.assertEqual(latest["offering_price_parser_version"], 4)
-            self.assertEqual(latest["dart_final_terms_demand_parser_version"], 4)
+            self.assertEqual(latest["dart_final_terms_demand_parser_version"], 5)
             self.assertNotEqual(latest["public_float_shares"], 999_999)
 
     def test_final_terms_document_parses_offering_and_demand_without_cross_overwriting_status(self):
@@ -467,7 +473,7 @@ class ActualDataPipelineTests(unittest.TestCase):
         self.assertTrue(parsed["parse_success"])
         self.assertTrue(parsed["dart_final_terms_demand_parse_success"])
         self.assertEqual(parsed["institutional_demand_ratio"], 850.0)
-        self.assertEqual(parsed["dart_final_terms_demand_parser_version"], 4)
+        self.assertEqual(parsed["dart_final_terms_demand_parser_version"], 5)
 
     def test_collection_omits_removed_personal_subscription_artifacts(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -683,7 +689,12 @@ class ActualDataPipelineTests(unittest.TestCase):
                     raise RuntimeError("DART 원문 ZIP 응답이 아닙니다: <status>014</status>")
                 return {
                     "corp_code": corp_code, "institutional_demand_ratio": 850.0,
+                    "demand_offering_price": 12000,
                     "lockup_commitment_ratio": 1.0,
+                    "institutional_demand_parser_validation_status": "structurally_verified",
+                    "lockup_parser_validation_status": "structurally_verified",
+                    "institutional_demand_rule_id": "DART_DEMAND_DIRECT_LABEL_V1",
+                    "lockup_rule_id": "DART_LOCKUP_DIRECT_AGGREGATE_V1",
                     "lockup_6m_ratio": 0.1, "lockup_3m_ratio": 0.2,
                     "lockup_1m_ratio": 0.3, "lockup_15d_ratio": 0.4,
                     "lockup_none_ratio": 0.0, "parse_success": True,
@@ -701,11 +712,11 @@ class ActualDataPipelineTests(unittest.TestCase):
             raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
             failures = pd.read_parquet(root / "raw" / "dart_demand_document_failures.parquet")
             cache = pd.read_parquet(root / "raw" / "dart_demand_document_cache.parquet")
-            self.assertNotIn("institutional_demand_ratio", raw.columns)
-            self.assertEqual(raw.loc[0, "institutional_validation_status"], "dart_final_terms_value_not_found")
+            self.assertEqual(raw.loc[0, "institutional_demand_ratio"], 850.0)
+            self.assertEqual(raw.loc[0, "institutional_validation_status"], "verified_dart_structural_aggregate_v1")
             self.assertEqual(cache.loc[cache["rcept_no"] == "20240101000001", "institutional_demand_ratio"].iloc[0], 850.0)
-            self.assertTrue(pd.isna(raw.loc[0, "institutional_rcept_no"]))
-            self.assertTrue(pd.isna(raw.loc[0, "lockup_rcept_no"]))
+            self.assertEqual(raw.loc[0, "institutional_rcept_no"], "20240101000001")
+            self.assertEqual(raw.loc[0, "lockup_rcept_no"], "20240101000001")
             self.assertIn("20240201000001", set(failures["rcept_no"].astype(str)))
 
     def test_dart_lineage_accepts_latest_valid_institutional_fields_from_separate_documents(self):
@@ -724,9 +735,13 @@ class ActualDataPipelineTests(unittest.TestCase):
                         "parse_success": True}
                 if rcept_no == "20240215000001":
                     return {**base, "institutional_demand_ratio": 850.0,
+                            "institutional_demand_parser_validation_status": "structurally_verified",
+                            "institutional_demand_rule_id": "DART_DEMAND_DIRECT_LABEL_V1",
                             "institutional_demand_evidence": "기관투자자 수요예측 경쟁률 850 : 1"}
                 if rcept_no == "20240214000001":
                     return {**base, "lockup_commitment_ratio": 0.25,
+                            "lockup_parser_validation_status": "structurally_verified",
+                            "lockup_rule_id": "DART_LOCKUP_DIRECT_AGGREGATE_V1",
                             "lockup_parse_evidence": "기관투자자 의무보유확약 25.0%"}
                 return base
 
@@ -742,8 +757,8 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertEqual(raw.loc[0, "lockup_commitment_ratio"], 0.25)
             self.assertEqual(raw.loc[0, "institutional_rcept_no"], "20240215000001")
             self.assertEqual(raw.loc[0, "lockup_rcept_no"], "20240214000001")
-            self.assertEqual(raw.loc[0, "institutional_validation_status"], "verified_dart_lineage_aggregate_institutional")
-            self.assertEqual(raw.loc[0, "lockup_validation_status"], "verified_dart_lineage_aggregate_institutional")
+            self.assertEqual(raw.loc[0, "institutional_validation_status"], "verified_dart_structural_aggregate_v1")
+            self.assertEqual(raw.loc[0, "lockup_validation_status"], "verified_dart_structural_aggregate_v1")
 
     def test_manual_price_override_promotes_audited_record_for_training(self):
         with tempfile.TemporaryDirectory() as temp_dir:

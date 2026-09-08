@@ -59,6 +59,17 @@ VERIFIED_OFFERING_PRICE_STATUSES = frozenset({
     "manual_verified",
 })
 
+FEATURE_SOURCE_APPROVAL = {
+    "institutional_demand_ratio": (
+        "institutional_validation_status",
+        frozenset({"verified_dart_structural_aggregate_v1", "verified_official_underwriter_aggregate_bundle"}),
+    ),
+    "lockup_commitment_ratio": (
+        "lockup_validation_status",
+        frozenset({"verified_dart_structural_aggregate_v1", "verified_official_underwriter_aggregate_bundle"}),
+    ),
+}
+
 
 def build_stage_dataset(
     features: pd.DataFrame,
@@ -92,13 +103,31 @@ def build_stage_dataset(
     frame["stage_dual_target_ready"] = open_ready & close_ready
 
     frame["stage_time_valid"] = _stage_time_valid(frame, profile, feature_time_audit)
+    frame["stage_source_valid"] = stage_source_valid(frame, profile)
     frame["stage_model_candidate"] = (
         frame["stage_features_complete"]
         & frame["stage_offering_price_verified"]
         & frame["stage_dual_target_ready"]
         & frame["stage_time_valid"]
+        & frame["stage_source_valid"]
     )
     return frame
+
+
+def stage_source_valid(features: pd.DataFrame, profile: PredictionProfile) -> pd.Series:
+    """의미 검증 계약이 있는 피처는 승인 상태까지 통과해야 한다."""
+    valid = pd.Series(True, index=features.index, dtype=bool)
+    for feature_name in profile.feature_names:
+        contract = FEATURE_SOURCE_APPROVAL.get(feature_name)
+        if contract is None:
+            continue
+        status_column, approved_statuses = contract
+        if status_column not in features.columns:
+            return pd.Series(False, index=features.index, dtype=bool)
+        observed = pd.to_numeric(features[feature_name], errors="coerce").notna()
+        approved = features[status_column].fillna("").astype(str).isin(approved_statuses)
+        valid &= ~observed | approved
+    return valid
 
 
 def _stage_time_valid(
@@ -151,6 +180,7 @@ def stage_readiness_by_offering_type(dataset: pd.DataFrame) -> list[dict[str, ob
             "dual_target_rows": int(group["stage_dual_target_ready"].sum()),
             "feature_complete_rows": int(group["stage_features_complete"].sum()),
             "time_valid_rows": int(group["stage_time_valid"].sum()),
+            "source_valid_rows": int(group["stage_source_valid"].sum()),
             "model_candidate_rows": int(group["stage_model_candidate"].sum()),
         })
     return rows

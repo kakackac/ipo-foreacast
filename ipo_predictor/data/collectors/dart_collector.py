@@ -15,6 +15,7 @@ DART OpenAPI를 통해 공모주 관련 공시 데이터를 수집한다.
 """
 
 import logging
+import json
 import re
 import time
 import zipfile
@@ -36,6 +37,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
+DEMAND_PARSER_VERSION = 5
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -52,8 +54,11 @@ class _TableRowParser(HTMLParser):
         self.tables: list[list[list[str]]] = []
         self._table_depth = 0
         self._table_rows: list[list[str]] | None = None
-        self._row: list[str] | None = None
+        self._row: list[tuple[str, int, int]] | None = None
         self._cell: list[str] | None = None
+        self._cell_rowspan = 1
+        self._cell_colspan = 1
+        self._pending_rowspans: dict[int, tuple[str, int]] = {}
 
     def handle_starttag(self, tag: str, attrs):
         tag = tag.lower()
@@ -65,29 +70,66 @@ class _TableRowParser(HTMLParser):
             self._row = []
         elif self._table_depth and tag in {"td", "th"} and self._row is not None:
             self._cell = []
+            attributes = dict(attrs)
+            self._cell_rowspan = self._positive_span(attributes.get("rowspan"))
+            self._cell_colspan = self._positive_span(attributes.get("colspan"))
 
     def handle_endtag(self, tag: str):
         tag = tag.lower()
         if self._table_depth and tag in {"td", "th"} and self._cell is not None and self._row is not None:
             value = re.sub(r"\s+", " ", "".join(self._cell)).strip()
-            if value:
-                self._row.append(value)
+            self._row.append((value, self._cell_rowspan, self._cell_colspan))
             self._cell = None
         elif self._table_depth and tag == "tr" and self._row is not None:
             if self._row:
-                self.rows.append(" | ".join(self._row))
+                expanded = self._expand_row(self._row)
+                self.rows.append(" | ".join(expanded))
                 if self._table_rows is not None:
-                    self._table_rows.append(self._row)
+                    self._table_rows.append(expanded)
             self._row = None
         elif tag == "table" and self._table_depth:
             self._table_depth -= 1
             if self._table_depth == 0 and self._table_rows:
                 self.tables.append(self._table_rows)
                 self._table_rows = None
+                self._pending_rowspans = {}
 
     def handle_data(self, data: str):
         if self._cell is not None:
             self._cell.append(data)
+
+    @staticmethod
+    def _positive_span(value: str | None) -> int:
+        try:
+            return max(1, int(value or 1))
+        except (TypeError, ValueError):
+            return 1
+
+    def _expand_row(self, cells: list[tuple[str, int, int]]) -> list[str]:
+        """rowspan/colspan과 빈 셀을 보존한 직사각형 행을 만든다."""
+        row: list[str] = []
+        column = 0
+
+        def append_pending() -> None:
+            nonlocal column
+            while column in self._pending_rowspans:
+                value, remaining = self._pending_rowspans[column]
+                row.append(value)
+                if remaining <= 1:
+                    del self._pending_rowspans[column]
+                else:
+                    self._pending_rowspans[column] = (value, remaining - 1)
+                column += 1
+
+        for value, rowspan, colspan in cells:
+            append_pending()
+            for _ in range(colspan):
+                row.append(value)
+                if rowspan > 1:
+                    self._pending_rowspans[column] = (value, rowspan - 1)
+                column += 1
+        append_pending()
+        return row
 
 
 class DARTCollector:
@@ -366,8 +408,16 @@ class DARTCollector:
             "lockup_none_ratio":      None,
             "institutional_demand_parse_method": None,
             "institutional_demand_evidence": None,
+            "institutional_demand_rule_id": None,
+            "institutional_demand_parser_validation_status": "value_not_found",
+            "institutional_demand_structured_evidence": None,
+            "institutional_demand_rejection_reason": None,
             "lockup_parse_method": None,
             "lockup_parse_evidence": None,
+            "lockup_rule_id": None,
+            "lockup_parser_validation_status": "value_not_found",
+            "lockup_structured_evidence": None,
+            "lockup_rejection_reason": None,
             "parse_success":          False,
         }
 
@@ -379,24 +429,24 @@ class DARTCollector:
         result["demand_offering_price"] = demand_price["offering_price"]
         result["demand_offering_price_context"] = demand_price["offering_price_audit_context"]
 
-        # 기관별 열과 합계 열이 함께 있는 표에서는 경쟁률 행의 마지막 비율이
-        # 전체 기관 합계다. 첫 번째 비율은 국내 특정 기관군일 수 있으므로 쓰지 않는다.
+        # 기관별 열과 합계 열이 함께 있는 표에서는 헤더가 가리키는 합계 셀만
+        # 사용한다. 마지막 숫자라는 위치 추정은 주석·재심의 기준을 오인할 수 있다.
         for table in self._extract_table_cells(html):
-            table_text = " ".join(" ".join(row) for row in table)
-            if not re.search(r"기관\s*(?:투자자)?", table_text) or not re.search(r"합\s*계|총\s*합계", table_text):
-                continue
-            if re.search(r"신규\s*상장\s*기업|기업\s*수|평균\s*공모|공모\s*규모|재심의|예정", table_text):
-                continue
-            ratio_row = next((row for row in table if re.search(r"(?:단순\s*)?경쟁률", " ".join(row))), None)
-            if ratio_row is None:
-                continue
-            row_text = " | ".join(ratio_row)
-            ratios = re.findall(r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b", row_text)
-            if ratios:
-                result["institutional_demand_ratio"] = float(ratios[-1].replace(",", ""))
-                result["institutional_demand_parse_method"] = "demand_ratio_total_table_row"
-                result["institutional_demand_evidence"] = row_text[:500]
+            parsed_table = self._extract_aggregate_demand_ratio(table)
+            if parsed_table is not None:
+                result.update(parsed_table)
                 break
+
+        if result["institutional_demand_ratio"] is None and re.search(
+            r"(?:기관\s*(?:투자자)?|수요\s*예측).*?[0-9][0-9,]*(?:\.[0-9]+)?\s*(?::|：|대)\s*1\b",
+            text,
+        ):
+            result["institutional_demand_parser_validation_status"] = "candidate_rejected"
+            result["institutional_demand_rejection_reason"] = (
+                "risk_or_planned_threshold_context"
+                if re.search(r"재심의|예정|이하|리스크|기준", text)
+                else "aggregate_scope_or_table_alignment_not_verified"
+            )
 
         # 표가 아닌 문장에서는 기관 수요예측 라벨과 비율이 직접 연결된 경우만 허용한다.
         demand_blocks = self._extract_table_rows(html) + self._split_sentences(text)
@@ -405,6 +455,8 @@ class DARTCollector:
             if re.search(r"비례\s*배정|일반\s*청약|개인\s*청약|재심의|예정|이하|리스크", normalized):
                 continue
             if re.search(r"신규\s*상장\s*기업|기업\s*수|평균\s*공모|공모\s*규모", normalized):
+                continue
+            if len(re.findall(r"[0-9][0-9,]*(?:\.[0-9]+)?\s*(?::|：|대)\s*1\b", normalized)) != 1:
                 continue
             match = re.search(
                 r"기관\s*(?:투자자)?\s*(?:수요\s*예측\s*)?(?:유효\s*)?경쟁률"
@@ -415,6 +467,11 @@ class DARTCollector:
                 result["institutional_demand_ratio"] = float(match.group(1).replace(",", ""))
                 result["institutional_demand_parse_method"] = "demand_ratio_same_table_row_or_sentence"
                 result["institutional_demand_evidence"] = normalized[:300]
+                result["institutional_demand_rule_id"] = "DART_DEMAND_DIRECT_LABEL_V1"
+                result["institutional_demand_parser_validation_status"] = "structurally_verified"
+                result["institutional_demand_structured_evidence"] = json.dumps({
+                    "kind": "direct_label", "text": normalized[:1000],
+                }, ensure_ascii=False)
                 break
 
         lockup = self._extract_lockup_ratios_from_tables(html)
@@ -425,6 +482,10 @@ class DARTCollector:
             result[key] = lockup.get(key)
         result["lockup_parse_method"] = lockup.get("parse_method")
         result["lockup_parse_evidence"] = lockup.get("evidence")
+        result["lockup_rule_id"] = lockup.get("rule_id")
+        result["lockup_parser_validation_status"] = lockup.get("parser_validation_status", "value_not_found")
+        result["lockup_structured_evidence"] = lockup.get("structured_evidence")
+        result["lockup_rejection_reason"] = lockup.get("rejection_reason")
 
         # 파싱 성공 여부만 플래그 설정 (실제 비율 계산은 수집된 데이터로)
         if result["institutional_demand_ratio"] is not None or any(
@@ -554,7 +615,7 @@ class DARTCollector:
         # 공모 구조와 수요예측은 같은 원문을 읽지만, 어느 한쪽이 없다고 다른
         # 쪽의 파싱 성공 상태를 덮어쓰면 안 된다.
         result["dart_final_terms_demand_parse_success"] = demand["parse_success"]
-        result["dart_final_terms_demand_parser_version"] = 4
+        result["dart_final_terms_demand_parser_version"] = DEMAND_PARSER_VERSION
         return result
 
     def _parse_offering_html(self, html: str, rcept_no: str) -> dict:
@@ -750,6 +811,82 @@ class DARTCollector:
             return []
         return parser.tables
 
+    @staticmethod
+    def _table_evidence(table: list[list[str]], **metadata) -> str:
+        """재감사가 가능하도록 선택 셀과 주변 표 구조를 함께 직렬화한다."""
+        return json.dumps({"table": table, **metadata}, ensure_ascii=False)[:12000]
+
+    @classmethod
+    def _extract_aggregate_demand_ratio(cls, table: list[list[str]]) -> Optional[dict]:
+        """기관 수요예측 표에서 명시적인 전체/합계 셀의 경쟁률만 승인한다."""
+        if not table:
+            return None
+        table_text = " ".join(" ".join(row) for row in table)
+        if not re.search(r"기관\s*(?:투자자)?|수요\s*예측", table_text):
+            return None
+        if re.search(
+            r"신규\s*상장\s*기업|기업\s*수|평균\s*공모|공모\s*규모|재심의|예정|"
+            r"일반\s*청약|개인\s*청약|비례\s*배정",
+            table_text,
+        ):
+            return None
+
+        ratio_pattern = re.compile(r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b")
+        ratio_rows = [
+            (index, row) for index, row in enumerate(table)
+            if re.search(r"(?:유효\s*|단순\s*)?경쟁률", " ".join(row))
+        ]
+        for row_index, row in ratio_rows:
+            # 세로형 표: 합계/전체 행 자체에 경쟁률이 직접 기재된다.
+            row_text = " | ".join(row)
+            if re.search(r"합\s*계|총\s*계|전체", row_text):
+                matches = [(index, ratio_pattern.fullmatch(cell.strip())) for index, cell in enumerate(row)]
+                values = [(index, match) for index, match in matches if match]
+                if len(values) == 1:
+                    column_index, match = values[0]
+                    return {
+                        "institutional_demand_ratio": float(match.group(1).replace(",", "")),
+                        "institutional_demand_parse_method": "demand_ratio_explicit_total_row",
+                        "institutional_demand_evidence": row_text[:500],
+                        "institutional_demand_rule_id": "DART_DEMAND_TOTAL_ROW_V1",
+                        "institutional_demand_parser_validation_status": "structurally_verified",
+                        "institutional_demand_structured_evidence": cls._table_evidence(
+                            table, selected_row=row_index, selected_column=column_index,
+                            scope="aggregate_total_row",
+                        ),
+                    }
+
+            # 가로형 표: 경쟁률 행보다 앞선 헤더에서 합계/전체 열을 찾아 같은 열만 읽는다.
+            header_rows = table[:row_index]
+            aggregate_columns = {
+                column_index
+                for header in header_rows
+                for column_index, cell in enumerate(header)
+                if re.fullmatch(r"\s*(?:총\s*)?합\s*계\s*|\s*전\s*체\s*", cell)
+            }
+            valid = []
+            for column_index in aggregate_columns:
+                if column_index >= len(row):
+                    continue
+                match = ratio_pattern.fullmatch(row[column_index].strip())
+                if match:
+                    valid.append((column_index, match))
+            if len(valid) != 1:
+                continue
+            column_index, match = valid[0]
+            return {
+                "institutional_demand_ratio": float(match.group(1).replace(",", "")),
+                "institutional_demand_parse_method": "demand_ratio_explicit_total_column",
+                "institutional_demand_evidence": row_text[:500],
+                "institutional_demand_rule_id": "DART_DEMAND_TOTAL_COLUMN_V1",
+                "institutional_demand_parser_validation_status": "structurally_verified",
+                "institutional_demand_structured_evidence": cls._table_evidence(
+                    table, selected_row=row_index, selected_column=column_index,
+                    scope="aggregate_total_column",
+                ),
+            }
+        return None
+
     @classmethod
     def _extract_lockup_ratios_from_tables(cls, raw_html: str) -> dict:
         """의무보유확약 표의 비율 열 또는 신청주식수 열만 사용한다.
@@ -763,6 +900,9 @@ class DARTCollector:
             "lockup_6m_ratio": None, "lockup_3m_ratio": None,
             "lockup_1m_ratio": None, "lockup_15d_ratio": None,
             "lockup_none_ratio": None, "parse_method": None, "evidence": None,
+            "rule_id": None, "parser_validation_status": "value_not_found",
+            "structured_evidence": None,
+            "rejection_reason": None,
         }
         label_map = (
             (r"6\s*개월", "lockup_6m_ratio"),
@@ -772,22 +912,35 @@ class DARTCollector:
             (r"확약\s*없음|미확약", "lockup_none_ratio"),
         )
         normalized_document = cls._normalize_text(raw_html)
-        direct_total = re.search(
+        direct_pattern = re.compile(
             r"의무\s*보유\s*확약\s*(?:비율|률)?\s*(?:은|는|:|：)?\s*"
             r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*%",
-            normalized_document,
             flags=re.IGNORECASE,
         )
-        if direct_total and cls._is_institutional_lockup_context(
-            normalized_document, direct_total.start(), direct_total.end()
-        ):
+        # 평문 직접값은 기관 수요예측 결과와 확약 라벨이 같은 문장/표 행에
+        # 함께 있을 때만 승인한다. 주변 250자 탐색은 다른 보호예수 표를 섞는다.
+        direct_blocks = cls._extract_table_rows(raw_html) + cls._split_sentences(normalized_document)
+        for block in direct_blocks:
+            normalized = re.sub(r"\s+", " ", block).strip()
+            direct_total = direct_pattern.search(normalized)
+            if not direct_total:
+                continue
+            if not re.search(r"기관\s*(?:투자자)?", normalized) or not re.search(r"수요\s*예측", normalized):
+                continue
+            if re.search(r"최대\s*주주|기존\s*주주|임원|보유\s*주식", normalized):
+                continue
             return {
                 **result,
                 "lockup_commitment_ratio": round(
                     float(direct_total.group(1).replace(",", "")) / 100, 6
                 ),
                 "parse_method": "lockup_direct_total_ratio",
-                "evidence": direct_total.group(0)[:500],
+                "evidence": normalized[:500],
+                "rule_id": "DART_LOCKUP_DIRECT_AGGREGATE_V1",
+                "parser_validation_status": "structurally_verified",
+                "structured_evidence": json.dumps({
+                    "kind": "direct_aggregate_label", "text": normalized[:1000],
+                }, ensure_ascii=False),
             }
         for table in cls._extract_table_cells(raw_html):
             table_text = " ".join(" ".join(row) for row in table)
@@ -808,6 +961,9 @@ class DARTCollector:
                     "lockup_commitment_ratio": round(float(direct_total.group(1).replace(",", "")) / 100, 6),
                     "parse_method": "lockup_direct_total_ratio",
                     "evidence": table_text[:500],
+                    "rule_id": "DART_LOCKUP_TABLE_DIRECT_AGGREGATE_V1",
+                    "parser_validation_status": "structurally_verified",
+                    "structured_evidence": cls._table_evidence(table, scope="aggregate_direct_ratio"),
                 })
                 return result
             period_rows = [row for row in table if any(re.search(pattern, " ".join(row)) for pattern, _ in label_map)]
@@ -834,9 +990,12 @@ class DARTCollector:
                         )
                     ), 6)
                     result["parse_method"] = "lockup_complete_periods_sum"
+                    result["rule_id"] = "DART_LOCKUP_COMPLETE_PERIOD_PERCENT_SUM_V1"
+                    result["parser_validation_status"] = "structurally_verified"
                 else:
                     result["parse_method"] = "lockup_same_table_row_percent_audit_only"
                 result["evidence"] = table_text[:500]
+                result["structured_evidence"] = cls._table_evidence(table, scope="period_percent_rows")
                 return result
 
             header_index = next((
@@ -878,10 +1037,16 @@ class DARTCollector:
                         )
                     ), 6)
                     result["parse_method"] = "lockup_complete_period_shares_sum"
+                    result["rule_id"] = "DART_LOCKUP_COMPLETE_PERIOD_SHARE_SUM_V1"
+                    result["parser_validation_status"] = "structurally_verified"
                 else:
                     result["parse_method"] = "lockup_table_share_column_audit_only"
                 result["evidence"] = table_text[:500]
+                result["structured_evidence"] = cls._table_evidence(table, scope="period_share_rows")
                 return result
+        if re.search(r"의무\s*보유\s*확약.*?[0-9][0-9,]*(?:\.[0-9]+)?\s*%", normalized_document):
+            result["parser_validation_status"] = "candidate_rejected"
+            result["rejection_reason"] = "institutional_demand_scope_or_denominator_not_verified"
         return result
 
     @staticmethod

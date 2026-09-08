@@ -9,7 +9,7 @@ from uuid import uuid4
 import pandas as pd
 
 from config import PROC_DIR, RAW_DIR
-from data.collectors.dart_collector import DARTCollector
+from data.collectors.dart_collector import DEMAND_PARSER_VERSION, DARTCollector
 from data.collectors.krx_collector import KRXCollector
 from data.collectors.institutional_result_collector import (
     INSTITUTIONAL_RESULT_COLUMNS,
@@ -31,8 +31,9 @@ MAX_FILING_TO_LISTING_DAYS = 400
 STRUCTURED_PRICE_CHECK_VERSION = 3
 OFFERING_PRICE_PARSER_VERSION = 4
 DART_LINEAGE_VERSION = 1
-DART_DEMAND_PARSER_VERSION = 4
-DART_FINAL_TERMS_DEMAND_PARSER_VERSION = 4
+DART_DEMAND_PARSER_VERSION = DEMAND_PARSER_VERSION
+DART_FINAL_TERMS_DEMAND_PARSER_VERSION = DEMAND_PARSER_VERSION
+DART_INSTITUTIONAL_DATA_CONTRACT_VERSION = 1
 MAX_DEMAND_DOCUMENT_CANDIDATES = 8
 DOCUMENT_RETRY_AFTER_DAYS = 7
 OFFICIAL_SOURCE_RESOLUTION_COLUMNS = [
@@ -140,6 +141,9 @@ class HistoricalIPOPipeline:
         self._offering_document_cache.to_parquet(
             self.raw_dir / "dart_offering_document_cache.parquet", index=False
         )
+        self._build_institutional_extraction_audit().to_parquet(
+            self.raw_dir / "dart_institutional_extraction_audit.parquet", index=False
+        )
         lineage = pd.DataFrame(self._lineage_rows)
         lineage.to_parquet(self.raw_dir / "dart_disclosure_lineage.parquet", index=False)
         self._build_document_failure_audit().to_parquet(
@@ -235,6 +239,43 @@ class HistoricalIPOPipeline:
         logger.info("실제 데이터 파이프라인 완료: %d개 학습 행", len(features))
         return summary
 
+    def _build_institutional_extraction_audit(self) -> pd.DataFrame:
+        """문서별 후보·승인·거절 근거를 모델 피처와 분리해 보존한다."""
+        frames: list[pd.DataFrame] = []
+        for source_kind, cache, version_column in (
+            ("demand_lineage", self._demand_document_cache, "demand_parser_version"),
+            ("final_terms", self._offering_document_cache, "dart_final_terms_demand_parser_version"),
+        ):
+            if cache.empty or "rcept_no" not in cache.columns:
+                continue
+            frame = cache.copy()
+            frame["document_source_kind"] = source_kind
+            frame["parser_version"] = pd.to_numeric(
+                frame.get(version_column, pd.Series(index=frame.index, dtype=float)), errors="coerce"
+            )
+            frame = frame[frame["parser_version"].eq(DEMAND_PARSER_VERSION)]
+            if frame.empty:
+                continue
+            frames.append(frame)
+        columns = [
+            "document_source_kind", "rcept_no", "corp_code", "corp_name", "rcept_dt", "report_nm",
+            "parser_version", "parsed_at", "institutional_demand_ratio",
+            "institutional_demand_rule_id", "institutional_demand_parser_validation_status",
+            "institutional_demand_rejection_reason", "institutional_demand_evidence",
+            "institutional_demand_structured_evidence", "lockup_commitment_ratio", "lockup_rule_id",
+            "lockup_parser_validation_status", "lockup_rejection_reason", "lockup_parse_evidence",
+            "lockup_structured_evidence", "demand_offering_price", "demand_offering_price_context",
+        ]
+        if not frames:
+            return pd.DataFrame(columns=columns)
+        audit = pd.concat(frames, ignore_index=True, sort=False)
+        for column in columns:
+            if column not in audit.columns:
+                audit[column] = pd.NA
+        return audit[columns].sort_values(
+            ["rcept_dt", "rcept_no", "document_source_kind"], na_position="last"
+        ).drop_duplicates(["rcept_no", "document_source_kind"], keep="last").reset_index(drop=True)
+
     def _write_stage_datasets(
         self, features: pd.DataFrame, feature_time_audit: pd.DataFrame
     ) -> dict[str, dict[str, Any]]:
@@ -254,6 +295,7 @@ class HistoricalIPOPipeline:
                 "dual_target_rows": int(dataset["stage_dual_target_ready"].sum()),
                 "feature_complete_rows": int(dataset["stage_features_complete"].sum()),
                 "time_valid_rows": int(dataset["stage_time_valid"].sum()),
+                "source_valid_rows": int(dataset["stage_source_valid"].sum()),
                 "model_candidate_rows": int(dataset["stage_model_candidate"].sum()),
                 "offering_type_breakdown": stage_readiness_by_offering_type(dataset),
             }
@@ -901,12 +943,12 @@ class HistoricalIPOPipeline:
     def _select_dart_final_terms_demand(
         offering_documents: list[tuple[pd.Series, dict[str, Any]]],
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """최종 발행조건 DART 문서의 통합 기관 수요 결과만 모델 원천으로 고른다.
+        """최종 발행조건 문서에서 구조 검증된 기관 피처를 값별로 고른다.
 
         공동주관사별 공지를 합산하지 않는다. 발행회사와 대표주관사가 DART에
         제출한 최종 발행조건 문서의 기관 수요예측 표가 전체 기관 기준으로
-        직접 기재된 경우만 사용한다. 개별·비례·일반청약 경쟁률은 파서에서
-        이미 제외되고, 다른 접수번호의 기간별 확약을 섞지도 않는다.
+        직접 기재된 경우만 사용한다. 경쟁률과 통합 확약은 같은 IPO의 서로
+        다른 최신 공시에도 존재할 수 있으므로 값별 출처를 독립 보존한다.
         """
         result: dict[str, Any] = {}
         metadata = {
@@ -916,41 +958,56 @@ class HistoricalIPOPipeline:
             "lockup_rcept_dt": None,
         }
         lockup_fields = LOCKUP_FIELDS
-        for candidate, document in offering_documents:
+        ordered = sorted(
+            offering_documents,
+            key=lambda item: (
+                pd.to_datetime(getattr(item[0], "rcept_dt", None), errors="coerce").value
+                if not pd.isna(pd.to_datetime(getattr(item[0], "rcept_dt", None), errors="coerce")) else -1,
+                str(getattr(item[0], "rcept_no", "")),
+            ),
+            reverse=True,
+        )
+        for candidate, document in ordered:
             if not bool(getattr(candidate, "is_final_conditions", False)):
                 continue
             if document.get("dart_final_terms_demand_parser_version") != DART_FINAL_TERMS_DEMAND_PARSER_VERSION:
                 continue
             receipt = str(candidate.rcept_no)
             receipt_date = candidate.rcept_dt
-            # 기관 경쟁률과 확약은 같은 최종 결과 문서의 한 묶음이어야 한다.
-            # 정정본 A의 경쟁률과 이전 문서 B의 확약을 조합하지 않는다.
             if (
-                document.get("institutional_demand_ratio") is None
-                or not all(document.get(field) is not None for field in lockup_fields)
+                result.get("institutional_demand_ratio") is None
+                and document.get("institutional_demand_ratio") is not None
+                and document.get("institutional_demand_parser_validation_status") == "structurally_verified"
             ):
-                continue
-            result["institutional_demand_ratio"] = document["institutional_demand_ratio"]
-            result["institutional_demand_parse_method"] = document.get(
-                "institutional_demand_parse_method"
-            )
-            result["institutional_demand_evidence"] = document.get(
-                "institutional_demand_evidence"
-            )
-            for field in (*lockup_fields, "lockup_none_ratio", "lockup_parse_method", "lockup_parse_evidence"):
-                result[field] = document.get(field)
-            result["institutional_source_scope"] = "dart_final_terms_aggregate_institutional"
-            result["lockup_source_scope"] = "dart_final_terms_aggregate_institutional"
+                for field in (
+                    "institutional_demand_ratio", "institutional_demand_parse_method",
+                    "institutional_demand_evidence", "institutional_demand_rule_id",
+                    "institutional_demand_parser_validation_status",
+                    "institutional_demand_structured_evidence",
+                ):
+                    result[field] = document.get(field)
+                result["institutional_source_scope"] = "dart_final_terms_aggregate_institutional"
+                metadata["institutional_rcept_no"] = receipt
+                metadata["institutional_rcept_dt"] = receipt_date
             source_url = f"https://dart.fss.or.kr/dsaf001/main.do?rcpNo={receipt}"
-            result["institutional_source_url"] = source_url
-            result["lockup_source_url"] = source_url
-            metadata.update({
-                "institutional_rcept_no": receipt,
-                "institutional_rcept_dt": receipt_date,
-                "lockup_rcept_no": receipt,
-                "lockup_rcept_dt": receipt_date,
-            })
-            break
+            if metadata["institutional_rcept_no"] == receipt:
+                result["institutional_source_url"] = source_url
+            if (
+                result.get("lockup_commitment_ratio") is None
+                and document.get("lockup_commitment_ratio") is not None
+                and document.get("lockup_parser_validation_status") == "structurally_verified"
+            ):
+                for field in (
+                    *lockup_fields, "lockup_none_ratio", "lockup_parse_method", "lockup_parse_evidence",
+                    "lockup_rule_id", "lockup_parser_validation_status", "lockup_structured_evidence",
+                ):
+                    result[field] = document.get(field)
+                result["lockup_source_scope"] = "dart_final_terms_aggregate_institutional"
+                result["lockup_source_url"] = source_url
+                metadata["lockup_rcept_no"] = receipt
+                metadata["lockup_rcept_dt"] = receipt_date
+            if result.get("institutional_demand_ratio") is not None and result.get("lockup_commitment_ratio") is not None:
+                break
         return result, metadata
 
     @staticmethod
@@ -995,11 +1052,19 @@ class HistoricalIPOPipeline:
             if (
                 result.get("institutional_demand_ratio") is None
                 and document.get("institutional_demand_ratio") is not None
+                and document.get("institutional_demand_parser_validation_status") == "structurally_verified"
             ):
                 result.update({
                     "institutional_demand_ratio": document["institutional_demand_ratio"],
                     "institutional_demand_parse_method": document.get("institutional_demand_parse_method"),
                     "institutional_demand_evidence": document.get("institutional_demand_evidence"),
+                    "institutional_demand_rule_id": document.get("institutional_demand_rule_id"),
+                    "institutional_demand_parser_validation_status": document.get(
+                        "institutional_demand_parser_validation_status"
+                    ),
+                    "institutional_demand_structured_evidence": document.get(
+                        "institutional_demand_structured_evidence"
+                    ),
                     "institutional_source_scope": "dart_lineage_aggregate_institutional",
                     "institutional_source_url": source_url,
                 })
@@ -1008,8 +1073,12 @@ class HistoricalIPOPipeline:
             if (
                 result.get("lockup_commitment_ratio") is None
                 and document.get("lockup_commitment_ratio") is not None
+                and document.get("lockup_parser_validation_status") == "structurally_verified"
             ):
-                for field in (*LOCKUP_FIELDS, "lockup_none_ratio", "lockup_parse_method", "lockup_parse_evidence"):
+                for field in (
+                    *LOCKUP_FIELDS, "lockup_none_ratio", "lockup_parse_method", "lockup_parse_evidence",
+                    "lockup_rule_id", "lockup_parser_validation_status", "lockup_structured_evidence",
+                ):
                     result[field] = document.get(field)
                 result.update({
                     "lockup_source_scope": "dart_lineage_aggregate_institutional",
@@ -1465,21 +1534,18 @@ class HistoricalIPOPipeline:
                 "lockup_rcept_dt": lockup_rcept_dt,
                 "institutional_available_at": institutional_rcept_dt,
                 "lockup_available_at": lockup_rcept_dt,
+                "institutional_data_contract_version": DART_INSTITUTIONAL_DATA_CONTRACT_VERSION,
                 "institutional_source_url": verified_demand.get("institutional_source_url"),
                 "lockup_source_url": verified_demand.get("lockup_source_url"),
                 "institutional_validation_status": (
-                    "verified_dart_final_terms_aggregate"
-                    if verified_demand.get("institutional_source_scope") == "dart_final_terms_aggregate_institutional"
-                    else "verified_dart_lineage_aggregate_institutional"
+                    "verified_dart_structural_aggregate_v1"
                     if verified_demand.get("institutional_demand_ratio") is not None
-                    else "dart_final_terms_value_not_found"
+                    else "dart_aggregate_value_not_verified"
                 ),
                 "lockup_validation_status": (
-                    "verified_dart_final_terms_aggregate"
-                    if verified_demand.get("lockup_source_scope") == "dart_final_terms_aggregate_institutional"
-                    else "verified_dart_lineage_aggregate_institutional"
+                    "verified_dart_structural_aggregate_v1"
                     if verified_demand.get("lockup_commitment_ratio") is not None
-                    else "dart_final_terms_value_not_found"
+                    else "dart_aggregate_value_not_verified"
                 ),
                 **offering,
                 # 이 행은 현재 KRX 상장 이벤트에 맞춰 수집한 공시다. 원문에

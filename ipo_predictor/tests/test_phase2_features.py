@@ -144,6 +144,8 @@ class Phase2FeatureTests(unittest.TestCase):
             profile = get_model_profile(profile_name)
             for feature_name in profile.feature_names:
                 features[feature_name] = 1.0
+        features["institutional_validation_status"] = "verified_dart_structural_aggregate_v1"
+        features["lockup_validation_status"] = "verified_dart_structural_aggregate_v1"
         audit = pd.DataFrame([
             {
                 "event_id": event_id, "feature_name": feature_name,
@@ -162,6 +164,28 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(len(post_demand), 2)
         self.assertTrue(pre["stage_model_candidate"].all())
         self.assertTrue(post_demand["stage_model_candidate"].all())
+
+    def test_stage_dataset_blocks_legacy_parser_verified_label(self):
+        profile = get_model_profile("post_demand")
+        features = pd.DataFrame({
+            "event_id": ["legacy"],
+            "offering_price_review_status": ["verified_currency_unit"],
+            "open_return_pct": [10.0], "close_return_pct": [8.0],
+            "institutional_validation_status": ["verified_dart_lineage_aggregate_institutional"],
+            "lockup_validation_status": ["verified_dart_lineage_aggregate_institutional"],
+        })
+        for feature_name in profile.feature_names:
+            features[feature_name] = 1.0
+        audit = pd.DataFrame([
+            {"event_id": "legacy", "feature_name": feature_name, "is_missing": False,
+             "time_validation_status": "pre_listing_or_same_day"}
+            for feature_name in profile.feature_names
+        ])
+
+        dataset = build_stage_dataset(features, "post_demand", audit)
+
+        self.assertFalse(dataset.loc[0, "stage_source_valid"])
+        self.assertFalse(dataset.loc[0, "stage_model_candidate"])
 
     def test_merge_excludes_market_transfer_with_different_listing_date(self):
         dart = pd.DataFrame({
@@ -336,7 +360,43 @@ class Phase2FeatureTests(unittest.TestCase):
         )
 
         self.assertEqual(parsed["institutional_demand_ratio"], 329.47)
-        self.assertEqual(parsed["institutional_demand_parse_method"], "demand_ratio_total_table_row")
+        self.assertEqual(parsed["institutional_demand_parse_method"], "demand_ratio_explicit_total_column")
+        self.assertEqual(parsed["institutional_demand_parser_validation_status"], "structurally_verified")
+
+    def test_demand_forecast_preserves_rowspan_and_colspan_for_total_column(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            """
+            <table>
+              <tr><th rowspan="2">구분</th><th colspan="2">기관투자자</th><th rowspan="2">합계</th></tr>
+              <tr><th>국내</th><th>해외</th></tr>
+              <tr><td>경쟁률</td><td>18.40 : 1</td><td>21.00 : 1</td><td>329.47 : 1</td></tr>
+            </table>
+            """, "12345678",
+        )
+
+        self.assertEqual(parsed["institutional_demand_ratio"], 329.47)
+        self.assertEqual(parsed["institutional_demand_rule_id"], "DART_DEMAND_TOTAL_COLUMN_V1")
+        self.assertIn('"selected_column": 3', parsed["institutional_demand_structured_evidence"])
+
+    def test_demand_forecast_rejects_multiple_ratios_without_explicit_total_header(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            "<table><tr><th>기관투자자 경쟁률</th><td>18.40 : 1</td><td>329.47 : 1</td></tr></table>",
+            "12345678",
+        )
+
+        self.assertIsNone(parsed["institutional_demand_ratio"])
+
+    def test_demand_forecast_rejects_retail_total_table(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            """
+            <table>
+              <tr><th>구분</th><th>기관투자자 배정</th><th>합계</th></tr>
+              <tr><td>일반청약 경쟁률</td><td>18.40 : 1</td><td>329.47 : 1</td></tr>
+            </table>
+            """, "12345678",
+        )
+
+        self.assertIsNone(parsed["institutional_demand_ratio"])
 
     def test_demand_forecast_rejects_underwriting_review_threshold(self):
         parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(

@@ -140,6 +140,10 @@ class FeatureEngineer:
             "institutional_available_at", "lockup_available_at",
             "institutional_source_url", "lockup_source_url",
             "institutional_validation_status", "lockup_validation_status",
+            "institutional_data_contract_version",
+            "institutional_demand_rule_id", "lockup_rule_id",
+            "institutional_demand_parser_validation_status", "lockup_parser_validation_status",
+            "institutional_demand_structured_evidence", "lockup_structured_evidence",
         ]
         for column in identity_columns:
             if column not in df.columns:
@@ -204,6 +208,7 @@ class FeatureEngineer:
             "offering_type": ["offering_type_krx", "offering_type_dart", "offering_type"],
             "industry_name": ["industry_name_krx", "industry_name_dart", "industry_name"],
             "listing_segment": ["listing_segment_krx", "listing_segment_dart", "sector_krx", "sector"],
+            "lead_underwriter": ["lead_underwriter_dart", "lead_underwriter_krx", "lead_underwriter"],
             "market": ["market", "market_krx", "market_dart"],
             "event_source_url": ["source_url", "source_url_krx", "event_source_url"],
             "verification_status": ["verification_status", "verification_status_krx"],
@@ -808,7 +813,7 @@ class FeatureEngineer:
                     "human_review_required": bool(missing or validation not in {
                         "verified_currency_unit", "verified_text_and_structured",
                         "verified_structured_api", "manual_verified",
-                        "verified_dart_final_terms_aggregate",
+                        "verified_dart_structural_aggregate_v1",
                         "verified_official_underwriter_aggregate_bundle",
                         "official_source_krx_code_enriched", "official_source_collected",
                     }),
