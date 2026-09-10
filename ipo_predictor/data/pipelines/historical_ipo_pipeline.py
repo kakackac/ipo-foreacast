@@ -754,10 +754,17 @@ class HistoricalIPOPipeline:
             isu_cd = row.get("isu_cd")
             market = row.get("market")
             corp_name = row.get("corp_name")
-            record = self.krx.get_listing_day_price(
-                ticker, listing_date, isu_cd=isu_cd, market=market, corp_name=corp_name
-            )
+            try:
+                record = self.krx.get_listing_day_price(
+                    ticker, listing_date, isu_cd=isu_cd, market=market, corp_name=corp_name
+                )
+            except (RuntimeError, ConnectionError, TimeoutError):
+                self._checkpoint_listing_prices(cached, records)
+                logger.error("KRX 가격 수집 중단: 완료한 %d행을 저장했습니다. 실패 행은 재실행 대상입니다.", len(records))
+                raise
             records.append(record)
+            if len(records) % 25 == 0:
+                self._checkpoint_listing_prices(cached, records)
         if reused:
             logger.info("KRX 상장일 가격 캐시 재사용: %d건", reused)
         prices = pd.DataFrame(records)
@@ -765,6 +772,22 @@ class HistoricalIPOPipeline:
         # Parquet은 같은 열의 혼합 자료형을 저장할 수 없으므로 여기서 통일한다.
         prices["listing_date"] = pd.to_datetime(prices["listing_date"], errors="coerce")
         return prices.drop_duplicates(["ticker", "listing_date"], keep="last")
+
+    def _checkpoint_listing_prices(self, cached: pd.DataFrame, records: list[dict]) -> None:
+        """Preserve previous dates and atomically checkpoint completed requests only."""
+        if not records:
+            return
+        combined = pd.concat([cached, pd.DataFrame(records)], ignore_index=True)
+        combined = combined.drop(columns="_cache_key", errors="ignore")
+        combined["listing_date"] = pd.to_datetime(combined["listing_date"], errors="coerce")
+        combined = combined.drop_duplicates(["ticker", "listing_date"], keep="last")
+        target = self.raw_dir / "ipo_listing_prices.parquet"
+        temporary = target.with_name(f".{target.name}.{uuid4().hex}.tmp")
+        try:
+            combined.to_parquet(temporary, index=False)
+            temporary.replace(target)
+        finally:
+            temporary.unlink(missing_ok=True)
 
     def _collect_index_with_cache(
         self, index_code: str, start_year: int, end_year: int, filename: str

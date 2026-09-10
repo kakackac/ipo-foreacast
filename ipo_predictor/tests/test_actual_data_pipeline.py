@@ -929,6 +929,30 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertEqual(prices.loc[0, "price_match_status"], "matched")
             self.assertTrue(pd.notna(prices.loc[0, "price_raw_response_evidence"]))
 
+    def test_price_failure_checkpoints_and_resume_skips_completed_match(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            krx = _FakeKRX()
+            original = krx.get_listing_day_price
+            calendar = pd.DataFrame([
+                {"ticker": "123456", "listing_date": "2024-05-10", "market": "KOSDAQ"},
+                {"ticker": "123457", "listing_date": "2024-05-11", "market": "KOSDAQ"},
+            ])
+            krx.get_listing_day_price = Mock(side_effect=[
+                original("123456", "20240510", market="KOSDAQ"), RuntimeError("DNS unavailable")
+            ])
+            pipeline = HistoricalIPOPipeline(dart_collector=_FakeDART(), krx_collector=krx,
+                                            raw_dir=root / "raw", processed_dir=root / "processed")
+            with self.assertRaisesRegex(RuntimeError, "DNS unavailable"):
+                pipeline._collect_listing_prices(calendar)
+            saved = pd.read_parquet(root / "raw/ipo_listing_prices.parquet")
+            self.assertEqual(saved["ticker"].tolist(), ["123456"])
+            krx.get_listing_day_price = Mock(side_effect=original)
+            resumed = pipeline._collect_listing_prices(calendar)
+            self.assertEqual(len(resumed), 2)
+            self.assertEqual(krx.get_listing_day_price.call_count, 1)
+            self.assertEqual(krx.get_listing_day_price.call_args.args[0], "123457")
+
     def test_attach_prices_replaces_prior_enrichment_without_duplicate_market_columns(self):
         calendar = pd.DataFrame([{
             "ticker": "123456", "listing_date": "2024-01-10", "market": "KOSDAQ",
