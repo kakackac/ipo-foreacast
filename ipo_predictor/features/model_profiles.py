@@ -162,6 +162,7 @@ def stage_model_candidate_mask(features: pd.DataFrame, profile: PredictionProfil
     critical_complete = features.reindex(columns=profile.critical_features).notna().all(axis=1)
     return (
         critical_complete
+        & features.get("market", pd.Series(index=features.index, dtype=object)).isin(["KOSPI", "KOSDAQ"])
         & features["stage_offering_price_verified"].fillna(False).astype(bool)
         & features["stage_dual_target_ready"].fillna(False).astype(bool)
         & features["stage_time_valid"].fillna(False).astype(bool)

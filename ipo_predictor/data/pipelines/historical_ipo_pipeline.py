@@ -619,6 +619,9 @@ class HistoricalIPOPipeline:
 
         cached = self._load_cached_frame("krx_official_event_master.parquet")
         if not cached.empty and "listing_date" in cached:
+            if "event_market_scope_version" not in cached or not cached["event_market_scope_version"].eq(1).all():
+                cached.to_parquet(self.raw_dir / "krx_events_before_market_scope.parquet", index=False)
+                cached = cached.iloc[0:0].copy()
             cached = cached.copy()
             cached["listing_date"] = pd.to_datetime(cached["listing_date"], errors="coerce")
             cached = cached[
@@ -728,6 +731,16 @@ class HistoricalIPOPipeline:
             cached = cached.drop_duplicates("_cache_key", keep="last")
 
         expected = calendar.copy()
+        supported = expected.get("market", pd.Series(index=expected.index, dtype=object)).isin(["KOSPI", "KOSDAQ"])
+        rejected = expected.loc[~supported].copy()
+        if not rejected.empty:
+            rejected["exclusion_reason"] = "unsupported_or_unverified_listing_market"
+            if "market" in rejected:
+                rejected.loc[rejected["market"].isin(["KONEX", "코넥스"]), "exclusion_reason"] = "excluded_konex_event"
+            rejected.to_parquet(self.raw_dir / "krx_market_exclusions.parquet", index=False)
+        expected = expected.loc[supported].copy()
+        if expected.empty:
+            return pd.DataFrame(columns=["ticker", "listing_date", "open_price", "close_price"])
         expected["listing_date"] = pd.to_datetime(expected["listing_date"], errors="coerce")
         expected["_cache_key"] = self._listing_key(expected)
         cached_by_key = cached.set_index("_cache_key") if not cached.empty else pd.DataFrame()

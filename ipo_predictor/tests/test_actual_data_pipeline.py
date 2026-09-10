@@ -953,6 +953,24 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertEqual(krx.get_listing_day_price.call_count, 1)
             self.assertEqual(krx.get_listing_day_price.call_args.args[0], "123457")
 
+    def test_konex_and_unknown_market_do_not_request_prices(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            krx = _FakeKRX()
+            krx.get_listing_day_price = Mock(side_effect=krx.get_listing_day_price)
+            pipeline = HistoricalIPOPipeline(dart_collector=_FakeDART(), krx_collector=krx,
+                                            raw_dir=root / "raw", processed_dir=root / "processed")
+            calendar = pd.DataFrame([
+                {"ticker": "123456", "listing_date": "2022-01-01", "market": "KONEX"},
+                {"ticker": "123456", "listing_date": "2024-01-01", "market": "KOSDAQ"},
+                {"ticker": "123457", "listing_date": "2024-01-01", "market": None},
+            ])
+            prices = pipeline._collect_listing_prices(calendar)
+            self.assertEqual(len(prices), 1)
+            self.assertEqual(krx.get_listing_day_price.call_count, 1)
+            self.assertEqual(krx.get_listing_day_price.call_args.args[1], "20240101")
+            self.assertEqual(len(pd.read_parquet(root / "raw/krx_market_exclusions.parquet")), 2)
+
     def test_attach_prices_replaces_prior_enrichment_without_duplicate_market_columns(self):
         calendar = pd.DataFrame([{
             "ticker": "123456", "listing_date": "2024-01-10", "market": "KOSDAQ",

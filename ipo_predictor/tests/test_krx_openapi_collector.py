@@ -96,9 +96,11 @@ class KRXOpenAPICollectorTests(unittest.TestCase):
         """)
         collector = KRXCollector(session=session, request_delay=0)
 
-        events = collector.get_official_listing_events("20260101", "20260827")
+        events = collector._get_official_listing_events_for_market("20260101", "20260827", "KOSDAQ")
 
         self.assertEqual(len(events), 2)
+        self.assertTrue(events["market"].eq("KOSDAQ").all())
+        self.assertEqual(session.post.call_args.kwargs["data"]["marketType"], "2")
         self.assertEqual(events.loc[0, "event_class"], "general_ipo")
         self.assertEqual(events.loc[1, "event_class"], "spac_ipo")
         self.assertEqual(events.loc[0, "offering_type"], "common_stock_ipo")
@@ -107,6 +109,16 @@ class KRXOpenAPICollectorTests(unittest.TestCase):
         self.assertEqual(events.loc[0, "industry_name"], "소프트웨어 개발 및 공급업")
         self.assertEqual(events.loc[0, "source_name"], "KRX_KIND_new_listing_company")
         self.assertEqual(collector.official_listing_requests[-1]["status"], "success")
+
+    def test_market_scoped_collection(self):
+        collector = KRXCollector(request_delay=0)
+        collector._get_official_listing_events_for_market = Mock(side_effect=[
+            pd.DataFrame([{"event_id": "one", "market": "KOSPI"}]),
+            pd.DataFrame([{"event_id": "two", "market": "KOSDAQ"}]),
+        ])
+        result = collector.get_official_listing_events("20220101", "20221231")
+        self.assertEqual(set(result.market), {"KOSPI", "KOSDAQ"})
+        self.assertTrue(result.event_market_scope_version.eq(1).all())
 
     def test_reclassification_repairs_blank_cached_offering_types(self):
         cached = pd.DataFrame([

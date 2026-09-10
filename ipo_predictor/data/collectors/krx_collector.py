@@ -541,6 +541,16 @@ class KRXCollector:
         return pd.Series([None] * len(frame), index=frame.index)
 
     def get_official_listing_events(self, start_date: str, end_date: str) -> pd.DataFrame:
+        """Collect only explicitly scoped KOSPI/KOSDAQ listing events."""
+        frames = [self._get_official_listing_events_for_market(start_date, end_date, market)
+                  for market in ("KOSPI", "KOSDAQ")]
+        result = pd.concat(frames, ignore_index=True)
+        if not result.empty and result.groupby("event_id")["market"].nunique().gt(1).any():
+            raise RuntimeError("KIND 시장별 응답에 중복 시장 이벤트가 있습니다. 시장 검증이 필요합니다.")
+        result["event_market_scope_version"] = 1
+        return result.drop_duplicates("event_id").reset_index(drop=True)
+
+    def _get_official_listing_events_for_market(self, start_date: str, end_date: str, market: str) -> pd.DataFrame:
         """KIND 공식 신규상장기업현황을 이벤트 마스터 원천으로 수집한다.
 
         KIND는 KRX가 운영하는 공식 상장공시 채널이다. 이 공개 결과는
@@ -566,7 +576,7 @@ class KRXCollector:
             "forward": "listingtype_down",
             "currentPageSize": "3000",
             "pageIndex": "1",
-            "marketType": "",
+            "marketType": {"KOSPI": "1", "KOSDAQ": "2"}[market],
             "country": "",
             "industry": "",
             "listTypeArrStr": "01|02|03|04|05",
@@ -575,10 +585,11 @@ class KRXCollector:
             "fromDate": start.strftime("%Y-%m-%d"),
             "toDate": end.strftime("%Y-%m-%d"),
         }
-        request_id = f"kind_listing_{start:%Y%m%d}_{end:%Y%m%d}"
+        request_id = f"kind_listing_{market}_{start:%Y%m%d}_{end:%Y%m%d}"
         attempt = {
             "request_id": request_id,
             "source": "KIND_official_listing_company",
+            "market": market,
             "start_date": start.isoformat(),
             "end_date": end.isoformat(),
             "cache_used": False,
@@ -618,7 +629,7 @@ class KRXCollector:
             result = result.dropna(subset=["corp_name", "listing_date"]).copy()
             result["ticker"] = result["ticker"].fillna("").astype(str).str.strip()
             result["krx_standard_code"] = None
-            result["market"] = None
+            result["market"] = market
             result["industry_code"] = None
             result["listing_segment"] = None
             result = self.reclassify_official_listing_events(result)

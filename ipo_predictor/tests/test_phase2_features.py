@@ -231,7 +231,7 @@ class Phase2FeatureTests(unittest.TestCase):
             "offering_price_review_status": ["verified_currency_unit"] * 2,
             "open_return_pct": [10.0, 5.0],
             "close_return_pct": [8.0, 4.0],
-            "listing_date": ["2024-01-10", "2024-01-11"],
+            "listing_date": ["2024-01-10", "2024-01-11"], "market": ["KOSDAQ", "KOSPI"],
         })
         for profile_name in ("pre_demand", "post_demand"):
             profile = get_model_profile(profile_name)
@@ -286,7 +286,7 @@ class Phase2FeatureTests(unittest.TestCase):
     def test_stage_dataset_accepts_current_official_underwriter_contract(self):
         profile = get_model_profile("post_demand")
         features = pd.DataFrame({
-            "event_id": ["official"], "event_class": ["general_ipo"],
+            "event_id": ["official"], "event_class": ["general_ipo"], "market": ["KOSDAQ"],
             "offering_price_review_status": ["verified_currency_unit"],
             "open_return_pct": [10.0], "close_return_pct": [8.0],
             "institutional_validation_status": ["verified_official_underwriter_aggregate_v1"],
@@ -305,10 +305,15 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertTrue(dataset.loc[0, "stage_source_valid"])
         self.assertTrue(dataset.loc[0, "stage_model_candidate"])
 
+        for market in ("KONEX", None, ""):
+            features["market"] = market
+            blocked = build_stage_dataset(features, "post_demand", audit)
+            self.assertFalse(blocked.loc[0, "stage_model_candidate"])
+
     def test_stage_dataset_allows_optional_missing_values_for_train_only_imputation(self):
         profile = get_model_profile("post_demand")
         features = pd.DataFrame({
-            "event_id": ["optional-missing"], "event_class": ["general_ipo"],
+            "event_id": ["optional-missing"], "event_class": ["general_ipo"], "market": ["KOSDAQ"],
             "offering_price_review_status": ["verified_currency_unit"],
             "open_return_pct": [10.0], "close_return_pct": [8.0],
             "institutional_validation_status": ["verified_dart_structural_aggregate_v1"],
@@ -366,7 +371,7 @@ class Phase2FeatureTests(unittest.TestCase):
         rows = []
         for index in range(100):
             row = {
-                "event_id": f"event-{index}", "event_class": "general_ipo",
+                "event_id": f"event-{index}", "event_class": "general_ipo", "market": "KOSDAQ",
                 "listing_date": pd.Timestamp("2020-01-01") + pd.Timedelta(days=index * 15),
                 "offering_price_review_status": "verified_currency_unit",
                 "price_target_validation_status": "official_price_verified",
