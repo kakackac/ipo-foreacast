@@ -15,6 +15,7 @@ api/server.py
 """
 
 import logging
+import os
 from datetime import datetime
 from typing import Optional
 
@@ -22,11 +23,12 @@ from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel, Field, validator
 
 logger = logging.getLogger(__name__)
+PREDICTION_STAGE = os.getenv("IPO_PREDICTION_STAGE", "post_demand")
 
 app = FastAPI(
-    title="IPO 시초가 예측 API",
-    description="공모주 상장일 시초가 수익률 예측 서비스",
-    version="1.0.0",
+    title="IPO 상장일 수익률 예측 API",
+    description="공모주 상장일 시초가 및 종가 수익률 예측 서비스",
+    version="2.0.0",
 )
 
 
@@ -37,10 +39,7 @@ class IPOFeatures(BaseModel):
 
     # 필수 — CORE 피처
     institutional_demand_ratio:    float = Field(...,  ge=0, le=3000,  description="기관 수요예측 경쟁률")
-    lockup_6m_ratio:               float = Field(...,  ge=0, le=1,     description="6개월 확약 비율")
-    lockup_3m_ratio:               float = Field(0.0,  ge=0, le=1)
-    lockup_1m_ratio:               float = Field(0.0,  ge=0, le=1)
-    lockup_15d_ratio:              float = Field(0.0,  ge=0, le=1)
+    lockup_commitment_ratio:       float = Field(...,  ge=0, le=1,     description="기관 의무보유확약 통합 비율")
     offering_price_band_position:  float = Field(...,  description="밴드 위치 (0=하단, 1=상단, >1=초과)")
     kospi_momentum_5d:             float = Field(0.0,  description="KOSPI 5일 수익률")
     kospi_momentum_20d:            float = Field(0.0,  description="KOSPI 20일 수익률")
@@ -48,7 +47,6 @@ class IPOFeatures(BaseModel):
     recent_ipo_avg_return_all:     float = Field(10.0, description="전체 최근 IPO 평균 수익률(%)")
 
     # 선택 — SECONDARY 피처 (없으면 모델 내부에서 중앙값 대체)
-    retail_subscription_ratio:     Optional[float] = Field(None, ge=0)
     float_share_ratio:             Optional[float] = Field(None, ge=0, le=1)
     secondary_offering_ratio:      Optional[float] = Field(None, ge=0, le=1)
     major_shareholder_lockup_months: Optional[int] = Field(None, ge=0)
@@ -65,9 +63,8 @@ class IPOFeatures(BaseModel):
     corp_name:      Optional[str] = None
     listing_date:   Optional[str] = None
 
-    @validator("lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio")
-    def lockup_sum_max_one(cls, v, values):
-        # 개별 비율은 0~1 사이 (합이 1 초과해도 허용 — 실제 DART 데이터에서 발생)
+    @validator("lockup_commitment_ratio")
+    def lockup_ratio_max_one(cls, v):
         return min(v, 1.0)
 
     class Config:
@@ -76,16 +73,12 @@ class IPOFeatures(BaseModel):
                 "corp_name":                     "테스트AI",
                 "listing_date":                  "2025-03-10",
                 "institutional_demand_ratio":    1250.0,
-                "lockup_6m_ratio":               0.42,
-                "lockup_3m_ratio":               0.18,
-                "lockup_1m_ratio":               0.10,
-                "lockup_15d_ratio":              0.05,
+                "lockup_commitment_ratio":       0.42,
                 "offering_price_band_position":  1.1,
                 "kospi_momentum_5d":             0.012,
                 "kospi_momentum_20d":            0.035,
                 "recent_ipo_avg_return_sector":  18.5,
                 "recent_ipo_avg_return_all":     14.2,
-                "retail_subscription_ratio":     900.0,
                 "offering_per":                  22.0,
                 "per_vs_sector_median":          0.78,
                 "revenue_growth_3y":             0.35,
@@ -94,19 +87,25 @@ class IPOFeatures(BaseModel):
         }
 
 
-class PredictionResponse(BaseModel):
-    """예측 응답"""
-    corp_name:            Optional[str]
-    listing_date:         Optional[str]
-    pred_return_pct:      float       = Field(..., description="예측 시초가 수익률 (%)")
+class ReturnPrediction(BaseModel):
+    """하나의 수익률 타깃에 대한 예측 결과"""
+    pred_return_pct:      float       = Field(..., description="예측 수익률 (%)")
     up_probability:       float       = Field(..., description="상승 확률 (0~1)")
     ci_90_low:            float       = Field(..., description="90% 신뢰구간 하단")
     ci_90_high:           float       = Field(..., description="90% 신뢰구간 상단")
     ci_50_low:            float       = Field(..., description="50% 신뢰구간 하단")
     ci_50_high:           float       = Field(..., description="50% 신뢰구간 상단")
     risk_grade:           str         = Field(..., description="리스크 등급 (A/B/C)")
-    lockup_weighted_score: float      = Field(..., description="확약 가중 점수")
     top_features:         list[dict]  = Field(default_factory=list)
+
+
+class PredictionResponse(BaseModel):
+    """상장 전 시초가·종가 동시 예측 응답"""
+    corp_name:            Optional[str]
+    listing_date:         Optional[str]
+    opening:              ReturnPrediction
+    closing:              ReturnPrediction
+    lockup_commitment_ratio: float    = Field(..., description="기관 의무보유확약 통합 비율")
     disclaimer:           str         = "이 예측은 투자 조언이 아닙니다. 과거 성과가 미래를 보장하지 않습니다."
     predicted_at:         str         = Field(default_factory=lambda: datetime.now().isoformat())
 
@@ -121,9 +120,9 @@ class BatchResponse(BaseModel):
 
 
 class ModelInfo(BaseModel):
-    name:         str
-    version:      str
-    n_features:   int
+    opening_model: str
+    closing_model: str
+    n_features:   dict[str, int]
     feature_set:  str
     trained_at:   Optional[str]
     overall_mae:  Optional[float]
@@ -132,70 +131,105 @@ class ModelInfo(BaseModel):
 
 # ── 모델 로더 (싱글톤) ────────────────────────────────────────
 
-_model = None
+_models: dict = {}
 _model_meta: dict = {}
 
-def get_model():
-    """모델 싱글톤 반환. 서버 시작 시 한 번만 로드."""
-    global _model, _model_meta
-    if _model is None:
+def get_models() -> dict:
+    """시초가·종가 모델 싱글톤 반환."""
+    global _models, _model_meta
+    if not _models:
         try:
             import sys, os
             sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
             from models.baseline.gradient_boost_model import IPOPriceModel
-            _model = IPOPriceModel.load("baseline_v1")
-            logger.info("모델 로드 완료")
+            _models = {
+                "opening": IPOPriceModel.load(f"{PREDICTION_STAGE}_open_v1"),
+                "closing": IPOPriceModel.load(f"{PREDICTION_STAGE}_close_v1"),
+            }
+            logger.info("시초가·종가 모델 로드 완료")
         except Exception as e:
-            logger.warning("저장된 모델 없음, 데모 모델 사용: %s", e)
-            _model = _create_demo_model()
-    return _model
+            logger.warning("저장된 상장일 모델 없음, 데모 모델 사용: %s", e)
+            _models = _create_demo_models()
+    return _models
 
-def _create_demo_model():
-    """데모용 모델 (저장된 모델 없을 때 사용)"""
+def _create_demo_models() -> dict:
+    """저장된 모델이 없을 때 사용할 시초가·종가 데모 모델"""
     import sys, os
     sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
     from models.baseline.gradient_boost_model import IPOPriceModel
     from data.processors.feature_engineer import build_demo_dataset
-    from features.definitions import get_core_feature_names
+    from features.definitions import get_phase2_feature_names
 
-    df = build_demo_dataset(400)
-    feat_cols = [c for c in get_core_feature_names() if c in df.columns]
+    df = build_demo_dataset(400, phase="phase2")
+    feat_cols = [c for c in get_phase2_feature_names() if c in df.columns]
     X = df[feat_cols]
-    y = df["open_return_pct"]
     split = int(len(df) * 0.8)
-    model = IPOPriceModel(n_estimators=100)
-    model.fit(X.iloc[:split], y.iloc[:split], X.iloc[split:], y.iloc[split:])
-    model.feature_names = feat_cols
-    logger.info("데모 모델 학습 완료 (%d 피처)", len(feat_cols))
-    return model
+    models = {}
+    for target_name, target_col in [("opening", "open_return_pct"), ("closing", "close_return_pct")]:
+        model = IPOPriceModel(n_estimators=100)
+        model.imputation_values = {
+            column: float(X.iloc[:split][column].median()) for column in feat_cols
+        }
+        model.fit(
+            X.iloc[:split], df[target_col].iloc[:split],
+            X.iloc[split:], df[target_col].iloc[split:],
+        )
+        model.feature_names = feat_cols
+        models[target_name] = model
+    logger.info("상장일 데모 모델 학습 완료 (%d 피처)", len(feat_cols))
+    return models
 
 
 # ── 피처 변환 유틸 ────────────────────────────────────────────
 
-def _features_to_df(feat: IPOFeatures):
-    """IPOFeatures → 모델 입력 DataFrame 변환"""
-    import pandas as pd
-    import numpy as np
-
-    d = feat.dict(exclude={"corp_name", "listing_date"})
-
-    # 파생 피처 계산
-    d["lockup_weighted_score"] = (
-        d["lockup_6m_ratio"]  * 1.00 +
-        d["lockup_3m_ratio"]  * 0.75 +
-        d["lockup_1m_ratio"]  * 0.50 +
-        d["lockup_15d_ratio"] * 0.25
+def _feature_dict(feat: IPOFeatures) -> dict:
+    """요청 피처를 모델 입력용 숫자 사전으로 정리한다."""
+    raw = feat.dict(exclude={"corp_name", "listing_date"})
+    d = dict(raw)
+    band_position = d.get("offering_price_band_position")
+    d["band_exceeded"] = (
+        None if band_position is None else int(band_position > 1.0)
     )
-    d["band_exceeded"] = int(d["offering_price_band_position"] > 1.0)
+    return d
 
-    model = get_model()
-    df = pd.DataFrame([d])
 
-    # 모델이 요구하는 피처만 선택, 없는 피처는 0으로
+def _features_to_df(feature_dict: dict, model):
+    """훈련 때 저장한 결측 보정값으로 API 입력을 변환한다."""
+    import pandas as pd
+    values = dict(feature_dict)
     for col in model.feature_names:
-        if col not in df.columns:
-            df[col] = 0.0
-    return df[model.feature_names].fillna(0.0)
+        if col.endswith("__missing"):
+            base = col.removesuffix("__missing")
+            values[col] = float(base not in values or pd.isna(values.get(base)))
+        elif col not in values:
+            values[col] = pd.NA
+    df = pd.DataFrame([values]).reindex(columns=model.feature_names)
+    df = df.apply(pd.to_numeric, errors="coerce")
+    fill_values = getattr(model, "imputation_values", {})
+    unresolved = [
+        column for column in model.feature_names
+        if df[column].isna().any() and column not in fill_values
+    ]
+    if unresolved:
+        raise RuntimeError(
+            "모델에 결측 보정 메타데이터가 없습니다: " + ", ".join(unresolved)
+        )
+    return df.fillna(fill_values).astype(float)
+
+
+def _return_prediction(model, feature_dict: dict) -> ReturnPrediction:
+    X = _features_to_df(feature_dict, model)
+    pred = model.predict(X).iloc[0]
+    return ReturnPrediction(
+        pred_return_pct=float(pred["pred_return_pct"]),
+        up_probability=float(pred["up_probability"]),
+        ci_90_low=float(pred["ci_90_low"]),
+        ci_90_high=float(pred["ci_90_high"]),
+        ci_50_low=float(pred["ci_50_low"]),
+        ci_50_high=float(pred["ci_50_high"]),
+        risk_grade=pred["risk_grade"],
+        top_features=model.explain_prediction(X.iloc[0].to_dict(), top_n=5),
+    )
 
 
 # ── 엔드포인트 ────────────────────────────────────────────────
@@ -207,11 +241,11 @@ async def health():
 
 @app.get("/model/info", response_model=ModelInfo)
 async def model_info():
-    model = get_model()
+    models = get_models()
     return ModelInfo(
-        name         = "IPO Price Predictor",
-        version      = "1.0.0",
-        n_features   = len(model.feature_names),
+        opening_model = f"{PREDICTION_STAGE}_open_v1",
+        closing_model = f"{PREDICTION_STAGE}_close_v1",
+        n_features   = {name: len(model.feature_names) for name, model in models.items()},
         feature_set  = "core+secondary",
         trained_at   = _model_meta.get("trained_at"),
         overall_mae  = _model_meta.get("overall_mae"),
@@ -239,35 +273,21 @@ async def list_features():
 async def predict(feat: IPOFeatures, background_tasks: BackgroundTasks):
     """단일 종목 예측"""
     try:
-        model = get_model()
-        X = _features_to_df(feat)
-        pred = model.predict(X).iloc[0]
-
-        top_feats = model.explain_prediction(
-            feat.dict(exclude={"corp_name", "listing_date"}), top_n=5
-        )
+        models = get_models()
+        feature_dict = _feature_dict(feat)
 
         response = PredictionResponse(
             corp_name             = feat.corp_name,
             listing_date          = feat.listing_date,
-            pred_return_pct       = float(pred["pred_return_pct"]),
-            up_probability        = float(pred["up_probability"]),
-            ci_90_low             = float(pred["ci_90_low"]),
-            ci_90_high            = float(pred["ci_90_high"]),
-            ci_50_low             = float(pred["ci_50_low"]),
-            ci_50_high            = float(pred["ci_50_high"]),
-            risk_grade            = pred["risk_grade"],
-            lockup_weighted_score = round(
-                feat.lockup_6m_ratio * 1.0 + feat.lockup_3m_ratio * 0.75 +
-                feat.lockup_1m_ratio * 0.5 + feat.lockup_15d_ratio * 0.25, 3
-            ),
-            top_features          = top_feats,
+            opening               = _return_prediction(models["opening"], feature_dict),
+            closing               = _return_prediction(models["closing"], feature_dict),
+            lockup_commitment_ratio = round(feat.lockup_commitment_ratio, 6),
         )
 
         # 로깅은 백그라운드 태스크로 (응답 속도 영향 없음)
         background_tasks.add_task(
             _log_prediction, feat.corp_name, feat.listing_date,
-            float(pred["pred_return_pct"]), pred["risk_grade"]
+            response.opening.pred_return_pct, response.opening.risk_grade,
         )
         return response
 
@@ -282,30 +302,19 @@ async def predict_batch(batch: BatchRequest):
     if len(batch.items) > 50:
         raise HTTPException(status_code=400, detail="배치 최대 50건")
 
-    import pandas as pd
-    model = get_model()
-
     try:
-        dfs = [_features_to_df(item) for item in batch.items]
-        X_all = pd.concat(dfs, ignore_index=True)
-        preds = model.predict(X_all)
-
+        if not batch.items:
+            return BatchResponse(count=0, predictions=[])
+        models = get_models()
         responses = []
-        for i, (feat, (_, pred)) in enumerate(zip(batch.items, preds.iterrows())):
+        for feat in batch.items:
+            feature_dict = _feature_dict(feat)
             responses.append(PredictionResponse(
-                corp_name             = feat.corp_name,
-                listing_date          = feat.listing_date,
-                pred_return_pct       = float(pred["pred_return_pct"]),
-                up_probability        = float(pred["up_probability"]),
-                ci_90_low             = float(pred["ci_90_low"]),
-                ci_90_high            = float(pred["ci_90_high"]),
-                ci_50_low             = float(pred["ci_50_low"]),
-                ci_50_high            = float(pred["ci_50_high"]),
-                risk_grade            = pred["risk_grade"],
-                lockup_weighted_score = round(
-                    feat.lockup_6m_ratio * 1.0 + feat.lockup_3m_ratio * 0.75 +
-                    feat.lockup_1m_ratio * 0.5 + feat.lockup_15d_ratio * 0.25, 3
-                ),
+                corp_name=feat.corp_name,
+                listing_date=feat.listing_date,
+                opening=_return_prediction(models["opening"], feature_dict),
+                closing=_return_prediction(models["closing"], feature_dict),
+                lockup_commitment_ratio=round(feature_dict["lockup_commitment_ratio"], 6),
             ))
         return BatchResponse(count=len(responses), predictions=responses)
 

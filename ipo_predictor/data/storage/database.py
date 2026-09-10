@@ -144,12 +144,7 @@ class IPOFeatures(Base):
 
     # ── CORE 피처 ─────────────────────────────────────────────
     institutional_demand_ratio    = Column(Float, nullable=True)
-    retail_subscription_ratio     = Column(Float, nullable=True)
-    lockup_6m_ratio               = Column(Float, nullable=True, default=0.0)
-    lockup_3m_ratio               = Column(Float, nullable=True, default=0.0)
-    lockup_1m_ratio               = Column(Float, nullable=True, default=0.0)
-    lockup_15d_ratio              = Column(Float, nullable=True, default=0.0)
-    lockup_weighted_score         = Column(Float, nullable=True)
+    lockup_commitment_ratio       = Column(Float, nullable=True)
     offering_price_band_position  = Column(Float, nullable=True)
     band_exceeded                 = Column(Boolean, nullable=True)
     kospi_momentum_5d             = Column(Float, nullable=True)
@@ -452,8 +447,7 @@ if __name__ == "__main__":
 
         feats = repo.upsert_features(master.id, {
             "institutional_demand_ratio": 850.0,
-            "lockup_6m_ratio": 0.35,
-            "lockup_weighted_score": 0.48,
+            "lockup_commitment_ratio": 0.48,
             "offering_price_band_position": 1.05,
             "kospi_momentum_20d": 0.023,
         })

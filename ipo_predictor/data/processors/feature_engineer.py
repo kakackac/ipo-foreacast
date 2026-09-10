@@ -26,6 +26,13 @@ from features.definitions import (
     FEATURE_MAP, get_core_feature_names, get_phase2_feature_names,
     fill_na_strategy, FeatureGroup
 )
+from features.source_contracts import (
+    APPROVED_INSTITUTIONAL_DEMAND_STATUSES,
+    APPROVED_LOCKUP_STATUSES,
+    DART_OFFERING_STRUCTURE_STATUS,
+    DART_PUBLIC_FLOAT_STATUS,
+    KRX_UNDERWRITER_TIER_STATUS,
+)
 from config import FEATURE_CFG, PROC_DIR, RAW_DIR
 
 logger = logging.getLogger(__name__)
@@ -56,6 +63,28 @@ UNDERWRITER_TIER_2 = (
     "한화투자증권",
     "SK증권",
 )
+
+UNDERWRITER_TIER_3 = (
+    "BNK투자증권",
+    "다올투자증권",
+    "상상인증권",
+    "iM증권",
+    "LS증권",
+    "케이프투자증권",
+)
+
+UNDERWRITER_ALIASES = {
+    "엔에이치투자증권": "NH투자증권",
+    "케이비증권": "KB증권",
+    "케이비투자증권": "KB증권",
+    "아이비케이투자증권": "IBK투자증권",
+    "디비증권": "DB금융투자",
+    "DB증권": "DB금융투자",
+    "아이엠증권": "iM증권",
+    "엘에스증권": "LS증권",
+    "비엔케이투자증권": "BNK투자증권",
+    "대우증권": "미래에셋증권",
+}
 
 
 class FeatureEngineer:
@@ -100,72 +129,195 @@ class FeatureEngineer:
         """
         # 1. 기본 병합
         df = self._merge_base(dart_df, krx_df)
+        if "offering_price_review_status" not in df.columns:
+            df["offering_price_review_status"] = "needs_review_missing_audit"
 
         # 2. 핵심 파생 피처 계산
-        df = self._calc_lockup_features(df)
+        df = self._normalize_lockup_commitment(df)
         df = self._calc_band_position(df)
         df = self._calc_supply_structure_features(df)
+        df = self._calc_offering_type_features(df)
         df = self._calc_same_day_ipo_count(df)
         df = self._calc_underwriter_tier(df)
         df = self._calc_risk_factor_count(df)
         df = self._calc_market_momentum(df, kospi_df, "kospi")
         if kosdaq_df is not None:
             df = self._calc_market_momentum(df, kosdaq_df, "kosdaq")
+        # 3. 타깃 변수 계산 (시초가 / 상장일 종가 수익률)
+        df = self._calc_target(df)
         df = self._calc_sector_ipo_temperature(df)
         df = self._calc_valuation_features(df)
         df = self._calc_financial_features(df)
-
-        # 3. 타깃 변수 계산 (시초가 수익률)
-        df = self._calc_target(df)
 
         # 4. 피처만 선택
         available = [f for f in self.feature_names if f in df.columns]
         missing   = [f for f in self.feature_names if f not in df.columns]
         if missing:
             logger.warning("누락된 피처 %d개: %s", len(missing), missing[:5])
+            for feature in missing:
+                df[feature] = np.nan
 
-        result = df[available + ["corp_name", "listing_date",
-                                  "offering_price", "open_return_pct"]].copy()
+        identity_columns = [
+            "event_id", "corp_name", "listing_date", "event_class", "offering_type",
+            "industry_name", "listing_segment",
+            "offering_price", "offering_price_review_status", "open_return_pct", "close_return_pct",
+            "price_resolution_status", "price_match_status", "price_match_method",
+            "price_failure_reason", "price_target_validation_status",
+            "rcept_no", "corp_code", "feature_available_at", "event_source_url",
+            "verification_status", "lineage_validation_status",
+            "demand_rcept_no", "institutional_rcept_no", "lockup_rcept_no",
+            "institutional_available_at", "lockup_available_at",
+            "institutional_source_url", "lockup_source_url",
+            "institutional_validation_status", "lockup_validation_status",
+            "underwriter_validation_status", "float_share_validation_status",
+            "offering_structure_validation_status",
+            "institutional_data_contract_version",
+            "institutional_demand_rule_id", "lockup_rule_id",
+            "institutional_demand_parser_validation_status", "lockup_parser_validation_status",
+            "institutional_demand_structured_evidence", "lockup_structured_evidence",
+            "kospi_momentum_5d_available_at", "kospi_momentum_20d_available_at",
+            "kosdaq_momentum_5d_available_at", "kosdaq_momentum_20d_available_at",
+            "recent_ipo_avg_return_sector_available_at",
+            "recent_ipo_avg_return_all_available_at",
+            "public_float_rcept_no", "public_float_rcept_dt",
+            "offering_structure_rcept_no", "offering_structure_rcept_dt",
+        ]
+        for column in identity_columns:
+            if column not in df.columns:
+                df[column] = np.nan
+        result = df[self.feature_names + identity_columns].copy()
+        for feature in self.feature_names:
+            result[f"{feature}__missing"] = result[feature].isna()
         result = result.sort_values("listing_date").reset_index(drop=True)
-        logger.info("피처 빌드 완료: %d행 × %d피처", len(result), len(available))
+        logger.info("피처 빌드 완료: %d행 × %d피처", len(result), len(self.feature_names))
         return result
 
     # ── 병합 ──────────────────────────────────────────────────
 
     def _merge_base(self, dart_df: pd.DataFrame, krx_df: pd.DataFrame) -> pd.DataFrame:
-        """DART + KRX 데이터 corp_name 기준 병합"""
-        # 기업명 정규화 (주식회사, (주) 등 제거)
-        for df in [dart_df, krx_df]:
-            df["corp_name_clean"] = (
-                df["corp_name"]
+        """DART 공시와 KRX 상장 실적을 원본을 바꾸지 않고 정합한다."""
+        dart = dart_df.copy()
+        krx = krx_df.copy()
+        if "corp_name" not in dart.columns or "corp_name" not in krx.columns:
+            raise ValueError("DART와 KRX 데이터에는 corp_name 컬럼이 필요합니다.")
+
+        # 법인 표기, 공백, 문장부호 차이 때문에 이름이 달라도 같은 회사인
+        # 사례를 줄인다. DART 쪽에는 아직 ticker가 없으므로 이름이 기본 키다.
+        for frame in (dart, krx):
+            frame["corp_name_clean"] = (
+                frame["corp_name"].astype(str)
                 .str.replace(r"(주식회사|㈜|\(주\)|\(株\))", "", regex=True)
+                .str.replace(r"[\s·.()\-]", "", regex=True)
+                .str.upper()
                 .str.strip()
             )
 
         merged = pd.merge(
-            dart_df, krx_df,
+            dart, krx,
             on="corp_name_clean",
             how="inner",
             suffixes=("_dart", "_krx"),
         )
+
+        # 동일 회사가 KOSDAQ 최초 상장 후 KOSPI로 이전 상장한 경우처럼,
+        # 이름만 같은 다른 상장 이벤트가 붙는 일을 막는다. 수집 파이프라인이
+        # 기록한 DART 연결 상장일이 있을 때만 엄격하게 비교해 기존 입력 호환성은
+        # 유지한다.
+        if {"listing_date_dart", "listing_date_krx"}.issubset(merged.columns):
+            dart_listing = pd.to_datetime(merged["listing_date_dart"], errors="coerce")
+            krx_listing = pd.to_datetime(merged["listing_date_krx"], errors="coerce")
+            mismatched_listing = dart_listing.notna() & krx_listing.notna() & (dart_listing != krx_listing)
+            if mismatched_listing.any():
+                logger.info("DART 연결 상장일과 다른 KRX 이벤트 %d건을 제외했습니다.", int(mismatched_listing.sum()))
+                merged = merged.loc[~mismatched_listing].copy()
+
+        # 병합 뒤 suffix가 생긴 공통 컬럼을 후속 계산의 표준 이름으로
+        # 되돌린다. KRX 상장일/가격을 우선하고, DART 공시 값은 보완용이다.
+        canonical_sources = {
+            "corp_name": ["corp_name_krx", "corp_name_dart"],
+            "listing_date": ["listing_date_krx", "listing_date", "listing_date_dart"],
+            # KRX 공식 공모가는 DART 원문 승인값을 교차검증하는 보조 원천이다.
+            # 타깃 계산에는 감사 상태가 함께 있는 DART 값을 우선 사용한다.
+            "offering_price": ["offering_price_dart", "offering_price", "offering_price_krx"],
+            "ticker": ["ticker", "ticker_krx", "ticker_dart"],
+            "event_id": ["event_id_krx", "event_id_dart", "event_id"],
+            "event_class": ["event_class_krx", "event_class_dart", "event_class"],
+            "offering_type": ["offering_type_krx", "offering_type_dart", "offering_type"],
+            "industry_name": ["industry_name_krx", "industry_name_dart", "industry_name"],
+            "listing_segment": ["listing_segment_krx", "listing_segment_dart", "sector_krx", "sector"],
+            # KIND의 공식 상장주선인 열을 우선한다. DART 평문 정규식은 본문
+            # 속 "...인 경우 증권"을 회사명으로 오인할 수 있다.
+            "lead_underwriter": ["lead_underwriter_krx", "lead_underwriter_dart", "lead_underwriter"],
+            "market": ["market", "market_krx", "market_dart"],
+            "event_source_url": ["source_url", "source_url_krx", "event_source_url"],
+            "verification_status": ["verification_status", "verification_status_krx"],
+            "lineage_validation_status": ["lineage_validation_status", "lineage_validation_status_dart"],
+            "demand_rcept_no": ["demand_rcept_no", "demand_rcept_no_dart"],
+            "institutional_available_at": ["institutional_available_at", "institutional_available_at_dart"],
+            "lockup_available_at": ["lockup_available_at", "lockup_available_at_dart"],
+            "institutional_source_url": ["institutional_source_url", "institutional_source_url_dart"],
+            "lockup_source_url": ["lockup_source_url", "lockup_source_url_dart"],
+            "institutional_validation_status": [
+                "institutional_validation_status", "institutional_validation_status_dart",
+            ],
+            "lockup_validation_status": ["lockup_validation_status", "lockup_validation_status_dart"],
+            "price_resolution_status": ["price_resolution_status", "price_resolution_status_krx"],
+            "price_match_status": ["price_match_status", "price_match_status_krx"],
+            "price_match_method": ["price_match_method", "price_match_method_krx"],
+            "price_failure_reason": ["price_failure_reason", "price_failure_reason_krx"],
+            "same_day_ipo_count": ["same_day_ipo_count", "same_day_ipo_count_krx"],
+            "open_price": ["open_price", "open_price_krx"],
+            "close_price": ["close_price", "close_price_krx"],
+        }
+        for target, candidates in canonical_sources.items():
+            existing = [col for col in candidates if col in merged.columns]
+            if not existing:
+                continue
+            series = merged[existing[0]]
+            for col in existing[1:]:
+                series = series.combine_first(merged[col])
+            merged[target] = series
+
+        if "listing_date" in merged.columns:
+            merged["listing_date"] = pd.to_datetime(merged["listing_date"], errors="coerce")
         logger.info("병합 결과: %d건 (DART %d × KRX %d)", len(merged), len(dart_df), len(krx_df))
         return merged
 
+    def _calc_offering_type_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """공모 유형은 범주형 원문을 보존하고, 모델에는 독립 이진 피처로 넣는다.
+
+        유형에 임의의 순서를 부여하는 숫자 코드 대신 이진 피처를 쓴다. 스팩
+        여부는 DART 신고서 회사명으로 상장 전에 알 수 있어 모델에 쓸 수 있다.
+        외국기업 분류는 KIND 사후 이벤트 마스터 기반이므로 감사/평가용으로만
+        보존하고, 모델 프로필에는 넣지 않는다.
+        """
+        event_class = df.get("event_class", pd.Series(index=df.index, dtype=object))
+        fallback = event_class.map({
+            "general_ipo": "common_stock_ipo",
+            "spac_ipo": "spac_ipo",
+            "foreign_listing": "foreign_common_stock_listing",
+            "relisting": "relisting",
+        }).fillna("review_required")
+        if "offering_type" not in df.columns:
+            df["offering_type"] = fallback
+        else:
+            missing_type = df["offering_type"].isna() | df["offering_type"].astype(str).str.strip().eq("")
+            df.loc[missing_type, "offering_type"] = fallback[missing_type]
+        offering_type = df["offering_type"].fillna("review_required").astype(str)
+        pre_listing_name = df.get("corp_name", pd.Series("", index=df.index)).fillna("").astype(str)
+        df["offering_type_spac_ipo"] = pre_listing_name.str.contains("스팩|SPAC", case=False, regex=True)
+        df["offering_type_foreign_common_stock"] = offering_type.eq("foreign_common_stock_listing")
+        return df
+
     # ── 확약 피처 ─────────────────────────────────────────────
 
-    def _calc_lockup_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """의무보유확약 가중 점수 계산"""
-        for col in ["lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio"]:
-            if col not in df.columns:
-                df[col] = 0.0
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).clip(0, 1)
-
-        df["lockup_weighted_score"] = (
-            df["lockup_6m_ratio"]  * 1.00 +
-            df["lockup_3m_ratio"]  * 0.75 +
-            df["lockup_1m_ratio"]  * 0.50 +
-            df["lockup_15d_ratio"] * 0.25
-        )
+    def _normalize_lockup_commitment(self, df: pd.DataFrame) -> pd.DataFrame:
+        """원문에서 승인한 기관 의무보유확약 통합 비율만 모델 피처로 쓴다."""
+        if "lockup_commitment_ratio" not in df.columns:
+            df["lockup_commitment_ratio"] = np.nan
+        df["lockup_commitment_ratio"] = pd.to_numeric(
+            df["lockup_commitment_ratio"], errors="coerce"
+        ).clip(0, 1)
         return df
 
     # ── 공모가 밴드 위치 ───────────────────────────────────────
@@ -182,18 +334,28 @@ class FeatureEngineer:
         for col in required:
             if col not in df.columns:
                 df["offering_price_band_position"] = np.nan
-                df["band_exceeded"] = False
+                df["band_exceeded"] = np.nan
                 return df
 
         band_range = df["price_band_high"] - df["price_band_low"]
 
+        valid_band = (
+            (band_range > 0)
+            & df["offering_price"].notna()
+            & df["price_band_low"].notna()
+            & df["price_band_high"].notna()
+        )
         df["offering_price_band_position"] = np.where(
-            band_range > 0,
+            valid_band,
             (df["offering_price"] - df["price_band_low"]) / band_range,
-            0.5  # 밴드 정보 없으면 중간값
+            np.nan,
         )
         df["offering_price_band_position"] = df["offering_price_band_position"].clip(-0.5, 2.0)
-        df["band_exceeded"] = (df["offering_price_band_position"] > 1.0).astype(int)
+        df["band_exceeded"] = np.where(
+            df["offering_price_band_position"].notna(),
+            (df["offering_price_band_position"] > 1.0).astype(float),
+            np.nan,
+        )
         return df
 
     # ── 공모 구조 / 수급 피처 ─────────────────────────────────
@@ -204,6 +366,7 @@ class FeatureEngineer:
             "new_shares",
             "secondary_shares",
             "public_float_shares",
+            "public_float_ratio_disclosed",
             "total_post_listing_shares",
         ]
         for col in numeric_cols:
@@ -213,33 +376,63 @@ class FeatureEngineer:
         if "secondary_offering_ratio" not in df.columns:
             new_shares = df.get("new_shares", pd.Series(np.nan, index=df.index))
             secondary_shares = df.get("secondary_shares", pd.Series(np.nan, index=df.index))
-            offered_shares = new_shares.fillna(0) + secondary_shares.fillna(0)
+            offered_shares = new_shares + secondary_shares
             df["secondary_offering_ratio"] = np.where(
-                offered_shares > 0,
-                secondary_shares.fillna(0) / offered_shares,
+                new_shares.notna() & secondary_shares.notna() & (offered_shares > 0),
+                secondary_shares / offered_shares,
                 np.nan,
             )
         df["secondary_offering_ratio"] = pd.to_numeric(
             df["secondary_offering_ratio"], errors="coerce"
         ).clip(0, 1)
+        new_status = df.get("new_shares_parser_validation_status", pd.Series("", index=df.index))
+        secondary_status = df.get(
+            "secondary_shares_parser_validation_status", pd.Series("", index=df.index)
+        )
+        df["offering_structure_validation_status"] = np.where(
+            df["secondary_offering_ratio"].notna()
+            & new_status.eq("structurally_verified")
+            & secondary_status.eq("structurally_verified"),
+            DART_OFFERING_STRUCTURE_STATUS,
+            "offering_structure_not_structurally_verified",
+        )
 
         if "float_share_ratio" not in df.columns:
             total_shares = df.get("total_post_listing_shares", pd.Series(np.nan, index=df.index))
-            if "public_float_shares" in df.columns:
-                float_shares = df["public_float_shares"]
-            else:
-                new_shares = df.get("new_shares", pd.Series(np.nan, index=df.index))
-                secondary_shares = df.get("secondary_shares", pd.Series(np.nan, index=df.index))
-                float_shares = new_shares.fillna(0) + secondary_shares.fillna(0)
-
-            df["float_share_ratio"] = np.where(
-                total_shares > 0,
+            float_shares = df.get("public_float_shares", pd.Series(np.nan, index=df.index))
+            disclosed_ratio = df.get("public_float_ratio_disclosed", pd.Series(np.nan, index=df.index))
+            calculated_ratio = pd.Series(np.where(
+                total_shares.notna() & float_shares.notna() & (total_shares > 0),
                 float_shares / total_shares,
                 np.nan,
+            ), index=df.index)
+            valid_disclosed_ratio = disclosed_ratio.where(
+                disclosed_ratio.notna() & disclosed_ratio.between(0, 1)
             )
+            # 신주+구주매출은 실제 유통가능 물량의 하한일 뿐이다. 기존주주
+            # 유통 가능분이 빠질 수 있어 대체값으로 쓰지 않는다.
+            df["float_share_ratio"] = valid_disclosed_ratio.combine_first(calculated_ratio)
         df["float_share_ratio"] = pd.to_numeric(
             df["float_share_ratio"], errors="coerce"
         ).clip(0, 1)
+        float_method = df.get("public_float_parse_method", pd.Series("", index=df.index))
+        total_status = df.get(
+            "total_post_listing_shares_parser_validation_status",
+            pd.Series("", index=df.index),
+        )
+        structurally_verified_float = (
+            float_method.eq("disclosed_public_float_ratio_direct_context")
+            | (
+                float_method.eq("disclosed_public_float_shares_direct_context")
+                & total_status.eq("structurally_verified")
+            )
+        )
+        df["float_share_validation_status"] = np.where(
+            df["float_share_ratio"].notna()
+            & structurally_verified_float,
+            DART_PUBLIC_FLOAT_STATUS,
+            "public_float_not_structurally_verified",
+        )
         return df
 
     def _calc_same_day_ipo_count(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -255,7 +448,7 @@ class FeatureEngineer:
             return df
 
         listing_dates = pd.to_datetime(df["listing_date"], errors="coerce")
-        df["same_day_ipo_count"] = listing_dates.map(listing_dates.value_counts()).fillna(0).astype(int)
+        df["same_day_ipo_count"] = listing_dates.map(listing_dates.value_counts()).astype("Float64")
         return df
 
     def _calc_underwriter_tier(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -264,6 +457,15 @@ class FeatureEngineer:
             df["underwriter_tier"] = pd.to_numeric(
                 df["underwriter_tier"], errors="coerce"
             ).clip(1, 3)
+            krx_underwriter = df.get(
+                "lead_underwriter_krx", pd.Series(index=df.index, dtype=object)
+            )
+            df["underwriter_validation_status"] = np.where(
+                df["underwriter_tier"].notna()
+                & krx_underwriter.fillna("").astype(str).str.strip().ne(""),
+                KRX_UNDERWRITER_TIER_STATUS,
+                "underwriter_not_verified_from_krx",
+            )
             return df
 
         name_col = next(
@@ -272,21 +474,35 @@ class FeatureEngineer:
         )
         if name_col is None:
             df["underwriter_tier"] = np.nan
+            df["underwriter_validation_status"] = "underwriter_source_missing"
             return df
 
         df["underwriter_tier"] = df[name_col].map(self._map_underwriter_tier)
+        krx_underwriter = df.get("lead_underwriter_krx", pd.Series(index=df.index, dtype=object))
+        df["underwriter_validation_status"] = np.where(
+            df["underwriter_tier"].notna()
+            & krx_underwriter.fillna("").astype(str).str.strip().ne(""),
+            KRX_UNDERWRITER_TIER_STATUS,
+            "underwriter_not_verified_from_krx",
+        )
         return df
 
     @staticmethod
     def _map_underwriter_tier(name: object) -> float:
-        if pd.isna(name):
+        if pd.isna(name) or not str(name).strip():
             return np.nan
-        normalized = re.sub(r"\s+", "", str(name))
-        if any(tier_name.replace(" ", "") in normalized for tier_name in UNDERWRITER_TIER_1):
+        # 공동주관사 목록은 첫 상장주선인을 기준으로 한다. 미등록 이름은
+        # 소형사로 추정하지 않고 결측으로 남긴다.
+        first = re.split(r"[,/]", str(name), maxsplit=1)[0]
+        normalized = re.sub(r"\s+|\(주\)|㈜|주식회사|\(구\)", "", first).strip()
+        normalized = UNDERWRITER_ALIASES.get(normalized, normalized)
+        if any(tier_name.replace(" ", "") == normalized for tier_name in UNDERWRITER_TIER_1):
             return 1
-        if any(tier_name.replace(" ", "") in normalized for tier_name in UNDERWRITER_TIER_2):
+        if any(tier_name.replace(" ", "") == normalized for tier_name in UNDERWRITER_TIER_2):
             return 2
-        return 3
+        if any(tier_name.replace(" ", "") == normalized for tier_name in UNDERWRITER_TIER_3):
+            return 3
+        return np.nan
 
     def _calc_risk_factor_count(self, df: pd.DataFrame) -> pd.DataFrame:
         """위험요소 텍스트가 있으면 항목 마커 수를 세고, 이미 있으면 숫자로 정리"""
@@ -335,6 +551,7 @@ class FeatureEngineer:
         for window in windows:
             col_name = f"{index_name}_momentum_{window}d"
             returns = []
+            available_dates = []
 
             for _, row in df.iterrows():
                 listing_dt = pd.to_datetime(row.get("listing_date"))
@@ -342,11 +559,14 @@ class FeatureEngineer:
                 past = closes[closes.index < listing_dt]
                 if len(past) > window:
                     ret = past.iloc[-1] / past.iloc[-1 - window] - 1
+                    available_dates.append(past.index[-1])
                 else:
-                    ret = 0.0
+                    ret = np.nan
+                    available_dates.append(pd.NaT)
                 returns.append(round(ret, 6))
 
             df[col_name] = returns
+            df[f"{col_name}_available_at"] = available_dates
             logger.debug("%s 모멘텀 %dd 계산 완료", index_name.upper(), window)
 
         return df
@@ -371,26 +591,40 @@ class FeatureEngineer:
 
         sector_temps = []
         all_temps    = []
+        sector_available_dates = []
+        all_available_dates = []
 
-        for i, row in df.iterrows():
-            past = df.loc[:i-1]  # 현재 행 이전 데이터만 사용
+        for _, row in df.iterrows():
+            # 같은 상장일의 다른 종목 수익률도 아직 장 마감 전에는 알 수 없으므로 제외한다.
+            past = df.loc[df["listing_date"] < row["listing_date"]]
 
             # 전체 최근 N개
             past_valid = past["open_return_pct"].dropna()
             all_temp = past_valid.tail(n_all).mean() if len(past_valid) > 0 else np.nan
             all_temps.append(all_temp)
+            all_available_dates.append(
+                past.loc[past_valid.index, "listing_date"].max()
+                if len(past_valid) > 0 else pd.NaT
+            )
 
             # 섹터별
-            if "sector_name" in df.columns:
-                sect = row.get("sector_name")
-                past_sect = past[past["sector_name"] == sect]["open_return_pct"].dropna()
+            if "industry_name" in df.columns:
+                sect = row.get("industry_name")
+                past_sect = past[past["industry_name"] == sect]["open_return_pct"].dropna()
                 sect_temp = past_sect.tail(n_sector).mean() if len(past_sect) > 0 else all_temp
+                sector_available_dates.append(
+                    past.loc[past_sect.index, "listing_date"].max()
+                    if len(past_sect) > 0 else all_available_dates[-1]
+                )
             else:
                 sect_temp = all_temp
+                sector_available_dates.append(all_available_dates[-1])
             sector_temps.append(sect_temp)
 
         df["recent_ipo_avg_return_sector"] = sector_temps
         df["recent_ipo_avg_return_all"]    = all_temps
+        df["recent_ipo_avg_return_sector_available_at"] = sector_available_dates
+        df["recent_ipo_avg_return_all_available_at"] = all_available_dates
         return df
 
     # ── 밸류에이션 피처 ───────────────────────────────────────
@@ -398,7 +632,8 @@ class FeatureEngineer:
     def _calc_valuation_features(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         PER 및 섹터 대비 PER 계산.
-        EPS가 없는 종목(적자 등)은 섹터 중앙값으로 대체.
+        EPS가 없는 종목(적자 등)은 결측으로 남긴다. 이 값의 보정은 학습
+        분할 이후 훈련 데이터 통계로만 수행한다.
         """
         if "eps" not in df.columns or "offering_price" not in df.columns:
             df["offering_per"] = np.nan
@@ -414,17 +649,18 @@ class FeatureEngineer:
         )
         df["offering_per"] = df["offering_per"].clip(0, 500)
 
-        # 섹터별 PER 중앙값 대비 (적자 기업 패널티 반영)
-        if "sector_name" in df.columns:
-            sector_median_per = df.groupby("sector_name")["offering_per"].transform("median")
-            df["per_vs_sector_median"] = np.where(
-                sector_median_per > 0,
-                df["offering_per"] / sector_median_per,
-                np.nan,
-            )
-        else:
-            overall_median = df["offering_per"].median()
-            df["per_vs_sector_median"] = df["offering_per"] / overall_median if overall_median else np.nan
+        # 전체 기간 중앙값은 미래 IPO의 값을 과거 행에 섞는다. 동일 상장일도
+        # 제외하고, 실제 산업 업종의 엄격히 이전 행만으로 중앙값을 만든다.
+        df["per_vs_sector_median"] = np.nan
+        if "industry_name" in df.columns:
+            for index, row in df.iterrows():
+                prior = df[
+                    (df["listing_date"] < row["listing_date"])
+                    & (df["industry_name"] == row["industry_name"])
+                ]
+                median = prior["offering_per"].dropna().median()
+                if pd.notna(median) and median > 0 and pd.notna(row["offering_per"]):
+                    df.at[index, "per_vs_sector_median"] = row["offering_per"] / median
 
         return df
 
@@ -472,29 +708,59 @@ class FeatureEngineer:
 
     def _calc_target(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        시초가 수익률 = (상장일 시초가 / 공모가 - 1) × 100
+        두 가지 상장일 타깃을 계산한다.
+          - open_return_pct: (상장일 시초가 / 공모가 - 1) × 100
+          - close_return_pct: (상장일 종가 / 공모가 - 1) × 100
 
-        상한가(+300%) 이상은 스크리닝 오류로 간주하지 않고 유지.
-        실제 한국 IPO에서 시초가 +300%는 가능 (2023년 이전 가격제한 없음).
+        시초가는 09:00 개장 직후 형성된 가격이며, 종가는 상장 첫날 전체
+        매매를 반영한다. 상장 전에는 두 값을 각각 예측하고, 장 마감 후
+        실제값을 확정해 모델 성능을 기록한다.
         """
-        if "open_price" not in df.columns or "offering_price" not in df.columns:
+        if "offering_price" not in df.columns:
             df["open_return_pct"] = np.nan
+            df["close_return_pct"] = np.nan
+            df["price_target_validation_status"] = "missing_offering_price"
             return df
 
-        df["open_price"]    = pd.to_numeric(df["open_price"], errors="coerce")
         df["offering_price"] = pd.to_numeric(df["offering_price"], errors="coerce")
-
-        df["open_return_pct"] = np.where(
-            (df["offering_price"] > 0) & df["open_price"].notna(),
-            (df["open_price"] / df["offering_price"] - 1) * 100,
-            np.nan,
-        )
+        if "price_resolution_status" in df.columns:
+            verified_listing_price = df["price_resolution_status"].eq("official_price_verified")
+            df["price_target_validation_status"] = np.where(
+                verified_listing_price,
+                "official_price_verified",
+                "blocked_nonverified_krx_listing_price",
+            )
+        else:
+            # 실제 collect 산출물에는 항상 감사 상태가 있어야 한다. 이 표기는
+            # 구버전 산출물과 단위 테스트의 호환을 위한 것이며 학습 승인 근거가 아니다.
+            verified_listing_price = pd.Series(True, index=df.index)
+            df["price_target_validation_status"] = "legacy_price_status_unavailable"
+        out_of_expected_range = (df["offering_price"] < 100) | (df["offering_price"] > 10_000_000)
+        if out_of_expected_range.any():
+            logger.warning(
+                "예상 공모가 범위를 벗어난 값 %d건을 감사 로그에서 확인하세요. 값은 삭제하지 않습니다.",
+                int(out_of_expected_range.sum()),
+            )
+        for price_col, target_col in [
+            ("open_price", "open_return_pct"),
+            ("close_price", "close_return_pct"),
+        ]:
+            if price_col not in df.columns:
+                df[target_col] = np.nan
+                continue
+            df[price_col] = pd.to_numeric(df[price_col], errors="coerce")
+            df[target_col] = np.where(
+                verified_listing_price & (df["offering_price"] > 0) & df[price_col].notna(),
+                (df[price_col] / df["offering_price"] - 1) * 100,
+                np.nan,
+            )
 
         # 극단값 리포트 (제거하지 않고 로그만)
         extreme = df[df["open_return_pct"].abs() > 200]
         if len(extreme):
+            names = extreme["corp_name"].tolist()[:5] if "corp_name" in extreme.columns else []
             logger.info("극단 수익률 종목 %d건 (±200%%+): %s", len(extreme),
-                        extreme["corp_name"].tolist()[:5])
+                        names)
 
         return df
 
@@ -504,7 +770,7 @@ class FeatureEngineer:
         """학습 데이터에서 결측값 대체 통계 계산"""
         for feat_name in self.feature_names:
             if feat_name not in df.columns:
-                self.fill_values[feat_name] = 0.0
+                self.fill_values[feat_name] = np.nan
                 continue
             strategy = fill_na_strategy(feat_name)
             col = pd.to_numeric(df[feat_name], errors="coerce")
@@ -516,13 +782,8 @@ class FeatureEngineer:
                 fill_value = 0.0
             else:
                 fill_value = 0.0
-            if pd.isna(fill_value):
-                feat_def = FEATURE_MAP.get(feat_name)
-                if strategy == "median" and feat_def and feat_def.clip and feat_def.clip[0] > 0:
-                    lo, hi = feat_def.clip
-                    fill_value = (lo + hi) / 2
-                else:
-                    fill_value = 0.0
+            # 원시 피처가 전부 비어 있으면 임의의 0 또는 구간 중간값을 만들지
+            # 않는다. 학습 적격성 검사에서 해당 데이터셋을 차단한다.
             self.fill_values[feat_name] = float(fill_value)
         self._fitted = True
         logger.info("FeatureEngineer fit 완료: %d개 피처 통계 계산", len(self.fill_values))
@@ -548,7 +809,7 @@ class FeatureEngineer:
                 col = col.clip(lo, hi)
 
             # 결측값 대체
-            col = col.fillna(self.fill_values.get(feat_name, 0.0))
+            col = col.fillna(self.fill_values.get(feat_name, np.nan))
             if feat_def and feat_def.clip:
                 lo, hi = feat_def.clip
                 col = col.clip(lo, hi)
@@ -558,6 +819,160 @@ class FeatureEngineer:
 
     def fit_transform(self, df: pd.DataFrame) -> pd.DataFrame:
         return self.fit(df).transform(df)
+
+    def build_feature_observations(self, features: pd.DataFrame) -> pd.DataFrame:
+        """원시 피처별 값·결측·출처·검증 정보를 long 형식으로 보존한다.
+
+        ``features_all``은 모델 입력 표이고, 이 표는 감사와 사람 검토를 위한
+        관측 원장이다. 결측은 수치 0으로 바꾸지 않고 원인과 원천을 함께 남긴다.
+        """
+        source_by_group = {
+            FeatureGroup.MARKET: "KRX_KIND_or_KRX_OpenAPI",
+            FeatureGroup.SUBSCRIPTION: "DART_disclosure_or_official_demand_notice",
+            FeatureGroup.SUPPLY: "DART_disclosure",
+            FeatureGroup.IPO_STRUCTURE: "DART_disclosure",
+            FeatureGroup.VALUATION: "DART_disclosure",
+            FeatureGroup.FINANCIAL: "OpenDART_financial_statement",
+        }
+        records: list[dict[str, object]] = []
+        for row in features.itertuples(index=False):
+            values = row._asdict()
+
+            def first_present(*names: str):
+                for name in names:
+                    candidate = values.get(name)
+                    if candidate is not None and not pd.isna(candidate):
+                        return candidate
+                return None
+
+            for feature_name in self.feature_names:
+                if feature_name not in features.columns:
+                    continue
+                value = values.get(feature_name)
+                missing = pd.isna(value)
+                feature = FEATURE_MAP[feature_name]
+                source = source_by_group[feature.group]
+                if feature.group == FeatureGroup.FINANCIAL and missing:
+                    missing_reason = "financial_publication_time_unverified"
+                elif missing:
+                    missing_reason = "official_source_field_unavailable_or_unverified"
+                else:
+                    missing_reason = None
+                source_ref = values.get("rcept_no")
+                available_at = values.get("feature_available_at")
+                if feature_name == "offering_type_spac_ipo":
+                    source = "DART_disclosure"
+                elif feature_name == "offering_type_foreign_common_stock":
+                    # KIND의 최종 상장 분류는 과거 유형별 평가에는 쓰되, 상장 전
+                    # 입력으로 쓸 수 없으므로 공개시각을 꾸며내지 않는다.
+                    source = "KRX_KIND_post_listing_event_classification"
+                    source_ref = values.get("event_source_url")
+                    available_at = pd.NA
+                if feature_name == "institutional_demand_ratio":
+                    source_ref = first_present(
+                        "institutional_source_url", "institutional_rcept_no", "demand_rcept_no"
+                    )
+                    available_at = values.get("institutional_available_at")
+                if feature_name.startswith(("kospi_momentum_", "kosdaq_momentum_")):
+                    source = "KRX_OpenAPI_index_daily_close"
+                    available_at = values.get(f"{feature_name}_available_at")
+                    source_ref = "KRX_index_daily_close"
+                if feature_name in {
+                    "recent_ipo_avg_return_sector", "recent_ipo_avg_return_all",
+                }:
+                    source = "derived_verified_prior_IPO_targets"
+                    available_at = values.get(f"{feature_name}_available_at")
+                    source_ref = "verified_prior_IPO_targets"
+                if feature_name.startswith("lockup_"):
+                    source_ref = first_present(
+                        "lockup_source_url", "lockup_rcept_no", "demand_rcept_no"
+                    )
+                    available_at = values.get("lockup_available_at")
+                if feature_name in {"offering_price_band_position", "band_exceeded"}:
+                    source_ref = first_present("price_band_rcept_no", "rcept_no")
+                    available_at = first_present("price_band_rcept_dt", "feature_available_at")
+                if feature_name in {
+                    "float_share_ratio", "secondary_offering_ratio",
+                    "major_shareholder_lockup_months", "risk_factor_count",
+                }:
+                    if feature_name == "float_share_ratio":
+                        source_ref = first_present(
+                            "public_float_rcept_no", "offering_structure_rcept_no", "rcept_no"
+                        )
+                        available_at = first_present(
+                            "public_float_rcept_dt", "offering_structure_rcept_dt",
+                            "feature_available_at",
+                        )
+                    else:
+                        source_ref = first_present("offering_structure_rcept_no", "rcept_no")
+                        available_at = first_present("offering_structure_rcept_dt", "feature_available_at")
+                if source.startswith("KRX") and not feature_name.startswith(
+                    ("kospi_momentum_", "kosdaq_momentum_")
+                ):
+                    event_source_url = values.get("event_source_url")
+                    source_ref = (
+                        event_source_url if pd.notna(event_source_url)
+                        else "KRX_KIND_new_listing_company"
+                    )
+                # 검증 상태는 해당 피처의 원천·파생 규칙에서만 결정한다.
+                # 확정 공모가가 검증됐다고 다른 DART 추출값까지 승인하면
+                # 관측 원장이 실제보다 좋게 보이는 오류가 생긴다.
+                validation = None
+                if feature_name == "institutional_demand_ratio":
+                    validation = values.get("institutional_validation_status")
+                elif feature_name.startswith("lockup_"):
+                    validation = values.get("lockup_validation_status")
+                elif feature_name.startswith(("kospi_momentum_", "kosdaq_momentum_")):
+                    if not missing and pd.notna(available_at):
+                        validation = "verified_pre_listing_market_derivation_v1"
+                elif feature_name in {
+                    "recent_ipo_avg_return_sector", "recent_ipo_avg_return_all",
+                }:
+                    if not missing and pd.notna(available_at):
+                        validation = "verified_prior_ipo_target_derivation_v1"
+                elif feature_name == "underwriter_tier":
+                    validation = values.get("underwriter_validation_status")
+                elif feature_name == "float_share_ratio":
+                    validation = values.get("float_share_validation_status")
+                elif feature_name == "secondary_offering_ratio":
+                    validation = values.get("offering_structure_validation_status")
+                elif feature_name == "offering_type_spac_ipo":
+                    if not missing and pd.notna(available_at):
+                        validation = "verified_pre_listing_dart_name_derivation_v1"
+                if pd.isna(validation) or str(validation).strip() == "":
+                    validation = "needs_review"
+                validation = str(validation)
+                approved_validation_statuses = {
+                    "verified_currency_unit", "verified_text_and_structured",
+                    "verified_structured_api", "manual_verified",
+                    "official_source_krx_code_enriched", "official_source_collected",
+                    "verified_pre_listing_market_derivation_v1",
+                    "verified_prior_ipo_target_derivation_v1",
+                    "verified_krx_underwriter_registry_mapping_v1",
+                    "verified_pre_listing_dart_name_derivation_v1",
+                    DART_PUBLIC_FLOAT_STATUS,
+                    DART_OFFERING_STRUCTURE_STATUS,
+                    *APPROVED_INSTITUTIONAL_DEMAND_STATUSES,
+                    *APPROVED_LOCKUP_STATUSES,
+                }
+                records.append({
+                    "event_id": values.get("event_id"),
+                    "corp_name": values.get("corp_name"),
+                    "listing_date": values.get("listing_date"),
+                    "feature_name": feature_name,
+                    "raw_value": value,
+                    "is_missing": bool(missing),
+                    "missing_reason": missing_reason,
+                    "source": source,
+                    "source_reference": source_ref,
+                    "available_at": available_at,
+                    "collected_at": pd.Timestamp.now(tz="Asia/Seoul"),
+                    "validation_status": validation,
+                    "human_review_required": bool(
+                        missing or validation not in approved_validation_statuses
+                    ),
+                })
+        return pd.DataFrame(records)
 
     # ── 피처 요약 ─────────────────────────────────────────────
 
@@ -578,13 +993,9 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
     dates = pd.date_range("2015-01-01", periods=n, freq="7D")
 
     # 핵심 피처 시뮬레이션 (실제 분포 근사)
-    lockup_6m  = rng.beta(2, 5, n).clip(0, 1)   # 우편향, 대부분 낮음
-    lockup_3m  = rng.beta(2, 4, n).clip(0, 1)
-    lockup_1m  = rng.beta(3, 4, n).clip(0, 1)
-    lockup_15d = rng.beta(2, 3, n).clip(0, 1)
+    lockup_commitment = rng.beta(2, 5, n).clip(0, 1)
 
     institutional_demand = rng.lognormal(5.5, 1.2, n).clip(1, 3000)
-    retail_demand        = rng.lognormal(6.0, 1.5, n).clip(1, 5000)
     band_position        = rng.uniform(-0.1, 1.3, n)
 
     kospi_5d  = rng.normal(0.005, 0.025, n)
@@ -601,12 +1012,10 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
     operating_margin = rng.normal(0.08, 0.18, n).clip(-0.6, 0.8)
     debt_ratio = rng.lognormal(0.0, 0.55, n).clip(0, 6)
 
-    lockup_score = lockup_6m * 1.0 + lockup_3m * 0.75 + lockup_1m * 0.5 + lockup_15d * 0.25
-
     # 타깃 생성: 실제 관계를 반영한 수익률 시뮬레이션
     # 한국 IPO 실제 통계: 약 65% 양수, 35% 음수 or 0
     signal = (
-        lockup_score          * 30  +
+        lockup_commitment     * 30  +
         np.log1p(institutional_demand) * 3  +
         band_position         * 15  +
         kospi_20d             * 60  +
@@ -624,18 +1033,20 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
     # 중앙값을 0 근처로 이동시켜 양수/음수 혼재 보장
     signal = signal - signal.mean() + 12.0   # 평균 +12% (실제 통계 근사)
     open_return_pct = signal.clip(-50, 300)
+    intraday_move = (
+        lockup_commitment * 4 +
+        kospi_5d * 30 -
+        secondary_offering_ratio * 3 +
+        rng.normal(0, 10, n)
+    )
+    close_return_pct = (open_return_pct + intraday_move).clip(-60, 300)
 
     df = pd.DataFrame({
         "corp_name":                    [f"종목_{i:04d}" for i in range(n)],
         "listing_date":                 dates,
         "offering_price":               rng.integers(5000, 100000, n),
-        "lockup_6m_ratio":              lockup_6m,
-        "lockup_3m_ratio":              lockup_3m,
-        "lockup_1m_ratio":              lockup_1m,
-        "lockup_15d_ratio":             lockup_15d,
-        "lockup_weighted_score":        lockup_score,
+        "lockup_commitment_ratio":      lockup_commitment,
         "institutional_demand_ratio":   institutional_demand,
-        "retail_subscription_ratio":    retail_demand,
         "offering_price_band_position": band_position,
         "band_exceeded":                (band_position > 1.0).astype(int),
         "kospi_momentum_5d":            kospi_5d,
@@ -643,6 +1054,7 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
         "recent_ipo_avg_return_sector": rng.normal(15, 20, n),
         "recent_ipo_avg_return_all":    rng.normal(12, 18, n),
         "open_return_pct":              open_return_pct,
+        "close_return_pct":             close_return_pct,
     })
     if phase in ("phase2", "all"):
         df = df.assign(
@@ -658,6 +1070,18 @@ def build_demo_dataset(n: int = 200, seed: int = 42, phase: str = "core") -> pd.
             operating_margin=operating_margin,
             debt_ratio=debt_ratio,
         )
+        # 데모 데이터도 실제 파이프라인과 같은 범주형 입력 계약을 따른다.
+        # 기준 범주인 일반 보통주 IPO 외에 일부 스팩·외국기업 플래그를 섞는다.
+        offering_type = rng.choice(
+            ["common_stock_ipo", "spac_ipo", "foreign_common_stock_listing"],
+            size=n,
+            p=[0.80, 0.15, 0.05],
+        )
+        df["offering_type"] = offering_type
+        df["offering_type_spac_ipo"] = (offering_type == "spac_ipo").astype(int)
+        df["offering_type_foreign_common_stock"] = (
+            offering_type == "foreign_common_stock_listing"
+        ).astype(int)
     return df
 
 

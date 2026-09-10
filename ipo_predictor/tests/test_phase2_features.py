@@ -1,8 +1,17 @@
+import json
+import tempfile
 import unittest
+from pathlib import Path
+
+import pandas as pd
 
 from data.collectors.dart_collector import DARTCollector
 from data.processors.feature_engineer import FeatureEngineer, build_demo_dataset
 from features.definitions import get_phase2_feature_names
+from features.model_profiles import build_stage_dataset, get_model_profile
+from pipeline import assess_training_readiness
+import models.baseline.gradient_boost_model as gradient_boost_model
+from models.baseline.gradient_boost_model import IPOPriceModel
 
 
 class Phase2FeatureTests(unittest.TestCase):
@@ -18,6 +27,407 @@ class Phase2FeatureTests(unittest.TestCase):
 
         self.assertEqual(list(X.columns), feature_names)
         self.assertEqual(int(X.isna().sum().sum()), 0)
+        self.assertEqual(int(df[["open_return_pct", "close_return_pct"]].isna().sum().sum()), 0)
+
+    def test_listing_day_returns_use_offer_price_as_base(self):
+        df = pd.DataFrame(
+            {
+                "offering_price": [10_000],
+                "open_price": [12_000],
+                "close_price": [11_000],
+            }
+        )
+
+        result = FeatureEngineer()._calc_target(df)
+
+        self.assertAlmostEqual(result.loc[0, "open_return_pct"], 20.0)
+        self.assertAlmostEqual(result.loc[0, "close_return_pct"], 10.0)
+
+    def test_market_momentum_records_the_last_pre_listing_market_date(self):
+        engineer = FeatureEngineer(feature_set="phase2")
+        index = pd.DataFrame({
+            "date": pd.date_range("2024-01-01", periods=30, freq="D"),
+            "close": range(100, 130),
+        })
+        listing = pd.DataFrame({"listing_date": [pd.Timestamp("2024-01-25")]})
+
+        result = engineer._calc_market_momentum(listing, index, "kospi")
+
+        self.assertEqual(
+            result.loc[0, "kospi_momentum_5d_available_at"], pd.Timestamp("2024-01-24")
+        )
+        self.assertLess(
+            result.loc[0, "kospi_momentum_20d_available_at"], result.loc[0, "listing_date"]
+        )
+
+    def test_feature_observation_does_not_inherit_offering_price_approval(self):
+        engineer = FeatureEngineer(feature_set="phase2")
+        features = pd.DataFrame({
+            "event_id": ["event-1"],
+            "corp_name": ["테스트"],
+            "listing_date": [pd.Timestamp("2024-01-10")],
+            "feature_available_at": [pd.Timestamp("2024-01-02")],
+            "offering_price_review_status": ["verified_currency_unit"],
+            "float_share_ratio": [0.25],
+            "kospi_momentum_5d": [0.03],
+            "kospi_momentum_5d_available_at": [pd.Timestamp("2024-01-09")],
+        })
+        for feature_name in engineer.feature_names:
+            if feature_name not in features:
+                features[feature_name] = pd.NA
+
+        observations = engineer.build_feature_observations(features)
+        float_row = observations.loc[
+            observations["feature_name"].eq("float_share_ratio")
+        ].iloc[0]
+        market_row = observations.loc[
+            observations["feature_name"].eq("kospi_momentum_5d")
+        ].iloc[0]
+
+        self.assertEqual(float_row["validation_status"], "needs_review")
+        self.assertTrue(float_row["human_review_required"])
+        self.assertEqual(
+            market_row["validation_status"], "verified_pre_listing_market_derivation_v1"
+        )
+        self.assertFalse(market_row["human_review_required"])
+
+    def test_unverified_krx_listing_price_is_not_used_as_target(self):
+        df = pd.DataFrame(
+            {
+                "offering_price": [10_000],
+                "open_price": [12_000],
+                "close_price": [11_000],
+                "price_resolution_status": ["historical_identifier_review_required"],
+            }
+        )
+
+        result = FeatureEngineer()._calc_target(df)
+
+        self.assertTrue(pd.isna(result.loc[0, "open_return_pct"]))
+        self.assertTrue(pd.isna(result.loc[0, "close_return_pct"]))
+        self.assertEqual(
+            result.loc[0, "price_target_validation_status"],
+            "blocked_nonverified_krx_listing_price",
+        )
+
+    def test_missing_band_and_supply_values_are_not_changed_to_zero(self):
+        engineer = FeatureEngineer(feature_set="phase2")
+        base = pd.DataFrame({
+            "offering_price": [None],
+            "price_band_low": [None],
+            "price_band_high": [None],
+            "new_shares": [None],
+            "secondary_shares": [None],
+            "total_post_listing_shares": [None],
+        })
+        result = engineer._calc_band_position(base.copy())
+        result = engineer._calc_supply_structure_features(result)
+
+        self.assertTrue(pd.isna(result.loc[0, "offering_price_band_position"]))
+        self.assertTrue(pd.isna(result.loc[0, "band_exceeded"]))
+        self.assertTrue(pd.isna(result.loc[0, "secondary_offering_ratio"]))
+        self.assertTrue(pd.isna(result.loc[0, "float_share_ratio"]))
+
+    def test_float_share_ratio_requires_disclosed_float_amount_or_ratio(self):
+        result = FeatureEngineer()._calc_supply_structure_features(pd.DataFrame({
+            "new_shares": [1_000_000, 1_000_000, 1_000_000],
+            "secondary_shares": [200_000, 200_000, 200_000],
+            "total_post_listing_shares": [5_000_000, 5_000_000, 5_000_000],
+            "public_float_shares": [None, 1_500_000, None],
+            "public_float_ratio_disclosed": [None, None, 0.42],
+        }))
+
+        # 공모 물량은 기존 주주의 즉시 유통분을 포함하지 않으므로 대체값이 될 수 없다.
+        self.assertTrue(pd.isna(result.loc[0, "float_share_ratio"]))
+        self.assertEqual(result.loc[1, "float_share_ratio"], 0.3)
+        self.assertEqual(result.loc[2, "float_share_ratio"], 0.42)
+
+    def test_offering_share_counts_require_direct_structural_rows(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            """
+            <table>
+              <tr><th>신주모집 주식수</th><td>1,000,000주</td></tr>
+              <tr><th>구주매출 주식수</th><td>250,000주</td></tr>
+              <tr><th>상장 후 총 발행주식수</th><td>5,000,000주</td></tr>
+            </table>
+            """,
+            "20250101000008",
+        )
+
+        self.assertEqual(parsed["new_shares"], 1_000_000)
+        self.assertEqual(parsed["secondary_shares"], 250_000)
+        self.assertEqual(parsed["new_shares_parser_validation_status"], "structurally_verified")
+        self.assertEqual(
+            parsed["secondary_shares_parser_validation_status"], "structurally_verified"
+        )
+        self.assertEqual(parsed["new_shares_parse_method"], "direct_table_row_v1")
+        self.assertEqual(parsed["total_post_listing_shares"], 5_000_000)
+        self.assertEqual(
+            parsed["total_post_listing_shares_parser_validation_status"],
+            "structurally_verified",
+        )
+
+    def test_offering_share_counts_reject_wide_nearby_number_search(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "신주모집에 관한 설명입니다. 다른 항목의 수량은 999,999주입니다.",
+            "20250101000009",
+        )
+
+        self.assertIsNone(parsed["new_shares"])
+        self.assertEqual(parsed["new_shares_parser_validation_status"], "value_not_found")
+
+    def test_share_dash_is_missing_but_explicit_zero_is_zero(self):
+        collector = DARTCollector(api_key="test")
+        for cell, expected in [("-", None), ("", None), ("0주", 0)]:
+            with self.subTest(cell=cell):
+                parsed = collector._parse_offering_html(
+                    f"<table><tr><th>구주매출</th><td>{cell}</td></tr></table>",
+                    "20250101000010",
+                )
+                self.assertEqual(parsed["secondary_shares"], expected)
+
+    def test_period_details_do_not_create_a_model_lockup_feature_without_total(self):
+        result = FeatureEngineer()._normalize_lockup_commitment(pd.DataFrame({
+            "lockup_6m_ratio": [0.2],
+            "lockup_3m_ratio": [0.1],
+            "lockup_1m_ratio": [0.1],
+            "lockup_15d_ratio": [None],
+        }))
+
+        self.assertTrue(pd.isna(result.loc[0, "lockup_commitment_ratio"]))
+
+    def test_training_readiness_rejects_small_general_ipo_population(self):
+        df = pd.DataFrame({
+            "event_class": ["general_ipo"] * 46,
+            "offering_price_review_status": ["verified_currency_unit"] * 46,
+            "listing_date": pd.date_range("2024-01-01", periods=46, freq="7D"),
+            "feature_available_at": pd.date_range("2023-12-01", periods=46, freq="7D"),
+            "open_return_pct": [1.0] * 46,
+            "close_return_pct": [1.0] * 46,
+        })
+        readiness = assess_training_readiness(df, phase="phase2")
+
+        self.assertFalse(readiness["eligible"])
+        self.assertEqual(readiness["general_ipo_dual_target_rows"], 46)
+        self.assertTrue(any("최소 100건" in reason for reason in readiness["reasons"]))
+        self.assertTrue(any("KRX 상장일 가격 검증 상태" in reason for reason in readiness["reasons"]))
+        self.assertEqual(readiness["source_time_validated_core_complete_rows"], 0)
+
+    def test_prediction_profiles_exclude_retail_subscription_ratio(self):
+        pre_demand = get_model_profile("pre_demand")
+        post_demand = get_model_profile("post_demand")
+
+        self.assertNotIn("retail_subscription_ratio", pre_demand.feature_names)
+        self.assertNotIn("retail_subscription_ratio", post_demand.feature_names)
+        self.assertIn("institutional_demand_ratio", post_demand.feature_names)
+        with self.assertRaises(ValueError):
+            get_model_profile("post_retail")
+
+    def test_stage_datasets_reuse_one_ipo_population_with_different_feature_contracts(self):
+        features = pd.DataFrame({
+            "event_id": ["common", "spac"],
+            "event_class": ["general_ipo", "spac_ipo"],
+            "offering_type": ["common_stock_ipo", "spac_ipo"],
+            "offering_price_review_status": ["verified_currency_unit"] * 2,
+            "open_return_pct": [10.0, 5.0],
+            "close_return_pct": [8.0, 4.0],
+            "listing_date": ["2024-01-10", "2024-01-11"], "market": ["KOSDAQ", "KOSPI"],
+        })
+        for profile_name in ("pre_demand", "post_demand"):
+            profile = get_model_profile(profile_name)
+            for feature_name in profile.feature_names:
+                features[feature_name] = 1.0
+        features["institutional_validation_status"] = "verified_dart_structural_aggregate_v1"
+        features["lockup_validation_status"] = "verified_dart_structural_aggregate_v1"
+        features["float_share_validation_status"] = "verified_dart_public_float_direct_v1"
+        features["offering_structure_validation_status"] = "verified_dart_offering_structure_v1"
+        features["underwriter_validation_status"] = "verified_krx_underwriter_registry_mapping_v1"
+        audit = pd.DataFrame([
+            {
+                "event_id": event_id, "feature_name": feature_name,
+                "is_missing": False, "time_validation_status": "pre_listing_verified",
+            }
+            for event_id in features["event_id"]
+            for feature_name in set().union(*(p.feature_names for p in (
+                get_model_profile("pre_demand"), get_model_profile("post_demand")
+            )))
+        ])
+
+        pre = build_stage_dataset(features, "pre_demand", audit)
+        post_demand = build_stage_dataset(features, "post_demand", audit)
+
+        self.assertEqual(len(pre), 2)
+        self.assertEqual(len(post_demand), 2)
+        self.assertTrue(pre["stage_model_candidate"].all())
+        self.assertTrue(post_demand["stage_model_candidate"].all())
+
+    def test_stage_dataset_blocks_legacy_parser_verified_label(self):
+        profile = get_model_profile("post_demand")
+        features = pd.DataFrame({
+            "event_id": ["legacy"],
+            "offering_price_review_status": ["verified_currency_unit"],
+            "open_return_pct": [10.0], "close_return_pct": [8.0],
+            "institutional_validation_status": ["verified_dart_lineage_aggregate_institutional"],
+            "lockup_validation_status": ["verified_dart_lineage_aggregate_institutional"],
+        })
+        for feature_name in profile.feature_names:
+            features[feature_name] = 1.0
+        audit = pd.DataFrame([
+            {"event_id": "legacy", "feature_name": feature_name, "is_missing": False,
+             "time_validation_status": "pre_listing_verified"}
+            for feature_name in profile.feature_names
+        ])
+
+        dataset = build_stage_dataset(features, "post_demand", audit)
+
+        self.assertFalse(dataset.loc[0, "stage_source_valid"])
+        self.assertFalse(dataset.loc[0, "stage_model_candidate"])
+
+    def test_stage_dataset_accepts_current_official_underwriter_contract(self):
+        profile = get_model_profile("post_demand")
+        features = pd.DataFrame({
+            "event_id": ["official"], "event_class": ["general_ipo"], "market": ["KOSDAQ"],
+            "offering_price_review_status": ["verified_currency_unit"],
+            "open_return_pct": [10.0], "close_return_pct": [8.0],
+            "institutional_validation_status": ["verified_official_underwriter_aggregate_v1"],
+            "lockup_validation_status": ["verified_official_underwriter_aggregate_v1"],
+        })
+        for feature_name in profile.feature_names:
+            features[feature_name] = 1.0
+        audit = pd.DataFrame([
+            {"event_id": "official", "feature_name": feature_name, "is_missing": False,
+             "time_validation_status": "pre_listing_verified"}
+            for feature_name in profile.feature_names
+        ])
+
+        dataset = build_stage_dataset(features, "post_demand", audit)
+
+        self.assertTrue(dataset.loc[0, "stage_source_valid"])
+        self.assertTrue(dataset.loc[0, "stage_model_candidate"])
+
+        for market in ("KONEX", None, ""):
+            features["market"] = market
+            blocked = build_stage_dataset(features, "post_demand", audit)
+            self.assertFalse(blocked.loc[0, "stage_model_candidate"])
+
+    def test_stage_dataset_allows_optional_missing_values_for_train_only_imputation(self):
+        profile = get_model_profile("post_demand")
+        features = pd.DataFrame({
+            "event_id": ["optional-missing"], "event_class": ["general_ipo"], "market": ["KOSDAQ"],
+            "offering_price_review_status": ["verified_currency_unit"],
+            "open_return_pct": [10.0], "close_return_pct": [8.0],
+            "institutional_validation_status": ["verified_dart_structural_aggregate_v1"],
+            "lockup_validation_status": ["dart_aggregate_value_not_verified"],
+        })
+        for feature_name in profile.feature_names:
+            features[feature_name] = 1.0
+        features["lockup_commitment_ratio"] = pd.NA
+        audit = pd.DataFrame([
+            {"event_id": "optional-missing", "feature_name": feature_name,
+             "is_missing": feature_name == "lockup_commitment_ratio",
+             "time_validation_status": "pre_listing_verified"}
+            for feature_name in profile.feature_names
+        ])
+
+        dataset = build_stage_dataset(features, "post_demand", audit)
+
+        self.assertFalse(dataset.loc[0, "stage_features_complete"])
+        self.assertTrue(dataset.loc[0, "stage_critical_features_complete"])
+        self.assertTrue(dataset.loc[0, "stage_source_valid"])
+        self.assertTrue(dataset.loc[0, "stage_model_candidate"])
+
+    def test_pre_demand_profile_excludes_same_day_count_without_publication_timestamp(self):
+        self.assertNotIn("same_day_ipo_count", get_model_profile("pre_demand").feature_names)
+
+    def test_pre_demand_blocks_unverified_supply_structure_values(self):
+        profile = get_model_profile("pre_demand")
+        features = pd.DataFrame({
+            "event_id": ["legacy-supply"],
+            "offering_price_review_status": ["verified_currency_unit"],
+            "open_return_pct": [10.0], "close_return_pct": [8.0],
+            "float_share_validation_status": ["public_float_not_structurally_verified"],
+            "offering_structure_validation_status": [
+                "offering_structure_not_structurally_verified"
+            ],
+            "underwriter_validation_status": [
+                "verified_krx_underwriter_registry_mapping_v1"
+            ],
+        })
+        for feature_name in profile.feature_names:
+            features[feature_name] = 1.0
+        audit = pd.DataFrame([
+            {"event_id": "legacy-supply", "feature_name": feature_name,
+             "is_missing": False, "time_validation_status": "pre_listing_verified"}
+            for feature_name in profile.feature_names
+        ])
+
+        dataset = build_stage_dataset(features, "pre_demand", audit)
+
+        self.assertFalse(dataset.loc[0, "stage_source_valid"])
+        self.assertFalse(dataset.loc[0, "stage_model_candidate"])
+
+    def test_training_readiness_recomputes_stale_stage_candidate_flag(self):
+        profile = get_model_profile("post_demand")
+        rows = []
+        for index in range(100):
+            row = {
+                "event_id": f"event-{index}", "event_class": "general_ipo", "market": "KOSDAQ",
+                "listing_date": pd.Timestamp("2020-01-01") + pd.Timedelta(days=index * 15),
+                "offering_price_review_status": "verified_currency_unit",
+                "price_target_validation_status": "official_price_verified",
+                "open_return_pct": 10.0, "close_return_pct": 8.0,
+                "institutional_validation_status": "verified_dart_structural_aggregate_v1",
+                "lockup_validation_status": "verified_dart_structural_aggregate_v1",
+                "stage_offering_price_verified": True, "stage_dual_target_ready": True,
+                "stage_time_valid": True, "stage_model_candidate": False,
+            }
+            row.update({feature: 1.0 for feature in profile.feature_names})
+            rows.append(row)
+
+        readiness = assess_training_readiness(pd.DataFrame(rows), prediction_stage="post_demand")
+
+        self.assertEqual(readiness["current_contract_model_candidate_rows"], 100)
+
+    def test_underwriter_tier_keeps_unknown_and_blank_values_missing(self):
+        self.assertTrue(pd.isna(FeatureEngineer._map_underwriter_tier("")))
+        self.assertTrue(pd.isna(FeatureEngineer._map_underwriter_tier("알수없는증권사")))
+        self.assertEqual(FeatureEngineer._map_underwriter_tier("엔에이치투자증권(주)"), 1)
+        self.assertEqual(FeatureEngineer._map_underwriter_tier("상상인증권(주)"), 3)
+
+    def test_merge_prefers_kind_underwriter_over_dart_text_candidate(self):
+        engineer = FeatureEngineer(feature_set="core")
+        dart = pd.DataFrame({
+            "corp_name": ["테스트"], "listing_date": ["2024-01-10"],
+            "lead_underwriter": ["는 기관투자자가 참여하는 경우 증권"],
+        })
+        krx = pd.DataFrame({
+            "corp_name": ["테스트"], "listing_date": ["2024-01-10"],
+            "lead_underwriter": ["한국투자증권(주)"],
+        })
+
+        merged = engineer._merge_base(dart, krx)
+        ranked = engineer._calc_underwriter_tier(merged)
+
+        self.assertEqual(ranked.loc[0, "lead_underwriter"], "한국투자증권(주)")
+        self.assertEqual(ranked.loc[0, "underwriter_tier"], 1)
+
+    def test_merge_excludes_market_transfer_with_different_listing_date(self):
+        dart = pd.DataFrame({
+            "corp_name": ["테스트기업"],
+            "listing_date": ["2020-01-10"],
+            "offering_price": [10_000],
+        })
+        krx = pd.DataFrame({
+            "corp_name": ["테스트기업", "테스트기업"],
+            "listing_date": ["2020-01-10", "2022-03-15"],
+            "open_price": [12_000, 15_000],
+            "close_price": [11_000, 14_000],
+        })
+
+        merged = FeatureEngineer()._merge_base(dart, krx)
+
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged.loc[0, "listing_date"], pd.Timestamp("2020-01-10"))
 
     def test_dart_offering_parser_extracts_phase2_fields(self):
         html = """
@@ -47,6 +457,299 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertEqual(parsed["listing_date"], "2025-03-10")
         self.assertEqual(parsed["major_shareholder_lockup_months"], 30)
         self.assertEqual(parsed["risk_factor_count"], 3)
+
+    def test_dart_offering_parser_uses_only_disclosed_public_float_amount_or_ratio(self):
+        collector = DARTCollector(api_key="test")
+        shares = collector._parse_offering_html(
+            "상장 직후 유통가능 주식수는 1,500,000주입니다.", "20250101000008"
+        )
+        ratio = collector._parse_offering_html(
+            "상장 직후 유통가능물량은 31.25%입니다.", "20250101000009"
+        )
+
+        self.assertEqual(shares["public_float_shares"], 1_500_000)
+        self.assertIsNone(shares["public_float_ratio_disclosed"])
+        self.assertEqual(ratio["public_float_ratio_disclosed"], 0.3125)
+        self.assertIsNone(ratio["public_float_shares"])
+
+    def test_dart_offering_parser_rejects_unrelated_share_after_public_float_explanation(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "상장 직후 유통가능물량으로 주가 하락의 원인이 될 수 있습니다. "
+            "증권신고서 제출일 현재 자기주식 15,000주를 보유하고 있습니다.",
+            "20250101000010",
+        )
+
+        self.assertIsNone(parsed["public_float_shares"])
+        self.assertIsNone(parsed["public_float_ratio_disclosed"])
+
+    def test_dart_offering_parser_ignores_table_number_before_price(self):
+        html = """
+        확정 공모가 4 제 1 호 45,000 원
+        희망 공모가 40,000 ~ 45,000 원
+        """
+
+        parsed = DARTCollector(api_key="test")._parse_offering_html(html, "20250101000002")
+
+        self.assertEqual(parsed["offering_price"], 45_000)
+        self.assertEqual(parsed["offering_price_review_status"], "verified_currency_unit")
+        self.assertEqual(parsed["offering_price_extracted_amount"], 45_000)
+
+    def test_dart_offering_parser_accepts_only_direct_same_sentence_price(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "확정 공모가는 20,000원입니다.", "20250101000005"
+        )
+
+        self.assertEqual(parsed["offering_price"], 20_000)
+        self.assertEqual(parsed["offering_price_parse_method"], "final_price_same_sentence")
+
+    def test_dart_offering_parser_rejects_nearby_face_value_and_price_band(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "확정 공모가 관련 표에는 액면가 500원, 희망 공모가 12,000원 ~ 15,000원 및 "
+            "총공모금액 100억원이 있습니다.",
+            "20250101000006",
+        )
+
+        self.assertIsNone(parsed["offering_price"])
+        self.assertEqual(parsed["offering_price_review_status"], "missing")
+
+    def test_dart_offering_parser_accepts_confirmed_price_in_same_table_row(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "<table><tr><th>확정 공모가</th><td>20,000원</td></tr>"
+            "<tr><th>액면가</th><td>500원</td></tr></table>",
+            "20250101000007",
+        )
+
+        self.assertEqual(parsed["offering_price"], 20_000)
+        self.assertEqual(parsed["offering_price_parse_method"], "final_price_table_row")
+
+    def test_dart_offering_parser_quarantines_number_without_currency_unit(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "확정 공모가 4 제 1 호", "20250101000003"
+        )
+
+        self.assertIsNone(parsed["offering_price"])
+        self.assertEqual(parsed["offering_price_extracted_amount"], 4)
+        self.assertEqual(parsed["offering_price_review_status"], "needs_review_no_currency_unit")
+        self.assertIn("확정 공모가 4", parsed["offering_price_audit_context"])
+
+    def test_currency_unit_price_is_kept_even_when_outside_expected_range(self):
+        parsed = DARTCollector(api_key="test")._parse_offering_html(
+            "확정 공모가 50 원", "20250101000004"
+        )
+
+        self.assertEqual(parsed["offering_price"], 50)
+        self.assertEqual(parsed["offering_price_review_status"], "verified_currency_unit")
+        self.assertTrue(parsed["offering_price_range_warning"])
+
+    def test_demand_forecast_extracts_price_for_source_comparison(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            "최종 공모가 45,000 원 기관 경쟁률 1,200 : 1", "12345678"
+        )
+
+        self.assertEqual(parsed["demand_offering_price"], 45_000)
+
+    def test_demand_forecast_uses_institutional_row_and_lockup_table_columns(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            """
+            <table><tr><th>기관 수요예측 경쟁률</th><td>1,234.56 : 1</td></tr></table>
+            <table>
+              <tr><th>기관투자자 의무보유확약기간</th><th>신청주식수</th><th>비율</th></tr>
+              <tr><td>6개월</td><td>1,000주</td><td>10.0%</td></tr>
+              <tr><td>3개월</td><td>2,000주</td><td>20.0%</td></tr>
+              <tr><td>1개월</td><td>3,000주</td><td>30.0%</td></tr>
+              <tr><td>15일</td><td>4,000주</td><td>40.0%</td></tr>
+              <tr><td>확약없음</td><td>0주</td><td>0.0%</td></tr>
+            </table>
+            """,
+            "12345678",
+        )
+
+        self.assertEqual(parsed["institutional_demand_ratio"], 1234.56)
+        self.assertEqual(parsed["lockup_6m_ratio"], 0.1)
+        self.assertEqual(parsed["lockup_3m_ratio"], 0.2)
+        self.assertEqual(parsed["lockup_1m_ratio"], 0.3)
+        self.assertEqual(parsed["lockup_15d_ratio"], 0.4)
+        self.assertEqual(parsed["lockup_commitment_ratio"], 1.0)
+        self.assertEqual(parsed["lockup_parse_method"], "lockup_complete_periods_sum")
+
+    def test_demand_forecast_uses_total_ratio_not_first_institution_group(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            """
+            <table>
+              <tr><th>구분</th><th>국내기관투자자</th><th>외국기관투자자</th><th>합계</th></tr>
+              <tr><td>경쟁률</td><td>18.40 : 1</td><td>21.00 : 1</td><td>329.47 : 1</td></tr>
+            </table>
+            """,
+            "12345678",
+        )
+
+        self.assertEqual(parsed["institutional_demand_ratio"], 329.47)
+        self.assertEqual(parsed["institutional_demand_parse_method"], "demand_ratio_explicit_total_column")
+        self.assertEqual(parsed["institutional_demand_parser_validation_status"], "structurally_verified")
+
+    def test_demand_forecast_preserves_rowspan_and_colspan_for_total_column(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            """
+            <table>
+              <tr><th rowspan="2">구분</th><th colspan="2">기관투자자</th><th rowspan="2">합계</th></tr>
+              <tr><th>국내</th><th>해외</th></tr>
+              <tr><td>경쟁률</td><td>18.40 : 1</td><td>21.00 : 1</td><td>329.47 : 1</td></tr>
+            </table>
+            """, "12345678",
+        )
+
+        self.assertEqual(parsed["institutional_demand_ratio"], 329.47)
+        self.assertEqual(parsed["institutional_demand_rule_id"], "DART_DEMAND_TOTAL_COLUMN_V1")
+        self.assertIn('"selected_column": 3', parsed["institutional_demand_structured_evidence"])
+
+    def test_structured_table_evidence_is_complete_valid_json(self):
+        evidence = DARTCollector._table_evidence([["x" * 13_000]], selected_row=0)
+
+        decoded = json.loads(evidence)
+        self.assertEqual(len(decoded["table"][0][0]), 13_000)
+        self.assertEqual(decoded["selected_row"], 0)
+
+    def test_demand_forecast_rejects_multiple_ratios_without_explicit_total_header(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            "<table><tr><th>기관투자자 경쟁률</th><td>18.40 : 1</td><td>329.47 : 1</td></tr></table>",
+            "12345678",
+        )
+
+        self.assertIsNone(parsed["institutional_demand_ratio"])
+
+    def test_demand_forecast_rejects_retail_total_table(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            """
+            <table>
+              <tr><th>구분</th><th>기관투자자 배정</th><th>합계</th></tr>
+              <tr><td>일반청약 경쟁률</td><td>18.40 : 1</td><td>329.47 : 1</td></tr>
+            </table>
+            """, "12345678",
+        )
+
+        self.assertIsNone(parsed["institutional_demand_ratio"])
+
+    def test_demand_forecast_rejects_underwriting_review_threshold(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            "수요예측 결과 기관투자자 유효경쟁률 25:1 이하인 경우 재심의 예정",
+            "12345678",
+        )
+
+        self.assertIsNone(parsed["institutional_demand_ratio"])
+
+    def test_demand_forecast_rejects_shareholder_lockup_table_even_with_institution_text(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            """
+            <table>
+              <tr><th>구분</th><th>기관투자자</th><th>의무보유기간</th><th>지분율</th></tr>
+              <tr><td>최대주주 보유주식</td><td>-</td><td>6개월</td><td>5.91%</td></tr>
+              <tr><td>기존주주 보유주식</td><td>-</td><td>3개월</td><td>2.00%</td></tr>
+            </table>
+            """,
+            "12345678",
+        )
+
+        self.assertIsNone(parsed["lockup_commitment_ratio"])
+
+    def test_demand_forecast_rejects_unstructured_lockup_numbers(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            "의무보유확약 6개월 100주, 3개월 200주, 1개월 300주, 15일 400주", "12345678"
+        )
+
+        self.assertIsNone(parsed["lockup_6m_ratio"])
+        self.assertIsNone(parsed["lockup_15d_ratio"])
+        self.assertIsNone(parsed["lockup_commitment_ratio"])
+
+    def test_demand_forecast_uses_direct_total_lockup_ratio_without_period_details(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            "기관 수요예측 경쟁률 63.41 : 1. 의무보유확약 0.17%.", "12345678"
+        )
+
+        self.assertEqual(parsed["institutional_demand_ratio"], 63.41)
+        self.assertAlmostEqual(parsed["lockup_commitment_ratio"], 0.0017)
+        self.assertEqual(parsed["lockup_parse_method"], "lockup_direct_total_ratio")
+
+    def test_demand_forecast_rejects_market_statistics_and_shareholder_lockup(self):
+        parsed = DARTCollector(api_key="test")._parse_demand_forecast_html(
+            """
+            <table><tr><th>수요예측 경쟁률</th><td>77.1 : 1</td><td>코스닥시장 신규상장기업 평균</td></tr></table>
+            <table><tr><th>최대주주 의무보유확약</th><td>6개월</td><td>20.0%</td></tr></table>
+            """,
+            "12345678",
+        )
+
+        self.assertIsNone(parsed["institutional_demand_ratio"])
+        self.assertIsNone(parsed["lockup_commitment_ratio"])
+
+    def test_equity_offering_price_flattens_dart_group_response(self):
+        collector = DARTCollector(api_key="test")
+        collector._get = lambda endpoint, params: {
+            "group": [{"list": [{"rcept_no": "20250101000001", "slprc": "45,000", "stksen": "보통주"}]}]
+        }
+
+        prices = collector.get_equity_offering_prices("12345678", "20250101", "20250131")
+
+        self.assertEqual(prices, [{"rcept_no": "20250101000001", "offering_price": 45_000, "security_type": "보통주"}])
+
+    def test_preliminary_price_statement_does_not_treat_one_share_as_offer_price(self):
+        parsed = DARTCollector._extract_offering_price_details(
+            "모집가액의 확정은 수요예측 결과를 반영하여 1주당 확정공모가액을 최종 결정할 예정이며 "
+            "모집가액 확정시 정정신고서를 제출할 예정입니다."
+        )
+
+        self.assertIsNone(parsed["offering_price"])
+        self.assertIsNone(parsed["offering_price_extracted_amount"])
+        self.assertEqual(parsed["offering_price_review_status"], "preliminary_price_language")
+        self.assertEqual(parsed["offering_price_finality"], "preliminary_price_language")
+
+    def test_unusual_offer_price_is_preserved_for_audit(self):
+        df = pd.DataFrame({
+            "offering_price": [4],
+            "open_price": [40_000],
+            "close_price": [38_000],
+        })
+
+        result = FeatureEngineer()._calc_target(df)
+
+        self.assertEqual(result.loc[0, "offering_price"], 4)
+        self.assertAlmostEqual(result.loc[0, "open_return_pct"], 999900.0)
+        self.assertAlmostEqual(result.loc[0, "close_return_pct"], 949900.0)
+
+    def test_classifier_fallback_is_preserved_after_load(self):
+        df = build_demo_dataset(n=30, seed=13, phase="phase2")
+        feature_names = get_phase2_feature_names()
+        X = df[feature_names]
+        y = pd.Series([5.0] * len(df))
+        model = IPOPriceModel(n_estimators=5, max_depth=1)
+        model.imputation_values = {"institutional_demand_ratio": 700.0}
+        model.fit(X, y)
+
+        original_model_dir = gradient_boost_model.MODEL_DIR
+        with tempfile.TemporaryDirectory() as temp_dir:
+            try:
+                gradient_boost_model.MODEL_DIR = Path(temp_dir)
+                model.save("fallback_persistence_test")
+                loaded = IPOPriceModel.load("fallback_persistence_test")
+                prediction = loaded.predict(X.head(1))
+            finally:
+                gradient_boost_model.MODEL_DIR = original_model_dir
+
+        self.assertEqual(len(prediction), 1)
+        self.assertEqual(float(prediction.iloc[0]["up_probability"]), 0.8)
+        self.assertEqual(loaded.imputation_values["institutional_demand_ratio"], 700.0)
+
+    def test_blank_offering_type_uses_event_class_fallback(self):
+        frame = pd.DataFrame({
+            "corp_name": ["일반기업", "테스트스팩"],
+            "event_class": ["general_ipo", "spac_ipo"],
+            "offering_type": [None, ""],
+        })
+
+        result = FeatureEngineer()._calc_offering_type_features(frame)
+
+        self.assertEqual(result["offering_type"].tolist(), ["common_stock_ipo", "spac_ipo"])
+        self.assertFalse(result["offering_type_spac_ipo"].iloc[0])
+        self.assertTrue(result["offering_type_spac_ipo"].iloc[1])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,125 @@
+{
+  "description": "Official DART original-table reference values reviewed 2026-09-09. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
+  "samples": [
+    {
+      "sample": "sensorview_2023",
+      "receipt": "20230706000211",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230706000211&dcmNo=9340563&eleId=1&offset=640&length=375191&dtd=dart3.xsd",
+      "sha256": "26f0f6e85bdcd295d6852f51c39cea0e8403c88ba7d6acbcd1336d07b74becf1",
+      "expected": {
+        "institutional_demand_ratio": 1673.33,
+        "lockup_commitment_ratio": 0.0741352063756718,
+        "price_band_low": 2900,
+        "price_band_high": 3600,
+        "public_float_ratio_disclosed": null,
+        "new_shares": 3900000,
+        "secondary_shares": 0
+      }
+    },
+    {
+      "sample": "ns_shopping_2015",
+      "receipt": "20150210000401",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20150210000401&dcmNo=4471997&eleId=6&offset=107928&length=520305&dtd=dart3.xsd",
+      "sha256": "bef9e3b0297b533cbbca9a2323a4605428085a8ee5cbfadcdbe6163ebc66d798",
+      "expected": {
+        "institutional_demand_ratio": null,
+        "lockup_commitment_ratio": null,
+        "price_band_low": 205000,
+        "price_band_high": 235000,
+        "public_float_ratio_disclosed": 0.4607,
+        "new_shares": 0,
+        "secondary_shares": 878181
+      }
+    },
+    {
+      "sample": "wiseitech_2020",
+      "receipt": "20200128000055",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20200128000055&dcmNo=7044061&eleId=8&offset=217685&length=626278&dtd=dart3.xsd",
+      "sha256": "9f5947157eafc097c00c7d0da74e333779eba5218f80f625d753539d3003c28a",
+      "expected": {
+        "institutional_demand_ratio": 1105.93,
+        "lockup_commitment_ratio": 0.0695,
+        "price_band_low": 10000,
+        "price_band_high": 11200,
+        "public_float_ratio_disclosed": 0.5827,
+        "new_shares": 850000,
+        "secondary_shares": 0
+      }
+    },
+    {
+      "sample": "rznomics_2025",
+      "receipt": "20251205000229",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20251205000229&dcmNo=10911498&eleId=1&offset=655&length=1011777&dtd=dart4.xsd",
+      "sha256": "dcf28757d221af5bd4874c020d826d42799dec9da625841be6322d4628117b64",
+      "expected": {
+        "institutional_demand_ratio": 848.91,
+        "lockup_commitment_ratio": 0.7428653678348257,
+        "price_band_low": 17000,
+        "price_band_high": 22500,
+        "public_float_ratio_disclosed": null,
+        "new_shares": 2060000,
+        "secondary_shares": 0
+      }
+    },
+    {
+      "sample": "sensorview_prospectus_2023",
+      "receipt": "20230706000212",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230706000212&dcmNo=9340565&eleId=6&offset=433064&length=1635587&dtd=dart3.xsd",
+      "sha256": "fae2d7c994d306f0f10d89d7508b4db27904dc7f2085cea8c9474ffc907baa80",
+      "expected": {
+        "institutional_demand_ratio": 1673.33,
+        "lockup_commitment_ratio": 0.0741352063756718,
+        "price_band_low": 2900,
+        "price_band_high": 3600,
+        "public_float_ratio_disclosed": 0.3683,
+        "new_shares": 3900000,
+        "secondary_shares": 0
+      }
+    },
+    {
+      "sample": "rznomics_prospectus_2025",
+      "receipt": "20251205000237",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20251205000237&dcmNo=10911509&eleId=8&offset=1038175&length=299865&dtd=dart4.xsd",
+      "sha256": "70386b46dafdefe4cb5468dbabc47368501a533bef5056b0a3f171508c396b18",
+      "expected": {
+        "institutional_demand_ratio": 848.91,
+        "lockup_commitment_ratio": 0.7428653678348257,
+        "price_band_low": 17000,
+        "price_band_high": 22500,
+        "public_float_ratio_disclosed": null,
+        "new_shares": 2060000,
+        "secondary_shares": 0
+      }
+    },
+    {
+      "sample": "rznomics_risks_2025",
+      "receipt": "20251205000237",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20251205000237&dcmNo=10911509&eleId=15&offset=1347163&length=563834&dtd=dart4.xsd",
+      "sha256": "79d7b57dfedf9627e16851b9fb738e276d85706c6035d45176aeab373bb52840",
+      "expected": {
+        "institutional_demand_ratio": null,
+        "lockup_commitment_ratio": null,
+        "price_band_low": null,
+        "price_band_high": null,
+        "public_float_ratio_disclosed": 0.3527,
+        "new_shares": null,
+        "secondary_shares": null
+      }
+    },
+    {
+      "sample": "ns_shopping_final_2015",
+      "receipt": "20150312000834",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20150312000834&dcmNo=4507860&eleId=8&offset=212510&length=539517&dtd=dart3.xsd",
+      "sha256": "fc77a710c739550d42caf952a296d87efd04640c7e69376339547a6645831283",
+      "expected": {
+        "institutional_demand_ratio": 302.59,
+        "lockup_commitment_ratio": 0.1566,
+        "price_band_low": 205000,
+        "price_band_high": 235000,
+        "public_float_ratio_disclosed": 0.4607,
+        "new_shares": 0,
+        "secondary_shares": 878181
+      }
+    }
+  ]
+}
