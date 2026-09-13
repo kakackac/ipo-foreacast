@@ -502,7 +502,7 @@ def run_collect(
         include_dart_demand_audit=audit_dart_demand,
     )
     logger.info(
-        "수집 완료 | KRX 일정 %d | DART 정합 %d | 학습 행 %d | 시초가 타깃 %d | 종가 타깃 %d",
+        "수집 완료 | KRX 일정 %d | DART 정합 %d | 피처 행(학습 승인 아님) %d | 시초가 타깃 %d | 종가 타깃 %d",
         summary["calendar_rows"], summary["dart_matched_rows"], summary["feature_rows"],
         summary["open_target_rows"], summary["close_target_rows"],
     )

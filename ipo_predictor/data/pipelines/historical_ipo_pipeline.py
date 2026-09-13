@@ -240,7 +240,7 @@ class HistoricalIPOPipeline:
         summary["model_stage_readiness"] = stage_summary
         with open(self.processed_dir / "data_collection_summary.json", "w", encoding="utf-8") as file:
             json.dump(summary, file, ensure_ascii=False, indent=2, default=str)
-        logger.info("실제 데이터 파이프라인 완료: %d개 학습 행", len(features))
+        logger.info("실제 데이터 파이프라인 완료: %d개 피처 행 (학습 승인 여부는 단계별 감사 결과 참조)", len(features))
         return summary
 
     def _build_institutional_extraction_audit(self) -> pd.DataFrame:

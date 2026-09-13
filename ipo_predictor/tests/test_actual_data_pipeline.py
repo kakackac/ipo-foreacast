@@ -283,6 +283,10 @@ class ActualDataPipelineTests(unittest.TestCase):
             ).run(2024, 2024, feature_set="phase2", include_dart_demand_audit=True)
 
             features = pd.read_parquet(root / "processed" / "features_all.parquet")
+            self.assertEqual(features.loc[0, "market"], "KOSDAQ")
+            for stage in ("pre_demand", "post_demand"):
+                stage_frame = pd.read_parquet(root / "processed/model_stage_datasets" / f"{stage}.parquet")
+                self.assertEqual(stage_frame.loc[0, "market"], "KOSDAQ")
             self.assertEqual(summary["feature_rows"], 1)
             self.assertEqual(summary["open_target_rows"], 1)
             self.assertEqual(summary["close_target_rows"], 1)

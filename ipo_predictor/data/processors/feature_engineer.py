@@ -158,7 +158,7 @@ class FeatureEngineer:
                 df[feature] = np.nan
 
         identity_columns = [
-            "event_id", "corp_name", "listing_date", "event_class", "offering_type",
+            "event_id", "corp_name", "listing_date", "event_class", "offering_type", "market",
             "industry_name", "listing_segment",
             "offering_price", "offering_price_review_status", "open_return_pct", "close_return_pct",
             "price_resolution_status", "price_match_status", "price_match_method",
