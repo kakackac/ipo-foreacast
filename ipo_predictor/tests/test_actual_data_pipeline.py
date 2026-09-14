@@ -355,6 +355,63 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertEqual(raw.loc[0, "public_float_rcept_no"], "20240201000001")
             self.assertAlmostEqual(features.loc[0, "float_share_ratio"], .3527)
 
+    def test_prospectus_confirmed_price_selected_before_initial_filing(self):
+        for prospectus_price, expected in ((12000, 12000), (13000, None)):
+            dart = _FakeDART()
+            original_list = dart.get_ipo_disclosure_list
+            dart.get_ipo_disclosure_list = lambda start, end: original_list(start, end).assign(
+                report_nm="증권신고서(지분증권)")
+            original = dart.get_offering_info
+            def offering(receipt):
+                record = original(receipt)
+                record.update(offering_price=None, offering_price_finality="preliminary_price_language")
+                if receipt == "20240201000001":
+                    record.update(offering_price=prospectus_price,
+                        offering_price_finality="confirmed_price_language",
+                        offering_price_review_status="verified_currency_unit")
+                return record
+            dart.get_offering_info = offering
+            dart.get_equity_offering_prices = Mock(return_value=[])
+            dart.find_demand_forecast_disclosure_records = Mock(return_value=[{
+                "rcept_no": "20240201000001", "rcept_dt": pd.Timestamp("2024-02-01"),
+                "report_nm": "투자설명서",
+            }])
+            with tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                pipeline = HistoricalIPOPipeline(dart_collector=dart, krx_collector=_FakeKRX(),
+                    raw_dir=root / "raw", processed_dir=root / "processed")
+                rows, _ = pipeline._collect_dart_records(
+                    _FakeKRX().get_official_listing_events("20240101", "20241231"),
+                    2024, 2024, include_dart_demand_audit=True)
+                value = rows.iloc[0]["offering_price"]
+                self.assertTrue(pd.isna(value) if expected is None else value == expected)
+                if expected is not None:
+                    self.assertEqual(rows.iloc[0]["rcept_no"], "20240201000001")
+                dart.find_demand_forecast_disclosure_records.assert_called_once()
+
+    def test_merged_event_row_is_not_used_as_document_cache(self):
+        from data.pipelines.historical_ipo_pipeline import (
+            OFFERING_PRICE_PARSER_VERSION, STRUCTURED_PRICE_CHECK_VERSION,
+            DART_FINAL_TERMS_DEMAND_PARSER_VERSION,
+        )
+        dart = _FakeDART()
+        dart.get_offering_info = Mock(wraps=dart.get_offering_info)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            pipeline = HistoricalIPOPipeline(dart_collector=dart,
+                raw_dir=root / "raw", processed_dir=root / "processed")
+            pd.DataFrame([{
+                "rcept_no": "20240101000001", "offering_price": 99999,
+                "offering_price_parser_version": OFFERING_PRICE_PARSER_VERSION,
+                "structured_price_check_version": STRUCTURED_PRICE_CHECK_VERSION,
+                "dart_final_terms_demand_parser_version": DART_FINAL_TERMS_DEMAND_PARSER_VERSION,
+            }]).to_parquet(root / "raw/dart_ipo_raw.parquet")
+            rows, _ = pipeline._collect_dart_records(
+                _FakeKRX().get_official_listing_events("20240101", "20241231"),
+                2024, 2024, include_dart_demand_audit=False)
+            dart.get_offering_info.assert_called_once_with("20240101000001")
+            self.assertEqual(rows.iloc[0]["offering_price"], 12000)
+
     def test_default_collection_uses_dart_final_terms_aggregate_demand(self):
         class FinalTermsDemandDART(_FakeDART):
             def get_offering_info(self, rcept_no):

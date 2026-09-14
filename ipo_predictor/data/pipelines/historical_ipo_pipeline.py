@@ -1166,19 +1166,13 @@ class HistoricalIPOPipeline:
         filings["corp_name_clean"] = filings["corp_name"].map(self._clean_name)
         filings["is_correction"] = filings["report_nm"].fillna("").str.contains("정정", regex=False)
         filings["is_final_conditions"] = filings["report_nm"].fillna("").str.contains("발행조건확정", regex=False)
-        cached_records = self._load_cached_frame("dart_ipo_raw.parquet")
-        cached_by_receipt = {}
-        if not cached_records.empty and "rcept_no" in cached_records:
-            cached_by_receipt = {
-                str(row.rcept_no): row._asdict()
-                for row in cached_records.drop_duplicates("rcept_no", keep="last").itertuples(index=False)
-            }
         offering_cache_by_receipt: dict[str, dict[str, Any]] = {}
         reusable_offering_columns = {
             "rcept_no", "offering_price_parser_version", "structured_price_check_version",
             "dart_final_terms_demand_parser_version",
         }
-        for frame in (self._offering_document_cache, cached_records):
+        # Event-level merged records are not receipt-level parser results.
+        for frame in (self._offering_document_cache,):
             if frame.empty or not reusable_offering_columns.issubset(frame.columns):
                 continue
             reusable_offerings = frame[
@@ -1261,6 +1255,31 @@ class HistoricalIPOPipeline:
             structured_start = pd.Timestamp(listing.listing_date) - pd.Timedelta(
                 days=MAX_FILING_TO_LISTING_DAYS
             )
+            prefetched_demand_candidates = None
+            search_records = getattr(self.dart, "find_demand_forecast_disclosure_records", None)
+            if include_dart_demand_audit and callable(search_records):
+                try:
+                    prefetched_demand_candidates = search_records(
+                        str(corp_codes[0]), structured_start.strftime("%Y%m%d"),
+                        pd.Timestamp(listing.listing_date).strftime("%Y%m%d"))
+                except RuntimeError:
+                    logger.warning("DART 투자설명서 후보 조회 실패: %s", listing.corp_name)
+                    prefetched_demand_candidates = []
+                supplements = []
+                for document in prefetched_demand_candidates:
+                    title = str(document.get("report_nm", ""))
+                    published = pd.to_datetime(document.get("rcept_dt"), errors="coerce")
+                    if ("투자설명서" not in title or pd.isna(published)
+                            or not structured_start <= published < listing.listing_date):
+                        continue
+                    supplements.append(dict(document, corp_code=str(corp_codes[0]),
+                        corp_name=listing.corp_name, rcept_dt=published,
+                        is_final_conditions=False, is_correction="정정" in title))
+                if supplements:
+                    candidates = pd.concat([candidates, pd.DataFrame(supplements)], ignore_index=True)
+                    candidates = candidates.drop_duplicates("rcept_no").sort_values(
+                        ["is_final_conditions", "rcept_dt", "is_correction", "rcept_no"],
+                        ascending=[False, False, False, False]).reset_index(drop=True)
             try:
                 structured_prices = self.dart.get_equity_offering_prices(
                     str(candidates.iloc[0].corp_code),
@@ -1301,7 +1320,7 @@ class HistoricalIPOPipeline:
             for rank, candidate in candidates.iterrows():
                 entry = lineage_entries[rank]
                 receipt = str(candidate.rcept_no)
-                cached = offering_cache_by_receipt.get(receipt) or cached_by_receipt.get(receipt)
+                cached = offering_cache_by_receipt.get(receipt)
                 if cached is not None and (
                     cached.get("structured_price_check_version") == STRUCTURED_PRICE_CHECK_VERSION
                     and cached.get("offering_price_parser_version") == OFFERING_PRICE_PARSER_VERSION
@@ -1349,7 +1368,16 @@ class HistoricalIPOPipeline:
             # 최종 확정 공모가의 승인 문서는 최신 우선순위로 선택하되, 희망
             # 밴드·공모 구조는 같은 계보의 다른 신고서에만 있는 경우가 있어
             # 값별로 가장 최신의 실제 원문 값을 보완한다.
-            filing, offering = offering_documents[0]
+            eligible_offering_documents = []
+            for candidate, document in offering_documents:
+                if "투자설명서" in str(candidate.report_nm):
+                    if not self._prospectus_price_matches_event(document, getattr(listing, "offering_price", None)):
+                        continue
+                eligible_offering_documents.append((candidate, document))
+            if not eligible_offering_documents:
+                continue
+            offering_documents = eligible_offering_documents
+            filing, offering = eligible_offering_documents[0]
 
             structured = next(
                 (item for item in structured_prices if item["rcept_no"] == str(filing.rcept_no)), None
@@ -1439,7 +1467,9 @@ class HistoricalIPOPipeline:
                     search_start = pd.Timestamp(listing.listing_date) - pd.Timedelta(
                         days=MAX_FILING_TO_LISTING_DAYS
                     )
-                    if callable(demand_records_method):
+                    if prefetched_demand_candidates is not None:
+                        demand_candidates.extend(prefetched_demand_candidates)
+                    elif callable(demand_records_method):
                         demand_candidates.extend(demand_records_method(
                             str(filing.corp_code),
                             search_start.strftime("%Y%m%d"),
@@ -1676,6 +1706,16 @@ class HistoricalIPOPipeline:
             columns=["corp_code", "listing_date", "year", "account_name_en", "amount"]
         )
         return pd.DataFrame(records), financials
+
+    @staticmethod
+    def _prospectus_price_matches_event(document, event_price):
+        try:
+            price = float(document.get("offering_price"))
+            return (price > 0 and price == float(event_price)
+                    and document.get("offering_price_finality") == "confirmed_price_language"
+                    and document.get("offering_price_review_status") == "verified_currency_unit")
+        except (TypeError, ValueError):
+            return False
 
     @staticmethod
     def _reconcile_structured_offering_price(
