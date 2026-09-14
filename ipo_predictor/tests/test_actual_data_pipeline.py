@@ -395,6 +395,10 @@ class ActualDataPipelineTests(unittest.TestCase):
 
     def test_default_collection_searches_dart_demand_lineage(self):
         class DemandAuditSpy(_FakeDART):
+            def get_offering_info(self, rcept_no):
+                return {**super().get_offering_info(rcept_no),
+                        "institutional_demand_ratio": 1934.89, "lockup_commitment_ratio": .2}
+
             def __init__(self):
                 self.demand_lookup_calls = 0
                 self.demand_parse_calls = 0
@@ -421,13 +425,14 @@ class ActualDataPipelineTests(unittest.TestCase):
             raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
             self.assertEqual(dart.demand_lookup_calls, 1)
             self.assertEqual(dart.demand_parse_calls, 2)
-            self.assertNotIn("institutional_demand_ratio", raw.columns)
+            self.assertTrue(pd.isna(raw.loc[0, "institutional_demand_ratio"]))
+            self.assertTrue(pd.isna(raw.loc[0, "lockup_commitment_ratio"]))
             self.assertEqual(
                 raw.loc[0, "institutional_validation_status"],
                 "dart_aggregate_value_not_verified",
             )
 
-    def test_offering_parser_v6_reparses_v3_cached_float_value(self):
+    def test_offering_parser_v7_reparses_v3_cached_float_value(self):
         class VersionedOfferingDART(_FakeDART):
             def __init__(self):
                 self.offering_calls = 0
@@ -459,8 +464,8 @@ class ActualDataPipelineTests(unittest.TestCase):
             cache = pd.read_parquet(raw_dir / "dart_offering_document_cache.parquet")
             latest = cache.loc[cache["rcept_no"] == "20240101000001"].iloc[-1]
             self.assertEqual(dart.offering_calls, 1)
-            self.assertEqual(latest["offering_price_parser_version"], 6)
-            self.assertEqual(latest["dart_final_terms_demand_parser_version"], 6)
+            self.assertEqual(latest["offering_price_parser_version"], 7)
+            self.assertEqual(latest["dart_final_terms_demand_parser_version"], 7)
             self.assertNotEqual(latest["public_float_shares"], 999_999)
 
     def test_final_terms_document_parses_offering_and_demand_without_cross_overwriting_status(self):
@@ -477,7 +482,7 @@ class ActualDataPipelineTests(unittest.TestCase):
         self.assertTrue(parsed["parse_success"])
         self.assertTrue(parsed["dart_final_terms_demand_parse_success"])
         self.assertEqual(parsed["institutional_demand_ratio"], 850.0)
-        self.assertEqual(parsed["dart_final_terms_demand_parser_version"], 6)
+        self.assertEqual(parsed["dart_final_terms_demand_parser_version"], 7)
 
     def test_collection_omits_removed_personal_subscription_artifacts(self):
         with tempfile.TemporaryDirectory() as temp_dir:

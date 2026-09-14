@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 6
+DEMAND_PARSER_VERSION = 7
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -433,7 +433,7 @@ class DARTCollector:
             return result
         text = self._normalize_text(html)
 
-        demand_price = self._extract_offering_price_details(text)
+        demand_price = self._extract_offering_price_details(text, self._extract_table_rows(html))
         result["demand_offering_price"] = demand_price["offering_price"]
         result["demand_offering_price_context"] = demand_price["offering_price_audit_context"]
 
@@ -1437,7 +1437,7 @@ class DARTCollector:
         )
         for match in pattern.finditer(context):
             bridge = match.group("bridge")
-            if "~" in bridge or "～" in bridge or re.search(PRICE_CONTEXT_EXCLUSIONS, bridge):
+            if "~" in bridge or "～" in bridge or re.search(PRICE_CONTEXT_EXCLUSIONS + r"|예정|정정|기재|따른", bridge):
                 continue
             value = DARTCollector._parse_int(match.group("amount"))
             if value is not None:

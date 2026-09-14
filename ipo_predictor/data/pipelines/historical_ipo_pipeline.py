@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 
 MAX_FILING_TO_LISTING_DAYS = 400
 STRUCTURED_PRICE_CHECK_VERSION = 3
-OFFERING_PRICE_PARSER_VERSION = 6
+OFFERING_PRICE_PARSER_VERSION = 7
 DART_LINEAGE_VERSION = 1
 DART_DEMAND_PARSER_VERSION = DEMAND_PARSER_VERSION
 DART_FINAL_TERMS_DEMAND_PARSER_VERSION = DEMAND_PARSER_VERSION
@@ -1674,6 +1674,9 @@ class HistoricalIPOPipeline:
                 "disclosed_listing_date": offering.get("listing_date"),
                 "listing_date": listing.listing_date,
                 **verified_demand,
+                # Raw offering parser candidates must never bypass demand approval.
+                "institutional_demand_ratio": verified_demand.get("institutional_demand_ratio"),
+                "lockup_commitment_ratio": verified_demand.get("lockup_commitment_ratio"),
                 **self._compare_offering_sources(offering, verified_demand),
                 "financial_as_of_year": financial_summary.get("financial_as_of_year"),
                 "financial_time_validation_status": financial_time_validation_status,

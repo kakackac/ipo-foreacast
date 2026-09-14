@@ -25,6 +25,12 @@ class OfficialDocumentSampleTests(unittest.TestCase):
         record["offering"]["new_shares"] = 101
         self.assertIn("value_mismatch:new_shares", verify_record(record, reference))
 
+    def test_correction_reason_is_not_a_final_price_label(self):
+        context = "공모가액확정에 따른기재사항 정정 - 모집(매출)가액(예정): 7,400원~9,000원"
+        self.assertIsNone(self.collector._extract_direct_price_with_currency(context))
+        html = f"<p>{context}</p><table><tr><td>확정 공모가액</td><td>9,000원</td></tr></table>"
+        self.assertEqual(self.collector._parse_demand_forecast_html(html, "test")["demand_offering_price"], 9000)
+
     def test_wiseitech_quantity_percentage_not_participant_percentage(self):
         # DART 20200128000055: the heading is outside the table.
         html = """<p>③ 의무보유 확약 기관수 및 신청수량</p><table>
