@@ -19,8 +19,12 @@ import json
 import re
 import time
 import zipfile
+import hashlib
+import os
+import tempfile
+from pathlib import Path
 from io import BytesIO
-from datetime import date, timedelta
+from datetime import date, timedelta, datetime, timezone
 from html import unescape as html_unescape
 from html.parser import HTMLParser
 from typing import Optional
@@ -145,8 +149,9 @@ class _TableRowParser(HTMLParser):
 class DARTCollector:
     """DART OpenAPI 수집기"""
 
-    def __init__(self, api_key: str = DART_API_KEY):
+    def __init__(self, api_key: str = DART_API_KEY, document_cache_dir=RAW_DIR / "dart_document_sources"):
         self.api_key = api_key
+        self.document_cache_dir = Path(document_cache_dir) if document_cache_dir is not None else None
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "IPO-Research/1.0"})
 
@@ -180,13 +185,28 @@ class DARTCollector:
                     time.sleep(attempt * 2)
         return {}
 
-    def get_document_text(self, rcept_no: str) -> str:
+    def get_document_text(self, rcept_no: str, *, refresh: bool = False) -> str:
         """DART 원문 ZIP을 내려받아 분석 가능한 평문으로 변환한다.
 
         OpenDART의 ``document.xml``은 이름과 달리 JSON/XBRL API가 아닌 ZIP
         바이너리 응답이다. 공시별 XML/HTML 조각을 모두 읽어 합치므로, 신고서
         정정본처럼 여러 파일로 구성된 원문도 같은 파서로 처리할 수 있다.
         """
+        rcept_no = str(rcept_no)
+        if not re.fullmatch(r"\d{14}", rcept_no):
+            raise ValueError("DART 접수번호는 14자리 숫자여야 합니다.")
+        cache_path = self.document_cache_dir / f"{rcept_no}.json" if self.document_cache_dir is not None else None
+        if cache_path is not None and cache_path.exists() and not refresh:
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                document = cached["decoded_document"]
+                if (cached["schema_version"] == 1 and cached["rcept_no"] == rcept_no
+                        and isinstance(document, str) and document.strip()
+                        and hashlib.sha256(document.encode("utf-8")).hexdigest() == cached["sha256"]):
+                    return document
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            logger.warning("DART 원문 캐시 무결성 확인 실패: %s; 재조회 필요", rcept_no)
         if not self.is_configured:
             raise RuntimeError("DART_API_KEY가 설정되지 않았습니다.")
 
@@ -199,7 +219,7 @@ class DARTCollector:
             )
             response.raise_for_status()
         except requests.RequestException as exc:
-            raise RuntimeError(f"DART 원문 다운로드 실패 ({rcept_no}): {exc}") from exc
+            raise RuntimeError(f"DART 원문 다운로드 실패 ({rcept_no}): {type(exc).__name__}") from None
 
         content = response.content
         if not zipfile.is_zipfile(BytesIO(content)):
@@ -221,7 +241,27 @@ class DARTCollector:
 
         # 후속 파서가 표의 같은 행인지 판단할 수 있도록 HTML/XML 경계는
         # 보존한다. 텍스트가 필요한 파서는 각자 _normalize_text를 호출한다.
-        return " ".join(fragments)
+        document = " ".join(fragments)
+        if not document.strip():
+            raise RuntimeError(f"DART 원문 텍스트가 비어 있습니다 ({rcept_no})")
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            record = {"schema_version": 1, "rcept_no": rcept_no,
+                      "source_url": f"{DART_BASE_URL}/document.xml",
+                      "collected_at": datetime.now(timezone.utc).isoformat(),
+                      "sha256": hashlib.sha256(document.encode("utf-8")).hexdigest(),
+                      "decoded_document": document}
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=cache_path.parent,
+                                                 delete=False) as handle:
+                    temporary = Path(handle.name)
+                    json.dump(record, handle, ensure_ascii=False)
+                os.replace(temporary, cache_path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        return document
 
     # ── 공시 목록 수집 ─────────────────────────────────────────
 

@@ -270,7 +270,9 @@ class ActualDataPipelineTests(unittest.TestCase):
         collector = DARTCollector(api_key="a" * 40)
         collector.session.get = Mock(return_value=response)
 
-        self.assertIn("희망 공모가 10,000 ~ 12,000 원", collector.get_document_text("20240101000001"))
+        with tempfile.TemporaryDirectory() as directory:
+            collector.document_cache_dir = Path(directory)
+            self.assertIn("희망 공모가 10,000 ~ 12,000 원", collector.get_document_text("20240101000001"))
 
     def test_pipeline_writes_raw_data_features_and_quality_summary(self):
         with tempfile.TemporaryDirectory() as temp_dir:
