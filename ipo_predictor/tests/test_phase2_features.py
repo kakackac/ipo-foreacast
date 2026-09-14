@@ -766,6 +766,17 @@ class Phase2FeatureTests(unittest.TestCase):
         self.assertFalse(result["offering_type_spac_ipo"].iloc[0])
         self.assertTrue(result["offering_type_spac_ipo"].iloc[1])
 
+    def test_band_position_uses_later_price_publication(self):
+        frame = pd.DataFrame([{
+            "event_id": "sample", "corp_name": "sample", "listing_date": "2024-03-01",
+            "offering_price_band_position": 1.0, "band_exceeded": 0,
+            "price_band_rcept_no": "band", "price_band_rcept_dt": "2024-01-01",
+            "offering_price_rcept_no": "price", "offering_price_rcept_dt": "2024-02-20",
+        }])
+        observations = FeatureEngineer("phase2").build_feature_observations(frame)
+        selected = observations[observations.feature_name.eq("offering_price_band_position")].iloc[0]
+        self.assertEqual(pd.Timestamp(selected["available_at"]), pd.Timestamp("2024-02-20"))
+
 
 if __name__ == "__main__":
     unittest.main()

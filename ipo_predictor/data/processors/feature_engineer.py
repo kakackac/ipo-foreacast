@@ -180,6 +180,8 @@ class FeatureEngineer:
             "recent_ipo_avg_return_sector_available_at",
             "recent_ipo_avg_return_all_available_at",
             "public_float_rcept_no", "public_float_rcept_dt",
+            "price_band_rcept_no", "price_band_rcept_dt",
+            "offering_price_rcept_no", "offering_price_rcept_dt",
             "offering_structure_rcept_no", "offering_structure_rcept_dt",
         ]
         for column in identity_columns:
@@ -898,8 +900,12 @@ class FeatureEngineer:
                     )
                     available_at = values.get("lockup_available_at")
                 if feature_name in {"offering_price_band_position", "band_exceeded"}:
-                    source_ref = first_present("price_band_rcept_no", "rcept_no")
-                    available_at = first_present("price_band_rcept_dt", "feature_available_at")
+                    band_ref = first_present("price_band_rcept_no", "rcept_no")
+                    price_ref = first_present("offering_price_rcept_no", "rcept_no")
+                    source_ref = f"band:{band_ref};price:{price_ref}"
+                    band_at = pd.to_datetime(first_present("price_band_rcept_dt", "feature_available_at"), errors="coerce")
+                    price_at = pd.to_datetime(first_present("offering_price_rcept_dt", "feature_available_at"), errors="coerce")
+                    available_at = max(band_at, price_at) if pd.notna(band_at) and pd.notna(price_at) else pd.NaT
                 if feature_name in {
                     "float_share_ratio", "secondary_offering_ratio",
                     "major_shareholder_lockup_months", "risk_factor_count",
