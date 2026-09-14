@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 7
+DEMAND_PARSER_VERSION = 8
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -1140,7 +1140,7 @@ class DARTCollector:
                 quantity_columns = [i for i, cell in enumerate(header)
                                     if re.fullmatch(r"\s*(?:참여|신청)\s*수량\s*\((?:단위\s*:\s*)?주\)\s*", cell)]
                 totals = [row for row in table if row and
-                          re.fullmatch(r"\s*총\s*수량\s*대비\s*비율\s*(?:\(%\))?\s*", row[0])]
+                          re.fullmatch(r"\s*총\s*(?:참여건수\s*(?:및|또는)\s*신청)?수량\s*대비\s*비율\s*(?:\(%\))?\s*", row[0])]
                 if len(quantity_columns) == 1 and len(totals) == 1:
                     column = quantity_columns[0]
                     row = totals[0]
@@ -1160,6 +1160,10 @@ class DARTCollector:
                         return result
             if not re.search(r"기관\s*(?:투자자)?", table_text):
                 continue
+            direct_aggregate = cls._extract_disclosed_aggregate_lockup_ratio(table)
+            if direct_aggregate is not None:
+                result.update(direct_aggregate)
+                return result
             aggregate_shares = cls._extract_aggregate_lockup_shares(table, application_total)
             if aggregate_shares is not None:
                 result.update(aggregate_shares)
@@ -1266,6 +1270,36 @@ class DARTCollector:
             result["parser_validation_status"] = "candidate_rejected"
             result["rejection_reason"] = "institutional_demand_scope_or_denominator_not_verified"
         return result
+
+    @classmethod
+    def _extract_disclosed_aggregate_lockup_ratio(cls, table: list[list[str]]) -> Optional[dict]:
+        """Read an explicit all-institution application-quantity percentage, not counts."""
+        if not any(row and re.fullmatch(r"\d+\s*(?:개월|일)\s*확약", row[0]) for row in table):
+            return None
+        for index, row in enumerate(table):
+            if not row or re.sub(r"\s+", "", row[0]) != "총참여건수및신청수량대비비율":
+                continue
+            headers = table[:index]
+            columns = [c for c in range(len(row))
+                       if any(c < len(h) and re.sub(r"\s+", "", h[c]) in ("합계", "전체") for h in headers)
+                       and any(c < len(h) and re.sub(r"\s+", "", h[c]) in ("수량", "신청수량") for h in headers)]
+            if len(columns) != 1:
+                continue
+            column = columns[0]
+            match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)%", row[column].replace(" ", ""))
+            if match and 0 <= float(match[1]) <= 100:
+                return {
+                    "lockup_commitment_ratio": float(match[1]) / 100,
+                    "parse_method": "lockup_explicit_aggregate_quantity_percentage",
+                    "rule_id": "DART_LOCKUP_AGGREGATE_QUANTITY_PERCENT_V1",
+                    "parser_validation_status": "structurally_verified",
+                    "evidence": " | ".join(row),
+                    "structured_evidence": cls._table_evidence(
+                        table, selected_row=index, selected_column=column,
+                        scope="all_institution_application_quantity_percentage",
+                    ),
+                }
+        return None
 
     @classmethod
     def _extract_aggregate_lockup_shares(cls, table: list[list[str]], application_total: Optional[int] = None) -> Optional[dict]:

@@ -7,11 +7,18 @@ import unittest
 
 from data.collectors.dart_collector import DARTCollector
 from scripts.audit_official_samples import verify_record
+from scripts.audit_zip_samples import compare_values
 
 
 class OfficialDocumentSampleTests(unittest.TestCase):
     def setUp(self):
         self.collector = DARTCollector(api_key="test")
+
+    def test_zip_comparison_rejects_missing_and_wrong_quantity_ratio(self):
+        expected = {"lockup_commitment_ratio": .107}
+        self.assertEqual(compare_values({"lockup_commitment_ratio": .107}, expected), [])
+        self.assertEqual(compare_values({"lockup_commitment_ratio": .104}, expected), ["lockup_commitment_ratio"])
+        self.assertEqual(compare_values({}, expected), ["lockup_commitment_ratio"])
 
     def test_reference_audit_rejects_changed_source_and_missing_outputs(self):
         reference = {"receipt": "1", "source_url": "official", "sha256": "abc",
@@ -30,6 +37,24 @@ class OfficialDocumentSampleTests(unittest.TestCase):
         self.assertIsNone(self.collector._extract_direct_price_with_currency(context))
         html = f"<p>{context}</p><table><tr><td>확정 공모가액</td><td>9,000원</td></tr></table>"
         self.assertEqual(self.collector._parse_demand_forecast_html(html, "test")["demand_offering_price"], 9000)
+
+    def test_daesung_explicit_total_quantity_percentage(self):
+        html = """<table><tr><th>기관투자자</th><th colspan="2">합계</th></tr>
+        <tr><th>구분</th><th>건수</th><th>수량</th></tr>
+        <tr><td>3개월확약</td><td>49</td><td>119,112,000</td></tr>
+        <tr><td>총 참여건수 및 신청수량 대비 비율</td><td>4.47%</td><td>4.57%</td></tr></table>"""
+        parsed = self.collector._parse_demand_forecast_html(html, "test")
+        self.assertAlmostEqual(parsed["lockup_commitment_ratio"], .0457)
+        for invalid in (html.replace("수량</th>", "배정수량</th>"), html.replace("합계", "국내기관")):
+            self.assertIsNone(self.collector._extract_disclosed_aggregate_lockup_ratio(
+                self.collector._extract_table_cells(invalid)[0]))
+
+    def test_nbt_quantity_ratio_with_count_or_quantity_label(self):
+        html = """<p>(다) 의무보유 확약 기관수 및 신청수량</p><table>
+        <tr><th>구분</th><th>참여건수(건)</th><th>신청수량(주)</th></tr>
+        <tr><td>합계</td><td>154</td><td>88,806,000</td></tr>
+        <tr><td>총 참여건수 또는 신청수량대비 비율(%)</td><td>10.4%</td><td>10.7%</td></tr></table>"""
+        self.assertAlmostEqual(self.collector._parse_demand_forecast_html(html, "test")["lockup_commitment_ratio"], .107)
 
     def test_wiseitech_quantity_percentage_not_participant_percentage(self):
         # DART 20200128000055: the heading is outside the table.

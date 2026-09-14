@@ -856,6 +856,15 @@ class FeatureEngineer:
                     missing_reason = "financial_publication_time_unverified"
                 elif missing:
                     missing_reason = "official_source_field_unavailable_or_unverified"
+                    status_key = {
+                        "institutional_demand_ratio": "institutional_demand_parser_validation_status",
+                        "lockup_commitment_ratio": "lockup_parser_validation_status",
+                    }.get(feature_name)
+                    parser_status = first_present(status_key) if status_key else None
+                    if parser_status == "candidate_rejected":
+                        missing_reason = "document_candidate_rejected_not_source_absence"
+                    elif parser_status == "value_not_found":
+                        missing_reason = "selected_document_parser_value_not_found"
                 else:
                     missing_reason = None
                 source_ref = values.get("rcept_no")

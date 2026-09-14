@@ -2,6 +2,32 @@
   "description": "Official DART original-table reference values reviewed 2026-09-09. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
   "samples": [
     {
+      "sample": "daesung_2022",
+      "receipt": "20220808000054",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20220808000054&dcmNo=8757875&eleId=1&offset=799&length=363959&dtd=dart3.xsd",
+      "sha256": "6991197cc59c9e16a0d837df34fc8a7c9b58f56f3b315bdd8c1dffbdc66c5fe1",
+      "expected": {
+        "institutional_demand_ratio": 1934.89,
+        "lockup_commitment_ratio": 0.0457,
+        "demand_offering_price": 9000,
+        "new_shares": 2600000,
+        "secondary_shares": 722560,
+        "price_band_low": 7400,
+        "price_band_high": 9000
+      }
+    },
+    {
+      "sample": "nbt_2021",
+      "receipt": "20210111000425",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210111000425&dcmNo=7754973&eleId=1&offset=796&length=338851&dtd=dart3.xsd",
+      "sha256": "b0f7fc66175e2aa98690ba8d7abf378da82859afe721d4de878a837a04a6172a",
+      "expected": {
+        "institutional_demand_ratio": 1425.3,
+        "lockup_commitment_ratio": 0.107,
+        "demand_offering_price": 19000
+      }
+    },
+    {
       "sample": "sensorview_2023",
       "receipt": "20230706000211",
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230706000211&dcmNo=9340563&eleId=1&offset=640&length=375191&dtd=dart3.xsd",

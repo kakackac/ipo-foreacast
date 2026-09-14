@@ -60,6 +60,21 @@ class Phase2FeatureTests(unittest.TestCase):
             result.loc[0, "kospi_momentum_20d_available_at"], result.loc[0, "listing_date"]
         )
 
+    def test_missing_institutional_values_distinguish_parser_states(self):
+        engineer = FeatureEngineer(feature_set="phase2")
+        features = pd.DataFrame({
+            "event_id": ["rejected", "not-found"],
+            "listing_date": [pd.Timestamp("2024-01-10")] * 2,
+            "lockup_commitment_ratio": [None, None],
+            "lockup_parser_validation_status": ["candidate_rejected", "value_not_found"],
+        })
+        result = engineer.build_feature_observations(features)
+        self.assertEqual(result["missing_reason"].tolist(), [
+            "document_candidate_rejected_not_source_absence",
+            "selected_document_parser_value_not_found",
+        ])
+        self.assertTrue(result["human_review_required"].all())
+
     def test_feature_observation_does_not_inherit_offering_price_approval(self):
         engineer = FeatureEngineer(feature_set="phase2")
         features = pd.DataFrame({
