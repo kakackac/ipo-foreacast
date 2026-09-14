@@ -55,6 +55,11 @@ class OfficialDocumentSampleTests(unittest.TestCase):
         <tr><td>합계</td><td>154</td><td>88,806,000</td></tr>
         <tr><td>총 참여건수 또는 신청수량대비 비율(%)</td><td>10.4%</td><td>10.7%</td></tr></table>"""
         self.assertAlmostEqual(self.collector._parse_demand_forecast_html(html, "test")["lockup_commitment_ratio"], .107)
+        xml = html.replace("</p>", "&cr;</p>").replace("신청수량대비", "신청수량&cr;대비")
+        self.assertAlmostEqual(self.collector._parse_demand_forecast_html(xml, "test")["lockup_commitment_ratio"], .107)
+        self.assertNotIn("&cr;", self.collector._normalize_text(xml))
+        invalid = xml.replace("신청수량(주)", "배정수량(주)")
+        self.assertIsNone(self.collector._parse_demand_forecast_html(invalid, "test")["lockup_commitment_ratio"])
 
     def test_wiseitech_quantity_percentage_not_participant_percentage(self):
         # DART 20200128000055: the heading is outside the table.

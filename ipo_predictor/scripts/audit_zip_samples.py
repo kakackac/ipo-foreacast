@@ -1,5 +1,6 @@
 """Check two previously reviewed IPOs through the actual DART ZIP API; no training."""
 import hashlib
+import argparse
 import json
 import math
 import sys
@@ -24,8 +25,11 @@ def compare_values(actual, expected):
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cached-only", action="store_true")
+    args = parser.parse_args()
     collector = DARTCollector()
-    if not collector.is_configured:
+    if not args.cached_only and not collector.is_configured:
         print("DART_API_KEY is not configured. No requests sent.")
         return 2
     output = RAW_DIR / "official_zip_sample_audit"
@@ -36,8 +40,13 @@ def main():
                   "source_url": "https://opendart.fss.or.kr/api/document.xml",
                   "expected": expected}
         try:
-            document = collector.get_document_text(receipt)
-            (output / f"{receipt}.xml").write_text(document, encoding="utf-8")
+            source_path = output / f"{receipt}.xml"
+            if args.cached_only:
+                document = source_path.read_text(encoding="utf-8")
+            else:
+                document = collector.get_document_text(receipt)
+                source_path.write_text(document, encoding="utf-8")
+            record["cache_used"] = args.cached_only
             actual = collector._parse_demand_forecast_html(document, "sample_audit")
             failed = compare_values(actual, expected)
             record.update(status="mismatch" if failed else "sample_passed",

@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 8
+DEMAND_PARSER_VERSION = 9
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -101,6 +101,8 @@ class _TableRowParser(HTMLParser):
                 self._pending_rowspans = {}
 
     def handle_data(self, data: str):
+        # DART ZIP XML uses a non-HTML line-break entity in headings and cells.
+        data = data.replace("&cr;", "\n")
         if self._cell is not None:
             self._cell.append(data)
         elif not self._table_depth:
@@ -827,6 +829,7 @@ class DARTCollector:
     def _normalize_text(raw_html: str) -> str:
         text = re.sub(r"<[^>]+>", " ", raw_html)
         text = html_unescape(text)
+        text = text.replace("&cr;", "\n")
         return re.sub(r"\s+", " ", text).strip()
 
     @classmethod
