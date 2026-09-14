@@ -320,7 +320,6 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertIn("filing_is_correction", audit.columns)
             self.assertEqual(len(review_queue), 0)
             self.assertTrue((root / "processed" / "data_collection_summary.json").exists())
-
             observations = pd.read_parquet(root / "processed" / "feature_observations.parquet")
             coverage = pd.read_parquet(root / "processed" / "feature_coverage_audit.parquet")
             self.assertNotIn("retail_subscription_ratio", observations["feature_name"].tolist())
@@ -329,10 +328,32 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertEqual(demand_coverage["observed_rows"], 0)
             self.assertEqual(demand_coverage["missing_rows"], 1)
             raw = pd.read_parquet(root / "raw" / "dart_ipo_raw.parquet")
-            self.assertEqual(
-                raw.loc[0, "institutional_validation_status"],
-                "dart_aggregate_value_not_verified",
-            )
+            self.assertEqual(raw.loc[0, "institutional_validation_status"], "dart_aggregate_value_not_verified")
+
+    def test_prospectus_float_reaches_saved_features(self):
+        dart = _FakeDART()
+        original = dart.get_offering_info
+        dart.get_offering_info = lambda receipt: dict(original(receipt),
+            public_float_parse_method="conflicting_float_ratios_review_required")
+        dart.find_demand_forecast_disclosure_records = Mock(return_value=[{
+            "rcept_no": "20240201000001", "rcept_dt": pd.Timestamp("2024-02-01"),
+            "report_nm": "[기재정정]투자설명서",
+        }])
+        dart.get_demand_forecast = Mock(return_value={
+            "float_document_offering_price": 12000,
+            "float_document_public_float_ratio_disclosed": .3527,
+            "float_document_public_float_parse_method": "disclosed_public_float_ratio_direct_context",
+            "float_document_public_float_parse_evidence": "official table fixture",
+        })
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            HistoricalIPOPipeline(dart_collector=dart, krx_collector=_FakeKRX(),
+                raw_dir=root / "raw", processed_dir=root / "processed").run(
+                    2024, 2024, feature_set="phase2", include_dart_demand_audit=True)
+            raw = pd.read_parquet(root / "raw/dart_ipo_raw.parquet")
+            features = pd.read_parquet(root / "processed/features_all.parquet")
+            self.assertEqual(raw.loc[0, "public_float_rcept_no"], "20240201000001")
+            self.assertAlmostEqual(features.loc[0, "float_share_ratio"], .3527)
 
     def test_default_collection_uses_dart_final_terms_aggregate_demand(self):
         class FinalTermsDemandDART(_FakeDART):
@@ -467,7 +488,7 @@ class ActualDataPipelineTests(unittest.TestCase):
             latest = cache.loc[cache["rcept_no"] == "20240101000001"].iloc[-1]
             self.assertEqual(dart.offering_calls, 1)
             self.assertEqual(latest["offering_price_parser_version"], 7)
-            self.assertEqual(latest["dart_final_terms_demand_parser_version"], 9)
+            self.assertEqual(latest["dart_final_terms_demand_parser_version"], 10)
             self.assertNotEqual(latest["public_float_shares"], 999_999)
 
     def test_final_terms_document_parses_offering_and_demand_without_cross_overwriting_status(self):
@@ -484,7 +505,7 @@ class ActualDataPipelineTests(unittest.TestCase):
         self.assertTrue(parsed["parse_success"])
         self.assertTrue(parsed["dart_final_terms_demand_parse_success"])
         self.assertEqual(parsed["institutional_demand_ratio"], 850.0)
-        self.assertEqual(parsed["dart_final_terms_demand_parser_version"], 9)
+        self.assertEqual(parsed["dart_final_terms_demand_parser_version"], 10)
 
     def test_collection_omits_removed_personal_subscription_artifacts(self):
         with tempfile.TemporaryDirectory() as temp_dir:

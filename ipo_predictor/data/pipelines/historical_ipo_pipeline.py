@@ -23,6 +23,7 @@ from data.collectors.underwriter_registry import (
     normalize_underwriter,
 )
 from data.processors.feature_engineer import FeatureEngineer
+from data.pipelines.float_source_resolver import resolve_public_float
 from features.model_profiles import MODEL_PROFILES, build_stage_dataset, stage_readiness_by_offering_type
 from features.source_contracts import (
     DART_STRUCTURAL_AGGREGATE_STATUS,
@@ -1390,31 +1391,6 @@ class HistoricalIPOPipeline:
                 offering["offering_structure_rcept_no"] = str(source_candidate.rcept_no)
                 offering["offering_structure_rcept_dt"] = source_candidate.rcept_dt
 
-            float_fields = (
-                "public_float_shares", "public_float_ratio_disclosed",
-                "public_float_parse_method", "public_float_parse_evidence",
-                "total_post_listing_shares", "total_post_listing_shares_parse_method",
-                "total_post_listing_shares_parse_evidence",
-                "total_post_listing_shares_parser_validation_status",
-            )
-            float_source = next((
-                (candidate, document) for candidate, document in offering_documents
-                if document.get("public_float_parse_method") ==
-                    "disclosed_public_float_ratio_direct_context"
-                or (
-                    document.get("public_float_parse_method") ==
-                        "disclosed_public_float_shares_direct_context"
-                    and document.get("total_post_listing_shares_parser_validation_status") ==
-                        "structurally_verified"
-                )
-            ), None)
-            if float_source is not None:
-                source_candidate, source_document = float_source
-                for field in float_fields:
-                    offering[field] = source_document.get(field)
-                offering["public_float_rcept_no"] = str(source_candidate.rcept_no)
-                offering["public_float_rcept_dt"] = source_candidate.rcept_dt
-
             field_source_groups = {
                 "price_band": ("price_band_low", "price_band_high"),
                 "governance_structure": (
@@ -1577,6 +1553,19 @@ class HistoricalIPOPipeline:
                     continue
 
                 demand_candidate_documents.append((demand_candidate, parsed_demand))
+
+            float_documents = [(candidate.to_dict(), document)
+                               for candidate, document in offering_documents]
+            for candidate, document in demand_candidate_documents:
+                if "투자설명서" not in str(candidate.get("report_nm", "")):
+                    continue
+                float_documents.append((dict(candidate, supplementary=True), {
+                    key.removeprefix("float_document_"): value
+                    for key, value in document.items() if key.startswith("float_document_")
+                }))
+            offering.update(resolve_public_float(
+                float_documents, offering.get("offering_price"), listing.listing_date
+            ))
 
             lineage_demand, lineage_metadata = self._select_dart_lineage_demand(
                 demand_candidate_documents, offering.get("offering_price"), listing.listing_date

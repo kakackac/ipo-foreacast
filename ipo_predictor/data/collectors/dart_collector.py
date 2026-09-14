@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 9
+DEMAND_PARSER_VERSION = 10
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -427,7 +427,14 @@ class DARTCollector:
         실제 구현 시: DART XML API를 통해 공시 원문을 가져온 후
         특정 테이블 패턴을 정규식으로 파싱한다.
         """
-        return self._parse_demand_forecast_html(self.get_document_text(rcept_no), corp_code)
+        document = self.get_document_text(rcept_no)
+        result = self._parse_demand_forecast_html(document, corp_code)
+        # Prospectuses contain offering structure too; do not discard it by search purpose.
+        offering = self._parse_offering_html(document, rcept_no)
+        result.update({f"float_document_{field}": value for field, value in offering.items()
+                       if field.startswith(("public_float_", "total_post_listing_shares"))
+                       or field == "offering_price"})
+        return result
 
     def _parse_demand_forecast_html(self, html: str, corp_code: str) -> dict:
         """
