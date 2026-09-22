@@ -23,12 +23,17 @@ def proof(value=0):
 
 def candidate():
     values = dict(zip(FIELDS, [100, .17, 0]))
-    return {"event_id": "test_20260917", "listing_date": "2026-09-17", "offering_type": "general_ipo",
+    return {"event_id": "test_20260917", "ticker": "123450", "listing_date": "2026-09-17", "offering_type": "general_ipo",
         "market": "KOSDAQ", "features": values, "evidence": {k: proof(v) for k, v in values.items()},
         "offering_price": 10000, "offering_price_evidence": proof(10000)}
 
 
 class ProspectiveTests(unittest.TestCase):
+    def test_korean_kind_event_identity_accepted(self):
+        item = candidate()
+        item["event_id"] = "krx_kind|123450|20260917|테스트"
+        p.validate_input(item, FIELDS, NOW)
+
     def test_prediction_end_to_end_without_reading_holdout(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

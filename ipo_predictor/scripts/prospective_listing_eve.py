@@ -79,8 +79,10 @@ def validate_input(item, fields, now):
         raise ValueError("Predictions require listing eve, 21:00-23:59 KST; no backdating")
     if item.get("offering_type") != "general_ipo" or item.get("market") not in ("KOSPI", "KOSDAQ"):
         raise ValueError("Research cohort only supports general KOSPI/KOSDAQ IPOs")
-    if not isinstance(item.get("event_id"), str) or not re.fullmatch(r"[A-Za-z0-9_:-]{1,120}", item["event_id"]):
+    if not isinstance(item.get("event_id"), str) or not re.fullmatch(r"[\w| :().-]{1,200}", item["event_id"]):
         raise ValueError("Event identifier required")
+    if not re.fullmatch(r"[0-9A-Z]{6}", item.get("ticker", "")):
+        raise ValueError("Verified six-character KRX ticker required")
     if set(item["features"]) != set(fields):
         raise ValueError("Feature contract mismatch")
     approved = {}
@@ -144,7 +146,8 @@ def predict(experiment, item, db_path):
             model.fit(X, y)
             outputs[target]["model"] = float(model.predict(future)[0])
     payload = {"version": 1, "recorded_at": datetime.now(KST).isoformat(), "input_cutoff": now.isoformat(),
-        "event_id": item["event_id"], "listing_date": item["listing_date"], "offering_price": item["offering_price"],
+        "event_id": item["event_id"], "ticker": item["ticker"], "market": item["market"],
+        "listing_date": item["listing_date"], "offering_price": item["offering_price"],
         "features": item["features"], "evidence": approved, "offering_price_evidence": approved_price,
         "predictions": outputs, "experiment_id": manifest["run_id"], "training_sha256": cohort["development_sha256"],
         "model_spec": SPEC["model"], "deployment_authorized": False}
