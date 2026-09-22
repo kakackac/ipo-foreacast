@@ -1,0 +1,27 @@
+{
+  "source": "User screenshots IMG_0030.PNG, IMG_0031.PNG, IMG_0032.PNG",
+  "capture_date_verified": false,
+  "purpose": "Coverage comparison only; never official model evidence",
+  "companies": [
+    {"name": "멜콘", "d_day": 9},
+    {"name": "진코스텍", "d_day": 10},
+    {"name": "엘리스그룹", "d_day": 15},
+    {"name": "엠에스바이오", "d_day": 20},
+    {"name": "디티에스", "d_day": 21},
+    {"name": "에스케이증권제14호기업인수목적", "d_day": 23},
+    {"name": "유캐스트", "d_day": 27},
+    {"name": "다비오", "d_day": 27},
+    {"name": "티앤이코리아", "d_day": 28},
+    {"name": "크리에이츠", "d_day": 28},
+    {"name": "한화플러스제6호스팩", "d_day": 28, "official_name_candidate": "한화플러스제6호기업인수목적", "official_corp_code_candidate": "01965157"},
+    {"name": "인텔리빅스", "d_day": 29},
+    {"name": "이에스티", "d_day": 30},
+    {"name": "영광", "d_day": 30},
+    {"name": "래블업", "d_day": 30},
+    {"name": "아이엠스팩1호", "d_day": 34, "official_name_candidate": "아이엠기업인수목적1호", "official_corp_code_candidate": "02036869"},
+    {"name": "에이엘로봇", "d_day": 34},
+    {"name": "엠비디", "d_day": 36},
+    {"name": "바로팜", "d_day": 41},
+    {"name": "하나에어로다이내믹스", "d_day": 49}
+  ]
+}

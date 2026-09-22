@@ -19,6 +19,42 @@ def text(cell):
     return " ".join(cell.get_text(" ", strip=True).split())
 
 
+def schedule_range(raw):
+    if raw.strip() in ("", "-", "미정"):
+        return None, None, "not_announced_in_source"
+    match = re.fullmatch(r"(\d{4}-\d{2}-\d{2})\s*~\s*(\d{4}-\d{2}-\d{2})", raw)
+    if match:
+        try:
+            start, end = (date.fromisoformat(v) for v in match.groups())
+            if start <= end:
+                return start.isoformat(), end.isoformat(), "parsed_official_schedule"
+        except ValueError:
+            pass
+    return None, None, "schedule_review_required"
+
+
+def classify_schedule(row, as_of):
+    start, end, status = schedule_range(row["subscription_schedule"])
+    row.update(subscription_start=start, subscription_end=end, subscription_schedule_status=status)
+    demand_start, demand_end, demand_status = schedule_range(row["demand_schedule"])
+    row.update(demand_start=demand_start, demand_end=demand_end, demand_schedule_status=demand_status)
+    row["subscription_state"] = (
+        "review_required" if status == "schedule_review_required" else
+        "date_unconfirmed" if start is None else
+        "subscription_upcoming" if date.fromisoformat(start) > as_of else
+        "subscription_open" if date.fromisoformat(end) >= as_of else "subscription_period_elapsed")
+    row["listing_state"] = (
+        "date_unconfirmed" if row["listing_date"] is None else
+        "listing_upcoming" if date.fromisoformat(row["listing_date"]) > as_of else
+        "listing_scheduled_today" if date.fromisoformat(row["listing_date"]) == as_of else "listing_date_elapsed_unconfirmed")
+    # Elapsed planned dates do not establish completed listing or cancellation.
+    row["service_schedule_candidate"] = (row["subscription_state"] != "subscription_period_elapsed"
+        or row["listing_state"] != "listing_date_elapsed_unconfirmed")
+    row["subscription_d_day"] = None if start is None else (date.fromisoformat(start) - as_of).days
+    row["schedule_as_of"] = as_of.isoformat()
+    return row
+
+
 def parse_candidates(export_html, listing_html, market, collected_at):
     export = BeautifulSoup(export_html, "html.parser")
     listing = BeautifulSoup(listing_html, "html.parser")
@@ -62,7 +98,8 @@ def parse_candidates(export_html, listing_html, market, collected_at):
             price = int(values[6].replace(",", ""))
         results.append({"candidate_id": f"kind_offering:{process_id}", "kind_process_id": process_id,
             "corp_name": values[1], "market": market, "submission_date": values[2],
-            "demand_schedule": values[3], "listing_date": scheduled, "offering_price_candidate": price,
+            "demand_schedule": values[3], "subscription_schedule": values[4],
+            "listing_date": scheduled, "offering_price_candidate": price,
             "lead_underwriter": values[9], "collected_at": collected_at,
             "source_url": URL + "?method=searchPubofrProgComMain",
             "detail_url": "https://kind.krx.co.kr/listinvstg/pubofrprogcomdetail.do?method=searchProgComDetailMain&bzProcsNo=" + process_id,
@@ -70,7 +107,8 @@ def parse_candidates(export_html, listing_html, market, collected_at):
             "model_eligible": False})
     if identities:
         raise ValueError("KIND export missing candidate rows")
-    return results
+    as_of = datetime.fromisoformat(collected_at).astimezone(KST).date()
+    return [classify_schedule(row, as_of) for row in results]
 
 
 class UpcomingIPOCollector:
@@ -109,7 +147,12 @@ class UpcomingIPOCollector:
             if len({r["candidate_id"] for r in results}) != len(results):
                 raise ValueError("Duplicate process identity across markets")
             (destination / "candidates.json").write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
-            manifest.update(status="complete", rows=len(results), upcoming=sum(r["schedule_state"] == "upcoming" for r in results))
+            manifest.update(status="complete", rows=len(results), upcoming=sum(r["schedule_state"] == "upcoming" for r in results),
+                upcoming_definition="listing_date_after_collection_date_only_not_all_offerings",
+                subscription_upcoming=sum(r["subscription_state"] == "subscription_upcoming" for r in results),
+                subscription_open=sum(r["subscription_state"] == "subscription_open" for r in results),
+                service_schedule_candidates=sum(r["service_schedule_candidate"] for r in results),
+                completeness="queried_submission_window_only")
         except Exception as exc:
             # Never serialize request objects, headers, cookies or exception messages.
             manifest.update(status="failed", error_type=type(exc).__name__)
