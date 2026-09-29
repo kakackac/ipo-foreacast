@@ -33,7 +33,7 @@ def parse_calendar(content, year, month):
         selected = soup.select_one(f"select#{key} option[selected]")
         if selected is None or int(selected.get("value", "0")) != expected:
             raise ValueError("DART returned another calendar period")
-    cells = soup.select("li.day:not(.other-month)")
+    cells = soup.select("li.day:not(.other-month):not(.emptyData)")
     if not cells:
         raise ValueError("Calendar structure missing; not an empty official result")
     rows = []

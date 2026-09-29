@@ -36,6 +36,7 @@ node1['offset'] = "123";
 node1['length'] = "500";
 node1['dtd'] = "dart4.xsd";</script>'''
         self.assertEqual(summary_node(node, "20260909000381")["length"], "500")
+        self.assertEqual(summary_node(node.replace('요약정보', '증권발행조건확정'), "20260909000381")["length"], "500")
         for html in (node + node, node.replace('"500"', '"invalid"')):
             with self.assertRaises(ValueError):
                 summary_node(html, "20260909000381")

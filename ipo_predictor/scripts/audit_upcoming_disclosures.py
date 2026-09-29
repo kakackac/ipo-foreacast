@@ -67,7 +67,7 @@ def summary_node(content, receipt):
             if len(pairs) != len({key for key, _ in pairs}):
                 continue
             node = dict(pairs)
-            if re.sub(r"\s", "", node.get("text", "")) != "요약정보":
+            if re.sub(r"\s", "", node.get("text", "")) not in ("요약정보", "증권발행조건확정"):
                 continue
             if node.get("rcpNo") != receipt or node.get("dtd") not in ("dart3.xsd", "dart4.xsd"):
                 raise ValueError("Summary receipt/schema mismatch")
@@ -80,21 +80,32 @@ def summary_node(content, receipt):
     return nodes[0]
 
 
-def run(calendar, output, reference):
-    candidates = replay(calendar, reference)["comparison"]
+def calendar_candidates(events):
+    grouped = {}
+    for event in events:
+        key = (event["corp_code"], event["rcept_no"])
+        grouped.setdefault(key, {"name": event["corp_name"], "matches": []})["matches"].append(event)
+    return list(grouped.values())
+
+
+def run(calendar, output, reference, all_calendar=False):
+    replayed = replay(calendar, reference)
+    candidates = calendar_candidates(replayed["events"]) if all_calendar else replayed["comparison"]
     root = Path(output) / datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y%m%dT%H%M%S%f")
     root.mkdir(parents=True, exist_ok=False)
-    report = {"source": "public_DART_viewer", "rows": [], "model_eligible": False}
+    report = {"source": "public_DART_viewer", "rows": [], "model_eligible": False,
+              "scope": "all_offerings_in_requested_calendar_months" if all_calendar else "twenty_reference_offerings_not_all_market"}
     session = requests.Session()
     for candidate in candidates:
-        starts = {(r["corp_code"], r["rcept_no"]): r for r in candidate["matches"] if r["event_type"] == "start"}
+        starts = {(r["corp_code"], r["rcept_no"]): r for r in candidate["matches"]}
         entry = {"reference_name": candidate["name"], "model_eligible": False}
         report["rows"].append(entry)
         try:
             if len(starts) != 1:
                 raise ValueError("Calendar identity ambiguous")
             (corp, receipt), event = next(iter(starts.items()))
-            entry.update(corp_code=corp, calendar_receipt=receipt, subscription_start=event["subscription_date"])
+            entry.update(corp_code=corp, calendar_receipt=receipt, rcept_no=receipt)
+            entry["calendar_events"] = candidate["matches"]
             response = session.get(BASE + "/dsaf001/main.do", params={"rcpNo": receipt}, timeout=30)
             response.raise_for_status()
             content = response.content
@@ -129,6 +140,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--calendar", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--all-calendar", action="store_true", help="Audit every offering identity, including non-IPO candidates")
     args = parser.parse_args()
     reference = json.loads((Path(__file__).resolve().parents[1] / "data/manual/screenshot_schedule_reference.json").read_text())
-    print(json.dumps(run(args.calendar, args.output, reference), ensure_ascii=False))
+    print(json.dumps(run(args.calendar, args.output, reference, args.all_calendar), ensure_ascii=False))

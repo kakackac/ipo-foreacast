@@ -105,9 +105,17 @@ def build(calendar_path, disclosure_path, reference):
                 "schedule_candidate_eligible": True, "model_eligible": False,
                 "model_blockers": ["ipo_subtype_not_verified", "listing_date_not_verified", "final_price_not_verified", "stage_features_not_verified"]})
         except (ValueError, KeyError, OSError) as exc:
-            rejected.append({"reference_name": entry.get("reference_name"), "status": "needs_review", "error_type": type(exc).__name__})
+            reasons = {"Table absent or ambiguous": "table_schema_absent_or_ambiguous",
+                       "Not a public common-stock offering": "outside_public_common_stock_scope",
+                       "Calendar and registration schedule disagree": "calendar_schedule_conflict",
+                       "Source lineage changed": "lineage_requires_review",
+                       "Source checksum mismatch": "source_hash_mismatch",
+                       "Ambiguous table spans": "ambiguous_table_spans"}
+            rejected.append({"reference_name": entry.get("reference_name"), "corp_code": entry.get("corp_code"),
+                             "rcept_no": entry.get("rcept_no"), "status": "needs_review", "error_type": type(exc).__name__,
+                             "reason": reasons.get(str(exc), "source_unavailable_or_schema_review_required")})
     return {"registry_version": 1, "created_at": datetime.now(ZoneInfo("Asia/Seoul")).isoformat(),
-            "scope": "twenty_reference_offerings_not_all_market", "rows": rows, "rejected": rejected,
+            "scope": report.get("scope", "twenty_reference_offerings_not_all_market"), "rows": rows, "rejected": rejected,
             "historical_training_data_modified": False, "deployment_authorized": False}
 
 
