@@ -15,6 +15,24 @@ SUMMARY = '''<table><tr><th>청약기일</th><th>납입기일</th><th>청약공�
 
 
 class ScheduleRegistryTests(unittest.TestCase):
+    def test_only_explicit_after_section_is_used(self):
+        html = '<p>(주1) 정정 전</p>' + SUMMARY + '<p>(주1) [정정 후]</p>' + SUMMARY.replace('10,700원', '12,300원')
+        result = registry.parse_summary(html)
+        self.assertEqual(result['offering_table_amount_raw'], '12,300원')
+        self.assertEqual(result['schedule_evidence']['correction_section']['side'], '후')
+        self.assertIsNone(result['final_offering_price'])
+        for invalid in (html + '<p>(주2) 정정 후</p>' + SUMMARY,
+                        '<p>(주1) 정정 전</p>' + SUMMARY,
+                        '<p>(주1) 정정 후</p><p>(주2) 변경 내용</p>' + SUMMARY):
+            with self.assertRaises(ValueError):
+                registry.parse_summary(invalid)
+
+    def test_official_weekday_and_short_end_date(self):
+        html = SUMMARY.replace('2026년 10월 01일 ~ 2026.10.02', '2026.10.01(목)~10.02(금)').replace('2026.10.07', '2026.10. 07(수)')
+        self.assertEqual(registry.parse_summary(html)['subscription_end'], '2026-10-02')
+        with self.assertRaises(ValueError):
+            registry.parse_summary(html.replace('10.02(금)', '09.30(수)'))
+
     def test_schedule_does_not_approve_price_or_listing(self):
         result = registry.parse_summary(SUMMARY)
         self.assertEqual(result['subscription_start'], '2026-10-01')

@@ -1,7 +1,9 @@
 """Audit all missing cells and bounded verified cohorts; never fit a model."""
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import pandas as pd
@@ -97,7 +99,7 @@ def main():
         # Candidate audit artifacts are deliberately separate from training entrypoint files.
         frame.to_parquet(output / f"{name}_candidate_review.parquet", index=False)
     lines = ["# 결측 원인과 검증 표본 학습 조건 재평가", "", 
-        "2026-09-15. 모델 학습과 성능평가는 실행하지 않았다. 전체 데이터의 완벽한 수집을 학습 선행조건으로 삼지 않는다.", "",
+        f"{datetime.now(ZoneInfo('Asia/Seoul')).date()}. 이번 감사에서는 모델 학습과 성능평가를 실행하지 않았다. 기존 실험의 평가 사용 이력을 초기화하지 않는다.", "",
         f"전체 {report['rows']}행, {report['feature_cells']}개 피처 칸 중 결측 {report['missing_cells']}칸이다. 아래 사유는 저장된 증거 수준이며 공식 미공개 확정이 아니다.", "",
         "| 피처 | 결측 | 값 있음·검토 필요 | 값 있음·승인 |", "|---|---:|---:|---:|"]
     for item in report["features"]:
@@ -112,12 +114,12 @@ def main():
             f"선택 표본 연도별 분포: {profile['selected_years']}.",
             f"축소 실험 피처: {', '.join(profile['bounded_experiment']['features'])}.",
             f"축소 실험 내 미승인 비결측 칸: {profile['bounded_experiment']['unapproved_observed_cells']}."])
-        lines.append(f"제안 분할: 2026년 이전 개발 {profile['bounded_experiment']['development_rows']}건, 2026년 잠금 평가 {profile['bounded_experiment']['holdout_rows']}건. 아직 모델을 학습하거나 이 평가 구간의 성능을 계산하지 않았다.")
+        lines.append(f"연도 구간별 후보: 2026년 이전 {profile['bounded_experiment']['development_rows']}건, 2026년 {profile['bounded_experiment']['holdout_rows']}건. 이는 미사용 평가 표본을 뜻하지 않는다. experiments의 final_evaluation_started.json 및 최종 보고서를 먼저 확인해야 한다.")
     lines.extend(["", "## 결정 및 중단 조건", "",
         "1. 전체 결측을 채우기 위한 파서 확장과 전체 재수집 반복을 중단한다. 일반 IPO의 검증된 표본만 별도 실험 대상으로 고정한다.",
         "2. 기존 100건·3개 연도·연도당 5건·평균 70% 기준은 프로젝트 내부 최소값이지 성능 보장 기준이 아니다. 표본 필터링 후 충족률은 전체 모집단 커버리지와 함께 보고한다.",
         "3. 미승인 피처를 제외한 축소안은 상장 전날 기준 내부 기준선 실험 후보로만 사용한다. pre/post-demand 실제 시점 서비스의 승인이 아니다. 제외 피처는 값 또는 검증 계약을 확보한 후 별도 비교 실험으로만 추가한다.",
-        "4. 2026년을 최종 평가로 잠그고 이전 자료 안에서만 튜닝한다. 기존 윈도우는 초기 학습이 20~30건까지 작아질 수 있으므로 실험에서는 학습 100건·검증 20건 이상인 구간만 쓰고 중첩 평가의 중복 예측을 합산하지 않는다. 보정/인코딩은 각 학습 구간에서만 맞춘다. 단순 기준선과 비교하고 모집단 대비 연도·주관사·규모 편향도 보고해야 한다.",
+        "4. 이미 사용한 2026년 최종 평가 구간을 새 미관측 평가로 재사용하지 않는다. 보정/인코딩은 각 학습 구간에서만 맞추며 새로운 성능 주장은 독립된 전향적 검증이 필요하다.",
         "5. 미래시점/원천 혼합/중복 이벤트처럼 기존 검증을 무효화하는 오류만 즉시 수집·파서 수정 대상으로 삼는다. 단순 결측률은 재수집 지시 사유가 아니다.",
         "6. 저장된 단계 시점 검사는 현재 상장일 이전 여부만 확인한다. 실제 수요예측 전/후 시점의 데이터 스냅샷 검증 없이 해당 단계 성능이나 출시를 주장하지 않는다.",
         "7. 이번 산출물은 별도 검토 폴더에 저장했고 기본 학습 진입점과 안전장치를 자동 해제하지 않았다. 성능 수치 없음, 배포 승인 없음.", ""])

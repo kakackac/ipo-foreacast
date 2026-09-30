@@ -20,7 +20,8 @@ def normalize(value):
 
 
 def parse_date(value):
-    match = re.fullmatch(r"\s*(\d{4})(?:년\s*|[.\-/])(\d{1,2})(?:월\s*|[.\-/])(\d{1,2})일?\s*", value)
+    value = re.sub(r"\([월화수목금토일]\)$", "", normalize(value))
+    match = re.fullmatch(r"(\d{4})(?:년|[.\-/])(\d{1,2})(?:월|[.\-/])(\d{1,2})일?", value)
     if not match:
         raise ValueError("Unknown date notation")
     return date(*map(int, match.groups())).isoformat()
@@ -28,7 +29,25 @@ def parse_date(value):
 
 def labeled_row(soup, labels):
     matches = []
+    scopes = {}
+    scope = None
+    correction_document = False
+    for element in soup.find_all(["p", "table"]):
+        if element.name == "p" and element.find_parent("table") is None:
+            marker = re.fullmatch(r"(?:\(주(\d+)\))?(?:정정(전|후)|\[정정(전|후)\])", normalize(element.get_text(" ", strip=True)))
+            if marker:
+                scope = {"note": marker.group(1), "side": marker.group(2) or marker.group(3),
+                         "heading": element.get_text(" ", strip=True)}
+                correction_document = True
+            elif re.match(r"^\(주\d+\)", normalize(element.get_text(" ", strip=True))) or re.search(r"\[정정[전후]\]$", normalize(element.get_text(" ", strip=True))):
+                # A new, unrecognized note must not inherit the preceding after-section.
+                scope = None
+        elif element.name == "table":
+            scopes[id(element)] = scope
     for table_index, table in enumerate(soup.find_all("table")):
+        section = scopes.get(id(table))
+        if correction_document and (not section or section["side"] != "후"):
+            continue
         rows = [r for r in table.find_all("tr") if r.find_parent("table") is table]
         for index, row in enumerate(rows):
             cells = row.find_all(["th", "td"], recursive=False)
@@ -41,7 +60,8 @@ def labeled_row(soup, labels):
             if len(values) != len(labels) or any(c.get("colspan", "1") != "1" or c.get("rowspan", "1") != "1" for c in [*cells, *values]):
                 raise ValueError("Ambiguous table spans")
             matches.append({"table_index": table_index, "row_index": index + 1,
-                            "headers": headers, "raw_values": [c.get_text(" ", strip=True) for c in values]})
+                            "headers": headers, "raw_values": [c.get_text(" ", strip=True) for c in values],
+                            "correction_section": section})
     if len(matches) != 1:
         raise ValueError("Table absent or ambiguous")
     return matches[0]
@@ -54,11 +74,15 @@ def parse_summary(content):
     dates = re.split(r"[~～]", schedule["raw_values"][0])
     if len(dates) != 2:
         raise ValueError("Subscription interval missing")
-    start, end = map(parse_date, dates)
+    start = parse_date(dates[0])
+    end_text = normalize(dates[1])
+    if re.fullmatch(r"\d{1,2}\.\d{1,2}(?:\([월화수목금토일]\))?", end_text):
+        end_text = start[:4] + "." + end_text
+    end = parse_date(end_text)
     if start > end:
         raise ValueError("Reversed subscription interval")
     method, security = offering["raw_values"][-1], offering["raw_values"][0]
-    if normalize(method) != "일반공모" or normalize(security) != "보통주":
+    if normalize(method) != "일반공모" or normalize(security) not in ("보통주", "기명식보통주"):
         raise ValueError("Not a public common-stock offering")
     return {"subscription_start": start, "subscription_end": end,
             "payment_date": parse_date(schedule["raw_values"][1]), "security_type": security,

@@ -99,7 +99,8 @@ def step_feature_selection(df, phase: str = "core", prediction_stage: str = "pos
 
 
 def assess_training_readiness(
-    df: pd.DataFrame, phase: str = "core", prediction_stage: str = "post_demand"
+    df: pd.DataFrame, phase: str = "core", prediction_stage: str = "post_demand",
+    feature_time_audit: pd.DataFrame | None = None,
 ) -> dict:
     """일반 IPO만 대상으로 학습 가능 여부와 미달 사유를 계산한다."""
     from features.model_profiles import (
@@ -130,6 +131,14 @@ def assess_training_readiness(
         "close_return_pct", pd.Series(dtype=float)
     ).notna()
     candidates = verified.loc[target_mask].copy()
+    from features.prediction_time_contract import validate_prediction_times
+    cutoff_valid = validate_prediction_times(candidates, profile, feature_time_audit)
+    report["actual_stage_cutoff_verified_rows"] = int(cutoff_valid.sum())
+    if candidates.empty or not cutoff_valid.all():
+        report["reasons"].append(
+            "실제 단계별 예측 시각·수요예측 결과 공개 시각·피처별 공개 시각의 대조가 미완료입니다. "
+            "상장일 이전 검증만으로 pre_demand/post_demand 학습을 승인하지 않습니다."
+        )
     report["general_ipo_dual_target_rows"] = int(len(candidates))
     if len(candidates) < MIN_GENERAL_IPO_TARGET_ROWS:
         report["reasons"].append(
@@ -177,8 +186,10 @@ def assess_training_readiness(
             feature: round(float(rate), 4) for feature, rate in completeness.items()
         }
         report["core_feature_completeness"] = round(float(completeness.mean()), 4)
-        report["source_time_validated_core_complete_rows"] = int(strict_complete.sum())
-        report["source_time_validated_core_complete_rate"] = round(float(strict_complete.mean()), 4)
+        report["raw_core_complete_rows"] = int(strict_complete.sum())
+        validated_complete = strict_complete & stage_source_valid(candidates, profile) & cutoff_valid
+        report["source_time_validated_core_complete_rows"] = int(validated_complete.sum())
+        report["source_time_validated_core_complete_rate"] = round(float(validated_complete.mean()), 4)
         if float(completeness.mean()) < MIN_CORE_FEATURE_COMPLETENESS:
             report["reasons"].append(
                 f"핵심 피처 평균 충족률이 {float(completeness.mean()):.1%}로 최소 {MIN_CORE_FEATURE_COMPLETENESS:.0%}에 미달합니다."
@@ -234,7 +245,11 @@ def require_training_ready(
     df: pd.DataFrame, phase: str = "core", prediction_stage: str = "post_demand"
 ) -> pd.DataFrame:
     """학습 안전장치를 적용하고, 통과한 일반 IPO 행만 반환한다."""
-    report = assess_training_readiness(df, phase=phase, prediction_stage=prediction_stage)
+    from config import PROC_DIR
+    time_path = PROC_DIR / "feature_time_validation.parquet"
+    time_audit = pd.read_parquet(time_path) if time_path.exists() else None
+    report = assess_training_readiness(df, phase=phase, prediction_stage=prediction_stage,
+                                      feature_time_audit=time_audit)
     if not report["eligible"]:
         details = " | ".join(report["reasons"])
         raise TrainingReadinessError(f"학습·성능평가 차단: {details}")

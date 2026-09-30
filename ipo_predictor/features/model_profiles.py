@@ -183,8 +183,6 @@ def _stage_time_valid(
     if required.empty:
         return pd.Series(False, index=features.index, dtype=bool)
     observed = required[~required.get("is_missing", pd.Series(True, index=required.index)).astype(bool)].copy()
-    if observed.empty:
-        return valid
     status = observed.get("time_validation_status", pd.Series("", index=observed.index)).astype(str)
     invalid_event_ids = set(
         observed.loc[status != "pre_listing_verified", "event_id"].dropna().astype(str)
