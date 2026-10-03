@@ -599,6 +599,7 @@ if __name__ == "__main__":
             "train", "backtest", "analyze", "demo", "collect", "collect-events",
             "audit-dart-failures", "prepare-underwriter-institutional-review-queue",
             "audit-underwriter-source-readiness", "build-research-dataset", "collect-and-build",
+            "plan-financials", "collect-financials",
         ],
         default="demo",
         help="실행 모드",
@@ -627,6 +628,8 @@ if __name__ == "__main__":
         help="예측 기준 공개 단계. 실제 학습은 해당 단계의 품질 기준을 통과한 경우에만 허용",
     )
     parser.add_argument("--start-year", type=int, default=2015, help="실제 수집 시작 연도")
+    parser.add_argument("--financial-limit", type=int, help="재무 수집 공식 API 검증용 연도 분산 표본 개수")
+    parser.add_argument("--financial-repair", type=str, help="연구 데이터 생성에 연결할 재무 복구 산출물 디렉터리")
     parser.add_argument(
         "--end-year",
         type=int,
@@ -654,14 +657,30 @@ if __name__ == "__main__":
             if args.mode == "collect-and-build":
                 from config import RAW_DIR, PROC_DIR
                 from data.pipelines.research_dataset import run
-                print(json.dumps(run(RAW_DIR, PROC_DIR), ensure_ascii=False))
+                print(json.dumps(run(RAW_DIR, PROC_DIR, financial_repair=args.financial_repair), ensure_ascii=False))
         except RuntimeError as exc:
             logger.error("실제 데이터 수집 중단: %s", exc)
             sys.exit(2)
     elif args.mode == "build-research-dataset":
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.research_dataset import run
-        print(json.dumps(run(RAW_DIR, PROC_DIR), ensure_ascii=False))
+        print(json.dumps(run(RAW_DIR, PROC_DIR, financial_repair=args.financial_repair), ensure_ascii=False))
+    elif args.mode in ("plan-financials", "collect-financials"):
+        from config import RAW_DIR, PROC_DIR
+        from data.collectors.dart_collector import DARTCollector
+        from data.pipelines.financial_history import run_repair
+        try:
+            result = run_repair(DARTCollector(), RAW_DIR, PROC_DIR, args.start_year,
+                                args.end_year, dry_run=args.mode == "plan-financials",
+                                event_limit=args.financial_limit)
+            if args.mode == "collect-financials":
+                from data.pipelines.research_dataset import run
+                result = {"financial_repair": result,
+                          "research_dataset": run(RAW_DIR, PROC_DIR, financial_repair=result["path"])}
+            print(json.dumps(result, ensure_ascii=False))
+        except RuntimeError as exc:
+            logger.error("재무 수집 중단: %s", exc)
+            sys.exit(2)
     elif args.mode == "collect-events":
         try:
             run_collect_events(args.start_year, args.end_year, force_refresh=args.refresh_events)

@@ -24,6 +24,7 @@ from data.collectors.underwriter_registry import (
 )
 from data.processors.feature_engineer import FeatureEngineer
 from data.pipelines.float_source_resolver import resolve_public_float
+from data.pipelines.financial_history import get_annual_history, summarize_asof
 from features.model_profiles import MODEL_PROFILES, build_stage_dataset, stage_readiness_by_offering_type
 from features.source_contracts import (
     DART_STRUCTURAL_AGGREGATE_STATUS,
@@ -1633,11 +1634,9 @@ class HistoricalIPOPipeline:
             )
             if not collected_financials.empty:
                 financial_rows.append(collected_financials)
-            # fnlttSinglAcntAll은 사업연도 기준 값만 주고 해당 값이 상장 전에
-            # 공개됐는지 판별할 접수일을 주지 않는다. 공개시각 계보를 수집하기
-            # 전에는 재무 수치를 모델 피처로 넣지 않아 미래 정보 누출을 막는다.
-            financial_model_values: dict[str, Any] = {}
-            financial_time_validation_status = "publication_time_unverified_excluded"
+            financial_model_values = financial_summary
+            financial_time_validation_status = financial_summary.get(
+                "financial_time_validation_status", "receipt_metadata_missing")
             records.append({
                 "event_id": event_id,
                 "ticker": getattr(listing, "ticker", None),
@@ -2120,32 +2119,12 @@ class HistoricalIPOPipeline:
         return dart_ipo.reindex(columns=columns).copy()
 
     def _collect_financials(self, corp_code: str, listing_date: pd.Timestamp) -> tuple[dict[str, Any], pd.DataFrame]:
-        frames = []
-        # 상장 직전 시점에 공개돼 있던 최근 3개 사업연도만 사용한다.
-        for year in range(listing_date.year - 1, listing_date.year - 4, -1):
-            frame = self.dart.get_financial_statements(corp_code, year)
-            if not frame.empty:
-                frame = frame.copy()
-                frame["corp_code"] = corp_code
-                frame["listing_date"] = listing_date
-                frames.append(frame)
-        if not frames:
-            return {}, pd.DataFrame()
-
-        financials = pd.concat(frames, ignore_index=True)
-        latest_year = int(financials["year"].max())
-        latest = financials[financials["year"] == latest_year].drop_duplicates("account_name_en", keep="first")
-        summary = latest.set_index("account_name_en")["amount"].to_dict()
-        summary["financial_as_of_year"] = latest_year
-
-        revenue_history = financials[financials["account_name_en"] == "revenue"].sort_values("year")
-        if len(revenue_history) >= 2:
-            old = revenue_history.iloc[0]
-            recent = revenue_history.iloc[-1]
-            years = int(recent.year - old.year)
-            if years > 0 and old.amount > 0 and recent.amount > 0:
-                summary["revenue_growth_3y"] = (recent.amount / old.amount) ** (1 / years) - 1
-            summary["revenue_3y_ago"] = old.amount
+        financials = get_annual_history(
+            self.dart, corp_code, listing_date, self.raw_dir / "dart_financial_sources")
+        cutoff = listing_date.normalize() - pd.Timedelta(hours=3)
+        summary = summarize_asof(financials, corp_code, cutoff)
+        if not financials.empty:
+            financials["listing_date"] = listing_date
         return summary, financials
 
     @staticmethod

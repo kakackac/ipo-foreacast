@@ -16,6 +16,7 @@ data/processors/feature_engineer.py
 """
 
 import logging
+import json
 import re
 from typing import Optional
 
@@ -32,6 +33,7 @@ from features.source_contracts import (
     DART_OFFERING_STRUCTURE_STATUS,
     DART_PUBLIC_FLOAT_STATUS,
     KRX_UNDERWRITER_TIER_STATUS,
+    DART_ANNUAL_FINANCIAL_STATUS,
 )
 from config import FEATURE_CFG, PROC_DIR, RAW_DIR
 
@@ -683,7 +685,7 @@ class FeatureEngineer:
                 df["revenue_growth_3y"] = np.nan
         df["revenue_growth_3y"] = pd.to_numeric(
             df["revenue_growth_3y"], errors="coerce"
-        ).clip(-0.5, 5.0)
+        )
 
         if "operating_margin" not in df.columns:
             if "operating_income" in df.columns and "revenue" in df.columns:
@@ -694,7 +696,7 @@ class FeatureEngineer:
                 df["operating_margin"] = np.nan
         df["operating_margin"] = pd.to_numeric(
             df["operating_margin"], errors="coerce"
-        ).clip(-1.0, 1.0)
+        )
 
         if "debt_ratio" not in df.columns:
             if "total_liabilities" in df.columns and "equity" in df.columns:
@@ -703,7 +705,7 @@ class FeatureEngineer:
                 df["debt_ratio"] = np.where(equity > 0, liabilities / equity, np.nan)
             else:
                 df["debt_ratio"] = np.nan
-        df["debt_ratio"] = pd.to_numeric(df["debt_ratio"], errors="coerce").clip(0, 10)
+        df["debt_ratio"] = pd.to_numeric(df["debt_ratio"], errors="coerce")
         return df
 
     # ── 타깃 계산 ─────────────────────────────────────────────
@@ -839,6 +841,10 @@ class FeatureEngineer:
         records: list[dict[str, object]] = []
         for row in features.itertuples(index=False):
             values = row._asdict()
+            try:
+                financial_evidence = json.loads(values.get("financial_feature_provenance") or "{}")
+            except (TypeError, ValueError):
+                financial_evidence = {}
 
             def first_present(*names: str):
                 for name in names:
@@ -855,7 +861,9 @@ class FeatureEngineer:
                 feature = FEATURE_MAP[feature_name]
                 source = source_by_group[feature.group]
                 if feature.group == FeatureGroup.FINANCIAL and missing:
-                    missing_reason = "financial_publication_time_unverified"
+                    missing_reason = values.get("financial_time_validation_status")
+                    if not isinstance(missing_reason, str) or missing_reason == DART_ANNUAL_FINANCIAL_STATUS:
+                        missing_reason = "financial_account_or_period_unavailable"
                 elif missing:
                     missing_reason = "official_source_field_unavailable_or_unverified"
                     status_key = {
@@ -871,6 +879,12 @@ class FeatureEngineer:
                     missing_reason = None
                 source_ref = values.get("rcept_no")
                 available_at = values.get("feature_available_at")
+                financial_record = financial_evidence.get(feature_name, {})
+                if feature.group == FeatureGroup.FINANCIAL:
+                    source_ref = financial_record.get("source_reference")
+                    available_at = pd.to_datetime(financial_record.get("available_at"), errors="coerce")
+                    if pd.notna(available_at) and available_at.tzinfo is not None:
+                        available_at = available_at.tz_convert("Asia/Seoul").tz_localize(None)
                 if feature_name == "offering_type_spac_ipo":
                     source = "DART_disclosure"
                 elif feature_name == "offering_type_foreign_common_stock":
@@ -933,7 +947,9 @@ class FeatureEngineer:
                 # 확정 공모가가 검증됐다고 다른 DART 추출값까지 승인하면
                 # 관측 원장이 실제보다 좋게 보이는 오류가 생긴다.
                 validation = None
-                if feature_name == "institutional_demand_ratio":
+                if feature.group == FeatureGroup.FINANCIAL and not missing:
+                    validation = financial_record.get("validation_status")
+                elif feature_name == "institutional_demand_ratio":
                     validation = values.get("institutional_validation_status")
                 elif feature_name.startswith("lockup_"):
                     validation = values.get("lockup_validation_status")
@@ -967,6 +983,7 @@ class FeatureEngineer:
                     "verified_pre_listing_dart_name_derivation_v1",
                     DART_PUBLIC_FLOAT_STATUS,
                     DART_OFFERING_STRUCTURE_STATUS,
+                    DART_ANNUAL_FINANCIAL_STATUS,
                     *APPROVED_INSTITUTIONAL_DEMAND_STATUSES,
                     *APPROVED_LOCKUP_STATUSES,
                 }

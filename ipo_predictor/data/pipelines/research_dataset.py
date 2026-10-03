@@ -7,15 +7,18 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from urllib.parse import urlsplit, parse_qs
 
 import pandas as pd
 
 from features.model_profiles import VERIFIED_OFFERING_PRICE_STATUSES
-from features.source_contracts import APPROVED_INSTITUTIONAL_DEMAND_STATUSES, APPROVED_LOCKUP_STATUSES
+from features.source_contracts import (APPROVED_INSTITUTIONAL_DEMAND_STATUSES, APPROVED_LOCKUP_STATUSES,
+                                      DART_ANNUAL_FINANCIAL_STATUS, DART_STRUCTURAL_AGGREGATE_STATUS)
 
-POLICY = 'listing_eve_2100_core_v1'
+POLICY = 'listing_eve_2100_core_v2'
 FEATURES = ['institutional_demand_ratio', 'lockup_commitment_ratio',
-            'kospi_momentum_5d', 'kospi_momentum_20d', 'recent_ipo_avg_return_all']
+            'kospi_momentum_5d', 'kospi_momentum_20d', 'recent_ipo_avg_return_all',
+            'revenue_growth_3y', 'operating_margin', 'debt_ratio']
 
 
 def number(value):
@@ -89,15 +92,33 @@ def build_frames(features, observations, index, lineage):
             reason = 'offering_price_not_available_at_cutoff'
         values = {}
         row_evidence = []
-        for feature, approved in [('institutional_demand_ratio', APPROVED_INSTITUTIONAL_DEMAND_STATUSES),
-                                  ('lockup_commitment_ratio', APPROVED_LOCKUP_STATUSES)]:
+        contracts = [('institutional_demand_ratio', APPROVED_INSTITUTIONAL_DEMAND_STATUSES),
+                     ('lockup_commitment_ratio', APPROVED_LOCKUP_STATUSES)]
+        contracts.extend((name, {DART_ANNUAL_FINANCIAL_STATUS}) for name in
+                         ('revenue_growth_3y', 'operating_margin', 'debt_ratio'))
+        for feature, approved in contracts:
             obs = observed.get((event, feature), {})
             value = number(obs.get('raw_value'))
-            published = available_day(obs.get('available_at'))
-            accepted = (value is not None and value >= 0 and (feature != 'lockup_commitment_ratio' or value <= 1)
+            financial = feature in ('revenue_growth_3y', 'operating_margin', 'debt_ratio')
+            published = local_time(obs.get('available_at')) if financial else available_day(obs.get('available_at'))
+            receipt_bound = True
+            if obs.get('validation_status') == DART_STRUCTURAL_AGGREGATE_STATUS:
+                ref = str(obs.get('source_reference', ''))
+                parsed = urlsplit(ref)
+                receipt = ref if re.fullmatch(r'\d{14}', ref) else (
+                    parse_qs(parsed.query).get('rcpNo', [''])[0]
+                    if parsed.hostname == 'dart.fss.or.kr' and parsed.scheme == 'https' else '')
+                actual_date = filing_dates.get((event, receipt))
+                receipt_bound = (actual_date is not None
+                                 and available_day(actual_date) == published)
+            range_valid = value is not None and (financial or value >= 0)
+            if feature == 'debt_ratio':
+                range_valid = value is not None and value >= 0
+            accepted = (range_valid and (feature != 'lockup_commitment_ratio' or value <= 1)
                         and obs.get('human_review_required') == False and obs.get('is_missing') == False
                         and obs.get('validation_status') in approved
                         and isinstance(obs.get('source_reference'), str) and bool(obs['source_reference'].strip())
+                        and receipt_bound
                         and pd.notna(published) and pd.notna(cutoff) and published < cutoff
                         and number(row.get(feature)) is not None
                         and math.isclose(value, number(row.get(feature)), rel_tol=1e-9, abs_tol=1e-9))
@@ -140,17 +161,28 @@ def build_frames(features, observations, index, lineage):
     return dataset, pd.DataFrame(excluded, columns=['event_id', 'reason']), pd.DataFrame(evidence)
 
 
-def run(raw_dir, processed_dir):
+def run(raw_dir, processed_dir, financial_repair=None):
     raw, processed = Path(raw_dir), Path(processed_dir)
     sources = {'features': processed / 'features_all.parquet', 'observations': processed / 'feature_observations.parquet',
                'index': raw / 'kospi_index.parquet', 'lineage': raw / 'dart_disclosure_lineage.parquet'}
+    if financial_repair is not None:
+        repair = Path(financial_repair)
+        manifest = json.loads((repair / 'manifest.json').read_text())
+        if manifest['input_sha256'] != hashlib.sha256(sources['features'].read_bytes()).hexdigest():
+            raise RuntimeError('financial_repair_base_input_mismatch')
+        for name, digest in manifest['output_sha256'].items():
+            if hashlib.sha256((repair / name).read_bytes()).hexdigest() != digest:
+                raise RuntimeError('financial_repair_output_hash_mismatch')
+        sources['features'] = repair / 'features_all.parquet'
+        sources['observations'] = repair / 'feature_observations.parquet'
     hashes = {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in sources.items()}
     frames = {key: pd.read_parquet(path) for key, path in sources.items()}
     dataset, excluded, evidence = build_frames(**frames)
     if any(hashlib.sha256(path.read_bytes()).hexdigest() != hashes[key] for key, path in sources.items()):
         raise RuntimeError('inputs_changed_during_build')
     fingerprint = hashlib.sha256(json.dumps({'sources': hashes, 'policy': POLICY,
-        'accepted_statuses': sorted(VERIFIED_OFFERING_PRICE_STATUSES | APPROVED_INSTITUTIONAL_DEMAND_STATUSES | APPROVED_LOCKUP_STATUSES),
+        'accepted_statuses': sorted(VERIFIED_OFFERING_PRICE_STATUSES | APPROVED_INSTITUTIONAL_DEMAND_STATUSES
+                                   | APPROVED_LOCKUP_STATUSES | {DART_ANNUAL_FINANCIAL_STATUS}),
         'builder_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}, sort_keys=True).encode()).hexdigest()[:20]
     root = processed / 'research_datasets' / fingerprint
     if root.exists():

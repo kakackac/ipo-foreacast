@@ -48,6 +48,24 @@ class ResearchDatasetTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.build()
 
+    def test_institutional_receipt_must_belong_to_same_event_and_public_day(self):
+        self.observations.loc[0, 'source_reference'] = '20200110000002'
+        self.assertEqual(len(self.build()[0]), 0)
+        self.observations.loc[0, 'source_reference'] = '20200110000001'
+        self.observations.loc[0, 'available_at'] = '2020-01-11'
+        self.assertEqual(len(self.build()[0]), 0)
+
+    def test_optional_financial_loss_is_retained_and_future_value_is_missing(self):
+        self.features['operating_margin'] = -0.4
+        observation = {'event_id': 'e', 'feature_name': 'operating_margin', 'raw_value': -0.4,
+                       'is_missing': False, 'human_review_required': False,
+                       'validation_status': 'verified_dart_annual_financial_asof_v1',
+                       'source_reference': '20190315000001', 'available_at': '2019-03-16T00:00:00+09:00'}
+        self.observations = pd.concat([self.observations, pd.DataFrame([observation])], ignore_index=True)
+        self.assertEqual(self.build()[0].operating_margin.iloc[0], -0.4)
+        self.observations.loc[1, 'available_at'] = '2020-02-10'
+        self.assertTrue(pd.isna(self.build()[0].operating_margin.iloc[0]))
+
     def test_files_reused_and_modification_detected(self):
         with tempfile.TemporaryDirectory() as folder:
             raw, processed = Path(folder) / 'raw', Path(folder) / 'processed'

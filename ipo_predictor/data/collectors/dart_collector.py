@@ -165,7 +165,7 @@ class DARTCollector:
     def _get(self, endpoint: str, params: dict) -> dict:
         """재시도 포함 GET 요청"""
         url = f"{DART_BASE_URL}/{endpoint}.json"
-        params["crtfc_key"] = self.api_key
+        params = {**params, "crtfc_key": self.api_key}
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
@@ -174,16 +174,17 @@ class DARTCollector:
                 data = resp.json()
                 if data.get("status") == "000":
                     return data
-                # 013/020 = 조회된 데이터 없음 (정상 결측)
-                if data.get("status") in {"013", "020"}:
+                if data.get("status") == "013":
                     return {"status": data.get("status"), "list": []}
-                logger.warning("DART API status=%s msg=%s", data.get("status"), data.get("message"))
-                return data
-            except requests.RequestException as e:
-                logger.warning("DART API attempt %d failed: %s", attempt, e)
+                # Request URLs and exception text can contain the authentication key.
+                status = str(data.get("status", "unknown"))
+                safe_status = status if re.fullmatch(r"\d{3}", status) else "unknown"
+                raise RuntimeError(f"DART API failed: {endpoint}, status={safe_status}")
+            except (requests.RequestException, ValueError) as e:
+                logger.warning("DART API attempt %d failed: %s (%s)", attempt, endpoint, type(e).__name__)
                 if attempt < MAX_RETRIES:
                     time.sleep(attempt * 2)
-        return {}
+        raise RuntimeError(f"DART API request failed: {endpoint}, attempts={MAX_RETRIES}") from None
 
     def get_document_text(self, rcept_no: str, *, refresh: bool = False) -> str:
         """DART 원문 ZIP을 내려받아 분석 가능한 평문으로 변환한다.
@@ -574,6 +575,7 @@ class DARTCollector:
           11013 = 1분기보고서
           11014 = 3분기보고서
         """
+        fs_div = "CFS"
         data = self._get("fnlttSinglAcntAll", {
             "corp_code":   corp_code,
             "bsns_year":   str(year),
@@ -584,6 +586,7 @@ class DARTCollector:
         items = data.get("list", [])
         if not items:
             # 연결 없으면 별도 재무제표 시도
+            fs_div = "OFS"
             data = self._get("fnlttSinglAcntAll", {
                 "corp_code":  corp_code,
                 "bsns_year":  str(year),
@@ -595,10 +598,11 @@ class DARTCollector:
         if not items:
             return pd.DataFrame()
 
-        df = pd.DataFrame(items)
-        df["year"] = year
+        return self.normalize_financial_statements(items, corp_code, year, report_code, fs_div)
 
-        # 필요한 계정과목만 추출
+    @staticmethod
+    def normalize_financial_statements(items, corp_code, year, report_code, fs_div):
+        """Retain filing identity, statement basis, currency and amount evidence."""
         target_accounts = {
             "ifrs-full_Revenue":                    "revenue",
             "ifrs-full_OperatingIncomeLoss":        "operating_income",
@@ -607,14 +611,31 @@ class DARTCollector:
             "ifrs-full_Liabilities":                "total_liabilities",
             "ifrs-full_Equity":                     "equity",
             "ifrs-full_BasicEarningsLossPerShare":  "eps",
+            "dart_OperatingIncomeLoss":            "operating_income",
         }
-
-        filtered = df[df["account_id"].isin(target_accounts.keys())].copy()
-        filtered["account_name_en"] = filtered["account_id"].map(target_accounts)
-        filtered["amount"] = pd.to_numeric(
-            filtered["thstrm_amount"].astype(str).str.replace(",", ""), errors="coerce"
-        )
-        return filtered[["year", "account_name_en", "amount"]].dropna()
+        records = []
+        for item in items:
+            account = target_accounts.get(item.get("account_id"))
+            section = item.get("sj_div")
+            if account is None or section not in ({"BS"} if account in {
+                "total_assets", "total_liabilities", "equity"} else {"IS", "CIS"}):
+                continue
+            raw = str(item.get("thstrm_amount", "")).strip()
+            amount = pd.to_numeric(raw.replace(",", ""), errors="coerce")
+            records.append({
+                "year": year, "account_name_en": account, "amount": amount,
+                "corp_code": str(item.get("corp_code", "")),
+                "rcept_no": str(item.get("rcept_no", "")),
+                "report_code": str(item.get("reprt_code", "")),
+                "response_year": str(item.get("bsns_year", "")),
+                "requested_corp_code": str(corp_code), "requested_report_code": report_code,
+                "fs_div": fs_div, "sj_div": section, "account_id": item.get("account_id"),
+                "currency": str(item.get("currency", "")).strip().upper(),
+                "raw_amount": raw, "period_name": item.get("thstrm_nm"),
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+                "source_url": "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json",
+            })
+        return pd.DataFrame(records)
 
     def get_equity_offering_prices(
         self,

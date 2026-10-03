@@ -5,6 +5,7 @@ OFFICIAL_UNDERWRITER_AGGREGATE_STATUS = "verified_official_underwriter_aggregate
 KRX_UNDERWRITER_TIER_STATUS = "verified_krx_underwriter_registry_mapping_v1"
 DART_PUBLIC_FLOAT_STATUS = "verified_dart_public_float_direct_v1"
 DART_OFFERING_STRUCTURE_STATUS = "verified_dart_offering_structure_v1"
+DART_ANNUAL_FINANCIAL_STATUS = "verified_dart_annual_financial_asof_v1"
 
 APPROVED_INSTITUTIONAL_DEMAND_STATUSES = frozenset({
     DART_STRUCTURAL_AGGREGATE_STATUS,
