@@ -598,7 +598,7 @@ if __name__ == "__main__":
         choices=[
             "train", "backtest", "analyze", "demo", "collect", "collect-events",
             "audit-dart-failures", "prepare-underwriter-institutional-review-queue",
-            "audit-underwriter-source-readiness",
+            "audit-underwriter-source-readiness", "build-research-dataset", "collect-and-build",
         ],
         default="demo",
         help="실행 모드",
@@ -643,7 +643,7 @@ if __name__ == "__main__":
         run_analyze()
     elif args.mode == "backtest":
         run_backtest(phase=args.phase, prediction_stage=args.prediction_stage)
-    elif args.mode == "collect":
+    elif args.mode in ("collect", "collect-and-build"):
         try:
             run_collect(
                 args.start_year,
@@ -651,9 +651,17 @@ if __name__ == "__main__":
                 phase=args.phase,
                 audit_dart_demand=args.audit_dart_demand,
             )
+            if args.mode == "collect-and-build":
+                from config import RAW_DIR, PROC_DIR
+                from data.pipelines.research_dataset import run
+                print(json.dumps(run(RAW_DIR, PROC_DIR), ensure_ascii=False))
         except RuntimeError as exc:
             logger.error("실제 데이터 수집 중단: %s", exc)
             sys.exit(2)
+    elif args.mode == "build-research-dataset":
+        from config import RAW_DIR, PROC_DIR
+        from data.pipelines.research_dataset import run
+        print(json.dumps(run(RAW_DIR, PROC_DIR), ensure_ascii=False))
     elif args.mode == "collect-events":
         try:
             run_collect_events(args.start_year, args.end_year, force_refresh=args.refresh_events)
