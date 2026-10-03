@@ -179,7 +179,17 @@ class DARTCollector:
                 # Request URLs and exception text can contain the authentication key.
                 status = str(data.get("status", "unknown"))
                 safe_status = status if re.fullmatch(r"\d{3}", status) else "unknown"
-                raise RuntimeError(f"DART API failed: {endpoint}, status={safe_status}")
+                context = ""
+                if endpoint == "fnlttSinglAcntAll":
+                    # Only public request fields with known formats may enter logs.
+                    formats = {"corp_code": r"\d{8}", "bsns_year": r"\d{4}",
+                               "reprt_code": r"1101[1-4]", "fs_div": r"CFS|OFS"}
+                    fields = [f"{name}={value if re.fullmatch(pattern, value) else 'invalid'}"
+                              for name, pattern in formats.items()
+                              for value in [str(params.get(name, ""))]]
+                    fields.append(f"authentication_key_length={len(str(self.api_key or ''))}")
+                    context = ", " + ", ".join(fields)
+                raise RuntimeError(f"DART API failed: {endpoint}, status={safe_status}{context}")
             except (requests.RequestException, ValueError) as e:
                 logger.warning("DART API attempt %d failed: %s (%s)", attempt, endpoint, type(e).__name__)
                 if attempt < MAX_RETRIES:
@@ -575,6 +585,16 @@ class DARTCollector:
           11013 = 1분기보고서
           11014 = 3분기보고서
         """
+        corp_code = str(corp_code).strip()
+        report_code = str(report_code).strip()
+        year_text = str(year).strip()
+        if not re.fullmatch(r"\d{8}", corp_code):
+            raise ValueError("financial corp_code must contain 8 digits")
+        if not re.fullmatch(r"\d{4}", year_text) or int(year_text) < 2015:
+            raise ValueError("financial business year must be 2015 or later (4 digits)")
+        if report_code not in {"11011", "11012", "11013", "11014"}:
+            raise ValueError("invalid financial report code")
+        year = int(year_text)
         fs_div = "CFS"
         data = self._get("fnlttSinglAcntAll", {
             "corp_code":   corp_code,

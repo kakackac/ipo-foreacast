@@ -25,7 +25,7 @@ def atomic_json(path, payload):
     os.replace(temporary, path)
 
 
-def get_annual_history(dart, corp_code, listing_date, cache_dir):
+def get_annual_history(dart, corp_code, listing_date, cache_dir, cached_only=False):
     """Cache only completed requests; old amount-only caches cannot supply evidence."""
     corp_code = str(corp_code)
     if not re.fullmatch(r"\d{8}", corp_code):
@@ -50,6 +50,8 @@ def get_annual_history(dart, corp_code, listing_date, cache_dir):
                 pass
         if cached is not None:
             frames.append(cached)
+            continue
+        if cached_only:
             continue
         frame = dart.get_financial_statements(corp_code, year).copy()
         if not frame.empty:
@@ -100,7 +102,10 @@ def summarize_asof(financials, corp_code, cutoff):
     """Select published annual values without combining currencies or statement bases."""
     metadata = {"year", "account_name_en", "amount", "corp_code", "rcept_no", "report_code",
                 "response_year", "fs_div", "currency", "published_at", "publication_verified"}
-    if financials.empty or not metadata.issubset(financials):
+    if financials.empty:
+        return {"financial_time_validation_status": "annual_structured_values_unavailable",
+                "financial_feature_provenance": "{}"}
+    if not metadata.issubset(financials):
         return {"financial_time_validation_status": "receipt_metadata_missing",
                 "financial_feature_provenance": "{}"}
     cutoff = pd.Timestamp(cutoff)
@@ -111,19 +116,30 @@ def summarize_asof(financials, corp_code, cutoff):
     frame["available_at"] = dates.dt.tz_convert("Asia/Seoul").dt.normalize() + pd.Timedelta(days=1)
     frame["amount"] = pd.to_numeric(frame.amount, errors="coerce")
     frame = frame[frame.publication_verified.eq(True) & frame.corp_code.astype(str).eq(str(corp_code))
-                  & frame.currency.eq("KRW") & frame.report_code.eq("11011")
+                  & frame.currency.eq("KRW") & frame.report_code.isin(["11011", "IPO_FINANCIAL_DISCLOSURE"])
                   & frame.fs_div.isin(["CFS", "OFS"]) & (frame.available_at < cutoff)
                   & frame.amount.map(lambda v: pd.notna(v) and math.isfinite(v))]
     yearly = {}
     for year, group in frame.groupby("year"):
-        if (group.rcept_no.nunique() != 1 or group.fs_div.nunique() != 1
-                or not group.response_year.eq(str(int(year))).all()):
+        if not group.response_year.eq(str(int(year))).all():
             continue
+        candidates = []
+        for (receipt, basis), source in group.groupby(["rcept_no", "fs_div"]):
+            names = set(source.account_name_en)
+            complete = {"revenue", "operating_income", "total_liabilities", "equity"}.issubset(names)
+            candidates.append((complete, source.available_at.max(), basis == "CFS", receipt, source))
+        group = sorted(candidates, key=lambda x: x[:4])[-1][4]
         accounts = {}
         for name, entries in group.groupby("account_name_en"):
             if entries.amount.nunique() == 1:
                 accounts[name] = entries.iloc[0]
         if accounts:
+            assets, liabilities, equity = (accounts.get(x) for x in ("total_assets", "total_liabilities", "equity"))
+            if assets is not None and liabilities is not None and equity is not None:
+                scale = max(float(x.get("unit_multiplier", 1)) for x in (assets, liabilities, equity))
+                if abs(assets.amount - liabilities.amount - equity.amount) > max(2*scale, abs(assets.amount)*1e-6):
+                    for name in ("total_assets", "total_liabilities", "equity"):
+                        accounts.pop(name, None)
             yearly[int(year)] = accounts
     if not yearly:
         return {"financial_time_validation_status": "no_verified_pre_cutoff_krw_annual_values",
@@ -139,6 +155,8 @@ def summarize_asof(financials, corp_code, cutoff):
             "available_at": max(x.available_at for x in entries).isoformat(),
             "validation_status": FINANCIAL_STATUS,
             "fs_div": entries[0].fs_div, "currency": "KRW",
+            "source_urls": sorted({str(x.get("source_url")) for x in entries if pd.notna(x.get("source_url"))}),
+            "source_sha256": sorted({str(x.get("source_sha256")) for x in entries if pd.notna(x.get("source_sha256"))}),
         }
 
     for name, row in latest.items():
@@ -162,7 +180,8 @@ def summarize_asof(financials, corp_code, cutoff):
     return result
 
 
-def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry_run=False, event_limit=None):
+def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry_run=False, event_limit=None,
+               documents_only=False):
     """Repair financial features without recollecting IPO documents or KRX prices."""
     from data.processors.feature_engineer import FeatureEngineer
     raw_dir, processed_dir = Path(raw_dir), Path(processed_dir)
@@ -191,7 +210,8 @@ def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry
                                max(2014, pd.Timestamp(r.listing_date).year - 5), -1)}
     plan = {"events": len(targets), "unique_annual_requests": len(requests),
             "request_count_is_not_total_http_calls": True,
-            "needs_api": "DART", "krx_recollection_required": False,
+            "needs_api": None if documents_only else "DART", "public_dart_documents": True,
+            "krx_recollection_required": False,
             "legacy_amount_only_cache_rows": len(pd.read_parquet(raw_dir / "dart_financials.parquet")),
             "training_executed": False}
     if dry_run:
@@ -200,20 +220,36 @@ def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry
                                   "requests": [{"corp_code": c, "business_year": y} for c, y in sorted(requests)],
                                   "event_ids": targets.event_id.astype(str).tolist()})
         return {**plan, "path": str(destination)}
-    if not dart.is_configured:
+    if not dart.is_configured and not documents_only:
         raise RuntimeError("DART_API_KEY is required for financial receipt recovery")
-    summaries, all_rows = {}, []
+    summaries, all_rows, resolutions = {}, [], []
     for row in targets.itertuples(index=False):
         if not re.fullmatch(r"\d{8}", str(row.corp_code)):
             summaries[row.event_id] = {"financial_time_validation_status": "dart_corp_code_missing",
                                        "financial_feature_provenance": "{}"}
             continue
-        history = get_annual_history(dart, row.corp_code, row.listing_date, raw_dir / "dart_financial_sources")
+        history = get_annual_history(dart, row.corp_code, row.listing_date, raw_dir / "dart_financial_sources",
+                                     cached_only=documents_only)
+        cutoff = pd.Timestamp(row.listing_date).normalize() - pd.Timedelta(hours=3)
+        summary = summarize_asof(history, row.corp_code, cutoff)
+        structured_status = summary["financial_time_validation_status"]
+        document_status = "not_required"
+        if not {"operating_margin", "debt_ratio"}.issubset(summary):
+            from data.pipelines.disclosure_financials import collect_disclosure_financials
+            extra, document_status = collect_disclosure_financials(
+                dart, raw_dir, row.event_id, row.corp_code, row.corp_name, cutoff)
+            if not extra.empty:
+                history = pd.concat([history, extra], ignore_index=True) if not history.empty else extra
+                summary = summarize_asof(history, row.corp_code, cutoff)
+            elif summary["financial_time_validation_status"] != FINANCIAL_STATUS:
+                summary["financial_time_validation_status"] = document_status
+        resolutions.append({"event_id": row.event_id, "structured_status": structured_status,
+                            "disclosure_status": document_status,
+                            "result_status": summary["financial_time_validation_status"]})
         if not history.empty:
             history["event_id"] = row.event_id
             all_rows.append(history)
-        cutoff = pd.Timestamp(row.listing_date).normalize() - pd.Timedelta(hours=3)
-        summaries[row.event_id] = summarize_asof(history, row.corp_code, cutoff)
+        summaries[row.event_id] = summary
     repaired = features.copy()
     owned_values = ["revenue", "operating_income", "net_income", "total_assets", "total_liabilities",
                     "equity", "eps", "revenue_growth_3y", "operating_margin", "debt_ratio",
@@ -235,7 +271,8 @@ def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry
     if hashlib.sha256(features_path.read_bytes()).hexdigest() != original_hash:
         raise RuntimeError("financial_repair_inputs_changed")
     fingerprint = hashlib.sha256((original_hash + pd.DataFrame(summaries).to_json()
-                                  + Path(__file__).read_text()).encode()).hexdigest()[:20]
+                                  + Path(__file__).read_text()
+                                  + (Path(__file__).with_name("disclosure_financials.py")).read_text()).encode()).hexdigest()[:20]
     root = processed_dir / "financial_repairs" / fingerprint
     if root.exists():
         manifest = json.loads((root / "manifest.json").read_text())
@@ -246,6 +283,7 @@ def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry
     root.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".financial.", dir=root.parent))
     outputs = {"features_all.parquet": repaired, "feature_observations.parquet": observations,
+               "source_resolutions.parquet": pd.DataFrame(resolutions),
                "financial_sources.parquet": pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()}
     for name, frame in outputs.items():
         frame.to_parquet(staging / name, index=False)
@@ -253,6 +291,7 @@ def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry
               "status_counts": pd.Series([s["financial_time_validation_status"] for s in summaries.values()]).value_counts().to_dict(),
               "output_sha256": {name: hashlib.sha256((staging / name).read_bytes()).hexdigest() for name in outputs},
               "production_files_replaced": False, "asof_policy": "listing_eve_2100_core_v1",
+              "disclosure_resolution_counts": pd.Series([r["disclosure_status"] for r in resolutions]).value_counts().to_dict(),
               "financial_missing_counts": repaired.loc[selected, owned_values].isna().sum().to_dict()}
     atomic_json(staging / "manifest.json", report)
     staging.rename(root)

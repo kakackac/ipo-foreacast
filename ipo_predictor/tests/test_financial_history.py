@@ -100,6 +100,33 @@ class FinancialHistoryTests(unittest.TestCase):
         frame = collector.get_financial_statements("12345678", 2022)
         self.assertTrue(frame.fs_div.eq("OFS").all())
 
+    def test_invalid_financial_fields_fail_before_http_request(self):
+        collector = DARTCollector(api_key="test", document_cache_dir=None)
+        collector.session.get = Mock()
+        for company, year, report in [("1234567", 2022, "11011"),
+                                       ("12345678", 2014, "11011"),
+                                       ("12345678", "2022.0", "11011"),
+                                       ("12345678", 2022, "invalid")]:
+            with self.assertRaises(ValueError):
+                collector.get_financial_statements(company, year, report)
+        collector.session.get.assert_not_called()
+
+    def test_status_100_identifies_request_without_exposing_credentials(self):
+        secret = "s" * 40
+        collector = DARTCollector(api_key=secret, document_cache_dir=None)
+        collector.session.get = Mock(return_value=Mock(json=Mock(return_value={
+            "status": "100", "message": secret})))
+        with self.assertRaises(RuntimeError) as caught:
+            collector.get_financial_statements("12345678", 2017)
+        message = str(caught.exception)
+        self.assertIn("status=100", message)
+        self.assertIn("corp_code=12345678", message)
+        self.assertIn("bsns_year=2017", message)
+        self.assertIn("fs_div=CFS", message)
+        self.assertIn("authentication_key_length=40", message)
+        self.assertNotIn(secret, message)
+        self.assertEqual(collector.session.get.call_count, 1)
+
     def test_rate_limit_is_failure_and_network_logs_do_not_expose_request_url(self):
         collector = DARTCollector(api_key="do-not-log-this", document_cache_dir=None)
         collector.session.get = Mock(return_value=Mock(json=Mock(return_value={"status": "020"})))

@@ -629,6 +629,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--start-year", type=int, default=2015, help="실제 수집 시작 연도")
     parser.add_argument("--financial-limit", type=int, help="재무 수집 공식 API 검증용 연도 분산 표본 개수")
+    parser.add_argument("--financial-documents-only", action="store_true",
+                        help="재무 API 캐시와 공식 DART 신고서 재무 절만 사용; 새 인증 API 호출 없음")
     parser.add_argument("--financial-repair", type=str, help="연구 데이터 생성에 연결할 재무 복구 산출물 디렉터리")
     parser.add_argument(
         "--end-year",
@@ -672,7 +674,7 @@ if __name__ == "__main__":
         try:
             result = run_repair(DARTCollector(), RAW_DIR, PROC_DIR, args.start_year,
                                 args.end_year, dry_run=args.mode == "plan-financials",
-                                event_limit=args.financial_limit)
+                                event_limit=args.financial_limit, documents_only=args.financial_documents_only)
             if args.mode == "collect-financials":
                 from data.pipelines.research_dataset import run
                 result = {"financial_repair": result,

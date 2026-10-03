@@ -1630,7 +1630,8 @@ class HistoricalIPOPipeline:
             demand_rcept_dt = institutional_rcept_dt or lockup_rcept_dt
 
             financial_summary, collected_financials = self._collect_financials(
-                str(filing.corp_code), pd.Timestamp(listing.listing_date)
+                str(filing.corp_code), pd.Timestamp(listing.listing_date),
+                event_id=event_id, corp_name=listing.corp_name,
             )
             if not collected_financials.empty:
                 financial_rows.append(collected_financials)
@@ -2118,11 +2119,22 @@ class HistoricalIPOPipeline:
         ]
         return dart_ipo.reindex(columns=columns).copy()
 
-    def _collect_financials(self, corp_code: str, listing_date: pd.Timestamp) -> tuple[dict[str, Any], pd.DataFrame]:
+    def _collect_financials(self, corp_code: str, listing_date: pd.Timestamp,
+                            event_id=None, corp_name=None) -> tuple[dict[str, Any], pd.DataFrame]:
         financials = get_annual_history(
             self.dart, corp_code, listing_date, self.raw_dir / "dart_financial_sources")
         cutoff = listing_date.normalize() - pd.Timedelta(hours=3)
         summary = summarize_asof(financials, corp_code, cutoff)
+        if event_id and corp_name and not {"operating_margin", "debt_ratio"}.issubset(summary):
+            from data.pipelines.disclosure_financials import collect_disclosure_financials
+            extra, source_status = collect_disclosure_financials(
+                self.dart, self.raw_dir, event_id, corp_code, corp_name, cutoff,
+                lineage=pd.DataFrame(self._lineage_rows))
+            if not extra.empty:
+                financials = pd.concat([financials, extra], ignore_index=True) if not financials.empty else extra
+                summary = summarize_asof(financials, corp_code, cutoff)
+            elif summary.get("financial_time_validation_status") != "verified_dart_annual_financial_asof_v1":
+                summary["financial_time_validation_status"] = source_status
         if not financials.empty:
             financials["listing_date"] = listing_date
         return summary, financials
