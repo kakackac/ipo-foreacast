@@ -1,0 +1,247 @@
+import json
+import unittest
+from unittest.mock import Mock
+
+import pandas as pd
+import requests
+
+from data.collectors.krx_collector import KRXCollector
+
+
+def _response(payload):
+    response = Mock()
+    response.json.return_value = payload
+    response.raise_for_status.return_value = None
+    return response
+
+
+def _html_response(content: str):
+    response = Mock()
+    response.content = content.encode("euc-kr")
+    response.raise_for_status.return_value = None
+    return response
+
+
+class KRXOpenAPICollectorTests(unittest.TestCase):
+    def test_listing_price_uses_auth_header_and_full_issue_code(self):
+        session = Mock()
+        session.get.return_value = _response({"OutBlock_1": [{
+            "ISU_CD": "123456",
+            "ISU_NM": "테스트",
+            "TDD_OPNPRC": "18,000",
+            "TDD_CLSPRC": "15,000",
+            "TDD_HGPRC": "19,000",
+            "TDD_LWPRC": "14,000",
+            "ACC_TRDVOL": "100,000",
+        }]})
+        collector = KRXCollector(
+            api_key="test-key",
+            base_url="https://example.test/svc/apis",
+            session=session,
+            request_delay=0,
+        )
+
+        price = collector.get_listing_day_price(
+            "123456", "20240510", isu_cd="KR7123456000", market="KOSDAQ"
+        )
+
+        self.assertEqual(price["open_price"], 18000.0)
+        self.assertEqual(price["close_price"], 15000.0)
+        self.assertEqual(price["market"], "KOSDAQ")
+        evidence = json.loads(price["price_raw_response_evidence"])
+        self.assertEqual(evidence["KOSDAQ"]["row_count"], 1)
+        self.assertEqual(evidence["KOSDAQ"]["identity_sample"][0]["ISU_CD"], "123456")
+        session.get.assert_called_once_with(
+            "https://example.test/svc/apis/sto/ksq_bydd_trd",
+            params={"basDd": "20240510"},
+            headers={"AUTH_KEY": "test-key", "Accept": "application/json"},
+            timeout=30,
+        )
+
+    def test_calendar_filters_listing_dates_and_counts_same_day_listings(self):
+        session = Mock()
+        session.get.side_effect = [
+            _response({"OutBlock_1": [{
+                "ISU_CD": "KR7000001000", "ISU_SRT_CD": "000001", "ISU_ABBRV": "코스피테스트",
+                "LIST_DD": "20240102", "SECT_TP_NM": "제조업",
+            }]}),
+            _response({"OutBlock_1": [{
+                "ISU_CD": "KR7000002000", "ISU_SRT_CD": "000002", "ISU_ABBRV": "코스닥테스트",
+                "LIST_DD": "20240102", "SECT_TP_NM": "소프트웨어",
+            }]}),
+        ]
+        collector = KRXCollector(api_key="test-key", session=session, request_delay=0)
+
+        calendar = collector.get_ipo_calendar("20240101", "20241231")
+
+        self.assertEqual(len(calendar), 2)
+        self.assertEqual(set(calendar["market"]), {"KOSPI", "KOSDAQ"})
+        self.assertTrue((calendar["same_day_ipo_count"] == 2).all())
+        self.assertTrue(pd.api.types.is_datetime64_any_dtype(calendar["listing_date"]))
+
+    def test_official_kind_listing_events_include_source_and_conservative_classification(self):
+        session = Mock()
+        session.post.return_value = _html_response("""
+            <table>
+              <tr><th>회사명</th><th>종목코드</th><th>상장일</th><th>상장유형</th>
+                  <th>증권구분</th><th>업종</th><th>국적</th><th>상장주선인/지정자문인</th>
+                  <th>액면가 (원)</th><th>공모가 (원)</th><th>공모금액 (천원)</th><th>최초상장주식수 (주)</th></tr>
+              <tr><td>테스트기업</td><td>123456</td><td>2026-08-24</td><td>신규상장</td>
+                  <td>주권</td><td>소프트웨어 개발 및 공급업</td><td>대한민국</td><td>테스트증권(주)</td>
+                  <td>500</td><td>12000</td><td>1200000</td><td>1000000</td></tr>
+              <tr><td>메리츠제2호스팩</td><td>000001</td><td>2026-08-25</td><td>신규상장</td>
+                  <td>주권</td><td>금융업</td><td>대한민국</td><td>테스트증권(주)</td>
+                  <td>100</td><td>2000</td><td>1000000</td><td>5000000</td></tr>
+            </table>
+        """)
+        collector = KRXCollector(session=session, request_delay=0)
+
+        events = collector._get_official_listing_events_for_market("20260101", "20260827", "KOSDAQ")
+
+        self.assertEqual(len(events), 2)
+        self.assertTrue(events["market"].eq("KOSDAQ").all())
+        self.assertEqual(session.post.call_args.kwargs["data"]["marketType"], "2")
+        self.assertEqual(events.loc[0, "event_class"], "general_ipo")
+        self.assertEqual(events.loc[1, "event_class"], "spac_ipo")
+        self.assertEqual(events.loc[0, "offering_type"], "common_stock_ipo")
+        self.assertEqual(events.loc[1, "offering_type"], "spac_ipo")
+        self.assertNotIn("retail_subscription_eligibility_status", events.columns)
+        self.assertEqual(events.loc[0, "industry_name"], "소프트웨어 개발 및 공급업")
+        self.assertEqual(events.loc[0, "source_name"], "KRX_KIND_new_listing_company")
+        self.assertEqual(collector.official_listing_requests[-1]["status"], "success")
+
+    def test_market_scoped_collection(self):
+        collector = KRXCollector(request_delay=0)
+        collector._get_official_listing_events_for_market = Mock(side_effect=[
+            pd.DataFrame([{"event_id": "one", "market": "KOSPI"}]),
+            pd.DataFrame([{"event_id": "two", "market": "KOSDAQ"}]),
+        ])
+        result = collector.get_official_listing_events("20220101", "20221231")
+        self.assertEqual(set(result.market), {"KOSPI", "KOSDAQ"})
+        self.assertTrue(result.event_market_scope_version.eq(1).all())
+
+    def test_reclassification_repairs_blank_cached_offering_types(self):
+        cached = pd.DataFrame([
+            {
+                "corp_name": "테스트기업", "listing_type": "신규상장", "security_type": "주권",
+                "stock_type": None, "country": "대한민국", "event_class": "general_ipo",
+                "offering_type": None,
+            },
+            {
+                "corp_name": "테스트제1호스팩", "listing_type": "신규상장", "security_type": "주권",
+                "stock_type": None, "country": "대한민국", "event_class": "spac_ipo",
+                "offering_type": None,
+            },
+        ])
+
+        repaired = KRXCollector.reclassify_official_listing_events(cached)
+
+        self.assertEqual(repaired["offering_type"].tolist(), ["common_stock_ipo", "spac_ipo"])
+        self.assertEqual(repaired["event_class"].tolist(), ["general_ipo", "spac_ipo"])
+        self.assertTrue((repaired["classification_rule_version"] == 2).all())
+
+    def test_foreign_listing_uses_company_name_after_code_match_fails(self):
+        session = Mock()
+        session.get.return_value = _response({"OutBlock_1": [{
+            "ISU_CD": "840150", "ISU_NM": "소마젠",
+            "TDD_OPNPRC": "12,000", "TDD_CLSPRC": "10,500",
+            "TDD_HGPRC": "14,000", "TDD_LWPRC": "10,000", "ACC_TRDVOL": "10,000",
+        }]})
+        collector = KRXCollector(api_key="test-key", session=session, request_delay=0)
+
+        price = collector.get_listing_day_price(
+            "950200", "20200713", isu_cd="KR8840150005", market="KOSDAQ", corp_name="소마젠(Reg.S)"
+        )
+
+        self.assertEqual(price["open_price"], 12000.0)
+        self.assertEqual(price["close_price"], 10500.0)
+
+    def test_listing_price_records_empty_api_response_separately(self):
+        session = Mock()
+        session.get.side_effect = [
+            _response({"OutBlock_1": []}),
+            _response({"OutBlock_1": []}),
+        ]
+        collector = KRXCollector(api_key="test-key", session=session, request_delay=0)
+
+        price = collector.get_listing_day_price(
+            "214610", "20151022", market="KOSDAQ", corp_name="테스트기업"
+        )
+
+        self.assertEqual(price["price_match_status"], "unmatched")
+        self.assertEqual(price["price_failure_reason"], "daily_price_api_response_empty")
+        self.assertEqual(price["price_markets_queried"], "KOSDAQ,KOSPI")
+        self.assertEqual(price["price_api_rows_returned"], 0)
+
+    def test_listing_price_recovers_from_market_mismatch(self):
+        session = Mock()
+        session.get.side_effect = [
+            _response({"OutBlock_1": [{"ISU_SRT_CD": "999999", "ISU_NM": "다른기업"}]}),
+            _response({"OutBlock_1": [{
+                "ISU_SRT_CD": "214610", "ISU_NM": "테스트기업",
+                "TDD_OPNPRC": "10,000", "TDD_CLSPRC": "11,000",
+                "TDD_HGPRC": "12,000", "TDD_LWPRC": "9,000", "ACC_TRDVOL": "1,000",
+            }]}),
+        ]
+        collector = KRXCollector(api_key="test-key", session=session, request_delay=0)
+
+        price = collector.get_listing_day_price(
+            "214610", "20151022", market="KOSDAQ", corp_name="테스트기업"
+        )
+
+        self.assertEqual(price["market"], "KOSPI")
+        self.assertEqual(
+            price["price_match_method"], "ticker_or_short_issue_code_market_mismatch_recovered"
+        )
+        self.assertEqual(price["price_markets_queried"], "KOSDAQ,KOSPI")
+
+    def test_listing_price_records_code_and_company_name_mismatch(self):
+        session = Mock()
+        session.get.side_effect = [
+            _response({"OutBlock_1": [{"ISU_SRT_CD": "999999", "ISU_NM": "다른기업"}]}),
+            _response({"OutBlock_1": [{"ISU_SRT_CD": "888888", "ISU_NM": "또다른기업"}]}),
+        ]
+        collector = KRXCollector(api_key="test-key", session=session, request_delay=0)
+
+        price = collector.get_listing_day_price(
+            "214610", "20151022", market="KOSDAQ", corp_name="테스트기업"
+        )
+
+        self.assertEqual(price["price_match_status"], "unmatched")
+        self.assertEqual(
+            price["price_failure_reason"], "daily_rows_code_and_company_name_unmatched"
+        )
+        self.assertEqual(price["price_api_rows_returned"], 2)
+
+    def test_index_collection_selects_main_index_and_skips_non_trading_days(self):
+        session = Mock()
+        session.get.side_effect = [
+            _response({"OutBlock_1": [{"IDX_NM": "KOSPI 200", "CLSPRC_IDX": "3500"}]}),
+            _response({"OutBlock_1": [{
+                "BAS_DD": "20240102", "IDX_NM": "KOSPI", "CLSPRC_IDX": "2,669.81",
+            }]}),
+        ]
+        collector = KRXCollector(api_key="test-key", session=session, request_delay=0)
+
+        frame = collector.get_index_ohlcv("1", "20240101", "20240102")
+
+        self.assertEqual(len(frame), 1)
+        self.assertEqual(frame.loc[0, "index_code"], "KOSPI")
+        self.assertAlmostEqual(frame.loc[0, "close"], 2669.81)
+
+    def test_request_retries_after_transient_connection_error(self):
+        session = Mock()
+        session.get.side_effect = [
+            requests.ConnectionError("connection reset"),
+            _response({"OutBlock_1": []}),
+        ]
+        collector = KRXCollector(api_key="test-key", session=session, request_delay=0)
+
+        records = collector._get_daily_records("idx/kospi_dd_trd", "20200115")
+
+        self.assertEqual(records, [])
+        self.assertEqual(session.get.call_count, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
