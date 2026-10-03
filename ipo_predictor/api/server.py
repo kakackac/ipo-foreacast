@@ -41,10 +41,10 @@ class IPOFeatures(BaseModel):
     institutional_demand_ratio:    float = Field(...,  ge=0, le=3000,  description="기관 수요예측 경쟁률")
     lockup_commitment_ratio:       float = Field(...,  ge=0, le=1,     description="기관 의무보유확약 통합 비율")
     offering_price_band_position:  float = Field(...,  description="밴드 위치 (0=하단, 1=상단, >1=초과)")
-    kospi_momentum_5d:             float = Field(0.0,  description="KOSPI 5일 수익률")
-    kospi_momentum_20d:            float = Field(0.0,  description="KOSPI 20일 수익률")
-    recent_ipo_avg_return_sector:  float = Field(10.0, description="섹터 최근 IPO 평균 수익률(%)")
-    recent_ipo_avg_return_all:     float = Field(10.0, description="전체 최근 IPO 평균 수익률(%)")
+    kospi_momentum_5d:             Optional[float] = Field(None, description="KOSPI 5일 수익률")
+    kospi_momentum_20d:            Optional[float] = Field(None, description="KOSPI 20일 수익률")
+    recent_ipo_avg_return_sector:  Optional[float] = Field(None, description="섹터 최근 IPO 평균 수익률(%)")
+    recent_ipo_avg_return_all:     Optional[float] = Field(None, description="전체 최근 IPO 평균 수익률(%)")
 
     # 선택 — SECONDARY 피처 (없으면 모델 내부에서 중앙값 대체)
     float_share_ratio:             Optional[float] = Field(None, ge=0, le=1)
@@ -133,11 +133,20 @@ class ModelInfo(BaseModel):
 
 _models: dict = {}
 _model_meta: dict = {}
+_release_fingerprint = None
 
 def get_models() -> dict:
     """시초가·종가 모델 싱글톤 반환."""
-    global _models, _model_meta
-    if not _models:
+    global _models, _model_meta, _release_fingerprint
+    from config import MODEL_DIR
+    from api.release_gate import verify_release
+    try:
+        fingerprint = verify_release(MODEL_DIR, PREDICTION_STAGE)
+    except (ValueError, OSError, TypeError):
+        _models = {}
+        _release_fingerprint = None
+        raise HTTPException(status_code=503, detail="검증·배포 승인된 예측 모델이 없습니다.") from None
+    if not _models or fingerprint != _release_fingerprint:
         try:
             import sys, os
             sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -146,39 +155,14 @@ def get_models() -> dict:
                 "opening": IPOPriceModel.load(f"{PREDICTION_STAGE}_open_v1"),
                 "closing": IPOPriceModel.load(f"{PREDICTION_STAGE}_close_v1"),
             }
+            _release_fingerprint = fingerprint
             logger.info("시초가·종가 모델 로드 완료")
         except Exception as e:
-            logger.warning("저장된 상장일 모델 없음, 데모 모델 사용: %s", e)
-            _models = _create_demo_models()
+            _models = {}
+            _release_fingerprint = None
+            logger.warning("모델 로드 실패 유형: %s", type(e).__name__)
+            raise HTTPException(status_code=503, detail="승인된 모델을 불러오지 못했습니다.") from None
     return _models
-
-def _create_demo_models() -> dict:
-    """저장된 모델이 없을 때 사용할 시초가·종가 데모 모델"""
-    import sys, os
-    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-    from models.baseline.gradient_boost_model import IPOPriceModel
-    from data.processors.feature_engineer import build_demo_dataset
-    from features.definitions import get_phase2_feature_names
-
-    df = build_demo_dataset(400, phase="phase2")
-    feat_cols = [c for c in get_phase2_feature_names() if c in df.columns]
-    X = df[feat_cols]
-    split = int(len(df) * 0.8)
-    models = {}
-    for target_name, target_col in [("opening", "open_return_pct"), ("closing", "close_return_pct")]:
-        model = IPOPriceModel(n_estimators=100)
-        model.imputation_values = {
-            column: float(X.iloc[:split][column].median()) for column in feat_cols
-        }
-        model.fit(
-            X.iloc[:split], df[target_col].iloc[:split],
-            X.iloc[split:], df[target_col].iloc[split:],
-        )
-        model.feature_names = feat_cols
-        models[target_name] = model
-    logger.info("상장일 데모 모델 학습 완료 (%d 피처)", len(feat_cols))
-    return models
-
 
 # ── 피처 변환 유틸 ────────────────────────────────────────────
 
@@ -239,6 +223,12 @@ async def health():
     return {"status": "ok", "timestamp": datetime.now().isoformat()}
 
 
+@app.get("/ready")
+async def readiness():
+    get_models()
+    return {"status": "ready", "prediction_stage": PREDICTION_STAGE}
+
+
 @app.get("/model/info", response_model=ModelInfo)
 async def model_info():
     models = get_models()
@@ -291,9 +281,11 @@ async def predict(feat: IPOFeatures, background_tasks: BackgroundTasks):
         )
         return response
 
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error("예측 실패: %s", e, exc_info=True)
-        raise HTTPException(status_code=500, detail=f"예측 중 오류: {str(e)}")
+        logger.error("예측 실패 유형: %s", type(e).__name__)
+        raise HTTPException(status_code=500, detail="예측 처리에 실패했습니다.") from None
 
 
 @app.post("/predict/batch", response_model=BatchResponse)
@@ -318,8 +310,11 @@ async def predict_batch(batch: BatchRequest):
             ))
         return BatchResponse(count=len(responses), predictions=responses)
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error("배치 예측 실패 유형: %s", type(e).__name__)
+        raise HTTPException(status_code=500, detail="예측 처리에 실패했습니다.") from None
 
 
 async def _log_prediction(corp_name, listing_date, pred_return, risk_grade):
