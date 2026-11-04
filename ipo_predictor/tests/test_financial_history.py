@@ -56,6 +56,24 @@ class FinancialHistoryTests(unittest.TestCase):
         self.assertEqual(summary["financial_time_validation_status"], FINANCIAL_STATUS)
         self.assertIsNone(summary["revenue_growth_3y"])
 
+    def test_invalid_balance_only_year_is_rejected_without_empty_year_crash(self):
+        frame = self.history().iloc[:3].copy()
+        frame['account_name_en'] = ['total_assets', 'total_liabilities', 'equity']
+        frame['amount'] = [100., 200., 300.]
+        result = summarize_asof(frame, '12345678', '2023-04-01')
+        self.assertEqual(result['financial_time_validation_status'], 'no_verified_pre_cutoff_krw_annual_values')
+
+    def test_margin_uses_latest_complete_annual_income_pair_not_mixed_years(self):
+        old = self.history()
+        newer = old.iloc[:2].copy()
+        newer['year'], newer['response_year'] = 2023, '2023'
+        newer['account_name_en'] = ['total_liabilities', 'equity']
+        newer['amount'] = [50., 100.]
+        newer['published_at'] = '2024-01-01'
+        result = summarize_asof(pd.concat([old, newer]), '12345678', '2024-02-01')
+        self.assertEqual(result['operating_margin'], -.05)
+        self.assertEqual(json.loads(result['financial_feature_provenance'])['operating_margin']['business_years'], [2022])
+
     def test_future_corrected_receipt_wrong_company_and_currency_are_excluded(self):
         for field, value in [("published_at", "2023-05-01"), ("corp_code", "87654321"),
                              ("currency", "USD"), ("publication_verified", False)]:

@@ -8,6 +8,7 @@ __pycache__/
 .env
 .venv/
 venv/
+backend/var/
 
 ipo_predictor/data/raw/
 ipo_predictor/data/processed/

@@ -22,6 +22,10 @@ SAMPLES = [
      [12525000000, 1780000000, 14078000000, 3363000000, 10715000000, 1716000000]),
     ('스카이랩스', '01586923', '20260825000414', '2026-09-03 21:00', 2025,
      [7935865376, -14725265236, 30180942922, 4728384269, 25452558653, -62995166524]),
+    ('싸이맥스', '00659161', '20150602000317', '2015-06-16 21:00', 2014,
+     [54714000000, 5836000000, 39268000000, 12976000000, 26292000000, 5993000000]),
+    ('SG', '00963976', '20180122000271', '2018-01-25 21:00', 2016,
+     [93642364279, 11464092002, 83188236557, 58375494119, 24812742438, 9004249362]),
 ]
 
 
@@ -38,7 +42,7 @@ def main():
         payload = json.loads(path.read_text())
         digest = hashlib.sha256(payload['html'].encode()).hexdigest()
         frame = parse_disclosure_financials(payload['html'], corp, receipt,
-                                            f'{receipt[:4]}-{receipt[4:6]}-{receipt[6:8]}', payload['source_url'])
+                                            payload.get('official_publication_date') or f'{receipt[:4]}-{receipt[4:6]}-{receipt[6:8]}', payload['source_url'])
         result = summarize_asof(frame, corp, cutoff)
         fields = ['revenue', 'operating_income', 'total_assets', 'total_liabilities', 'equity', 'net_income']
         mismatches = {key: {'expected': value, 'actual': result.get(key)}

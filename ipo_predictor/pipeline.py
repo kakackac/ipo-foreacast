@@ -631,7 +631,7 @@ if __name__ == "__main__":
     parser.add_argument("--financial-limit", type=int, help="재무 수집 공식 API 검증용 연도 분산 표본 개수")
     parser.add_argument("--financial-documents-only", action="store_true",
                         help="재무 API 캐시와 공식 DART 신고서 재무 절만 사용; 새 인증 API 호출 없음")
-    parser.add_argument("--financial-repair", type=str, help="연구 데이터 생성에 연결할 재무 복구 산출물 디렉터리")
+    parser.add_argument("--financial-repair", type=str, help="연구 데이터 생성에 연결할 재무 복구 디렉터리 또는 latest")
     parser.add_argument(
         "--end-year",
         type=int,
@@ -679,6 +679,9 @@ if __name__ == "__main__":
                 from data.pipelines.research_dataset import run
                 result = {"financial_repair": result,
                           "research_dataset": run(RAW_DIR, PROC_DIR, financial_repair=result["path"])}
+                from data.pipelines.data_delivery import publish
+                result["data_delivery"] = publish(PROC_DIR, result["financial_repair"]["path"],
+                                                  result["research_dataset"]["path"])
             print(json.dumps(result, ensure_ascii=False))
         except RuntimeError as exc:
             logger.error("재무 수집 중단: %s", exc)

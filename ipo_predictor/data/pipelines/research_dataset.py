@@ -166,6 +166,9 @@ def run(raw_dir, processed_dir, financial_repair=None):
     sources = {'features': processed / 'features_all.parquet', 'observations': processed / 'feature_observations.parquet',
                'index': raw / 'kospi_index.parquet', 'lineage': raw / 'dart_disclosure_lineage.parquet'}
     if financial_repair is not None:
+        if str(financial_repair) == 'latest':
+            from data.pipelines.data_delivery import current_financial_repair
+            financial_repair = current_financial_repair(processed)
         repair = Path(financial_repair)
         manifest = json.loads((repair / 'manifest.json').read_text())
         if manifest['input_sha256'] != hashlib.sha256(sources['features'].read_bytes()).hexdigest():

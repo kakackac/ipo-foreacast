@@ -11,21 +11,24 @@
 
 ## 현재 구현 상태
 
+2026-11-04 기준: 데이터·모델·앱의 출시 완료 상태는 아닙니다. 최신 진행 및 미완료 조건은
+[남은 작업](docs/출시까지_남은작업.md), 로컬 서비스 실행은 [Django 백엔드](backend/README.md)를 참고하세요.
+개인청약 경쟁률/민간 사이트/코넥스는 현재 수집·모델 대상에서 제외합니다.
+역사적 연구 데이터와 출시 승인 모델을 구분하며, 예측·실결제는 아직 공개하지 않습니다.
+
 | 모듈 | 파일 | 상태 |
 |------|------|------|
-| 설정 | `config.py` | ✅ 완료 |
-| 피처 정의 | `features/definitions.py` | ✅ 완료 |
-| DART 수집기 | `data/collectors/dart_collector.py` | ✅ 완료 (API 키 필요) |
-| KRX 수집기 | `data/collectors/krx_collector.py` | ✅ 공식 OpenAPI 일별 상장 일정·가격·지수 수집 |
-| 피처 엔지니어링 | `data/processors/feature_engineer.py` | ✅ 완료 |
-| Phase 2 피처 연결 | `data/processors/feature_engineer.py` | ✅ 완료 (데모/학습 연동) |
-| Phase 2 DART 파서 | `data/collectors/dart_collector.py` | ✅ 부분 완료 (정규식 기반) |
-| 재무 분석기 | `data/processors/financial_analyzer.py` | ✅ 완료 |
-| 예측 모델 | `models/baseline/gradient_boost_model.py` | ✅ 완료 (Open/Close 분리 모델) |
-| 백테스터 | `models/evaluation/backtester.py` | ✅ 완료 |
-| 아웃라이어 분석기 | `models/evaluation/outlier_analyzer.py` | ✅ 완료 |
-| API 서버 | `api/server.py` | ✅ 완료 (uvicorn 설치 필요) |
-| 파이프라인 진입점 | `pipeline.py` | ✅ 완료 |
+| 설정·피처 정의 | `ipo_predictor/config.py`, `ipo_predictor/features/definitions.py` | 구현됨. 수집·모델 승인과 별개 |
+| DART 수집기 | `ipo_predictor/data/collectors/dart_collector.py` | 인증 API 및 공개 원문 경로. 일부 형식/공시 검증 미완료 |
+| KRX 수집기 | `ipo_predictor/data/collectors/krx_collector.py` | KIND 공식 이벤트, OpenAPI 가격·지수. 신규 가격 갱신에는 키 필요 |
+| 피처 엔지니어링 | `ipo_predictor/data/processors/feature_engineer.py` | 구현됨. 결측/출처/공개 시점 확인 필요 |
+| 재무 복구 | `ipo_predictor/data/pipelines/disclosure_financials.py` | 실제 전체 표본 처리, 일부 미지원/검토 상태 유지 |
+| 연구 데이터 버전 | `ipo_predictor/data/pipelines/data_delivery.py` | 해시·중복·시점 검사 후 연결. 학습/배포 승인 아님 |
+| 예측 모델 | `ipo_predictor/models/baseline/gradient_boost_model.py` | 연구용 Open/Close 분리 구현, 출시 미승인 |
+| 백테스터·오차 분석 | `ipo_predictor/models/evaluation/` | 구현됨. 과거 평가 소진 및 전향 검증 조건 확인 필요 |
+| 예측 API | `ipo_predictor/api/server.py` | 승인 모델이 없으면 차단. 서비스 전체 백엔드와 별개 |
+| Django 서비스 | `backend/` | 계정·관심종목·내부 알림·검토형 게시판·관리자 기본 API, 실결제/외부 푸시/운영 배포 미완료 |
+| 파이프라인 진입점 | `ipo_predictor/pipeline.py` | 수집/연구 저장 연결, 명령 완료와 데이터 품질 완성은 구분 |
 
 ---
 
