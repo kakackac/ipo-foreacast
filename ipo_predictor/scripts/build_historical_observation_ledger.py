@@ -27,15 +27,18 @@ def bind_event(record, lineage, index_content):
         raise ValueError('corporate_identity_mismatch')
     published = pd.to_datetime(matched.rcept_dt, errors='coerce').dt.normalize()
     listing = pd.to_datetime(matched.listing_date, errors='coerce').dt.normalize()
-    receipt_date = pd.Timestamp(datetime.strptime(receipt[:8], '%Y%m%d'))
-    if published.isna().any() or listing.isna().any() or not published.eq(receipt_date).all() or listing.nunique() != 1:
+    if published.isna().any() or published.nunique() != 1 or listing.isna().any() or listing.nunique() != 1:
         raise ValueError('publication_or_listing_date_conflict')
-    available = (receipt_date + pd.Timedelta(days=1)).tz_localize('Asia/Seoul')
+    publication = published.iloc[0]
+    title_date = re.search(r'<title>[^<]*/(\d{4})[.](\d{2})[.](\d{2})\s*</title>', index_content)
+    if title_date and pd.Timestamp('-'.join(title_date.groups())) != publication:
+        raise ValueError('official_publication_date_conflict')
+    available = (publication + pd.Timedelta(days=1)).tz_localize('Asia/Seoul')
     if not available < listing.iloc[0].tz_localize('Asia/Seoul'):
         raise ValueError('not_available_before_listing')
     return {'event_id': str(matched.event_id.iloc[0]), 'corp_code': next(iter(identities)),
             'listing_date': listing.iloc[0].date().isoformat(),
-            'published_date': receipt_date.date().isoformat(), 'available_at': available.isoformat()}
+            'published_date': publication.date().isoformat(), 'available_at': available.isoformat()}
 
 
 def select_asof(observations, event_id, feature, cutoff):

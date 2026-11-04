@@ -1,11 +1,13 @@
 """One retryable research outcome batch using official KRX regular-session data."""
 import argparse
+import fcntl
 import json
 import logging
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.collectors.krx_collector import KRXCollector
@@ -33,8 +35,20 @@ def build_outcome(prediction, price, collected_at):
 
 
 def run(database, output, collector=None):
+    """Serialize workers; durable outcomes alone suppress calls on the next run."""
+    lock_path = Path(str(database) + '.outcomes.lock')
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open('a') as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {'status': 'already_running', 'events': [], 'deployment_authorized': False}
+        return _run(database, output, collector)
+
+
+def _run(database, output, collector=None):
     now = datetime.now(KST)
-    destination = Path(output) / now.strftime("%Y%m%dT%H%M%S%f")
+    destination = Path(output) / (now.strftime("%Y%m%dT%H%M%S%f") + '_' + uuid4().hex[:8])
     destination.mkdir(parents=True, exist_ok=False)
     collector = collector or KRXCollector()
     db = connect(database)
@@ -81,4 +95,4 @@ if __name__ == "__main__":
     logging.getLogger("data.collectors.krx_collector").disabled = True
     report = run(args.database, args.output)
     print(json.dumps(report, ensure_ascii=False))
-    sys.exit(0 if report["status"] == "complete" else 1)
+    sys.exit(0 if report["status"] in ("complete", "already_running") else 1)

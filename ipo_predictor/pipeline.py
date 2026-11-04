@@ -599,7 +599,7 @@ if __name__ == "__main__":
             "train", "backtest", "analyze", "demo", "collect", "collect-events",
             "audit-dart-failures", "prepare-underwriter-institutional-review-queue",
             "audit-underwriter-source-readiness", "build-research-dataset", "collect-and-build",
-            "plan-financials", "collect-financials",
+            "plan-financials", "collect-financials", "collect-snapshot-prices",
         ],
         default="demo",
         help="실행 모드",
@@ -632,6 +632,12 @@ if __name__ == "__main__":
     parser.add_argument("--financial-documents-only", action="store_true",
                         help="재무 API 캐시와 공식 DART 신고서 재무 절만 사용; 새 인증 API 호출 없음")
     parser.add_argument("--financial-repair", type=str, help="연구 데이터 생성에 연결할 재무 복구 디렉터리 또는 latest")
+    parser.add_argument('--event-snapshot', type=Path, help='가격을 보완할 별도 공식 이벤트 스냅샷')
+    parser.add_argument('--snapshot-output', type=Path, help='기존 원본과 분리된 가격 캐시/실행 결과 폴더')
+    parser.add_argument("--repair-disclosure-connections", action="store_true",
+                        help="공모가 보류 일반 IPO만 공개 DART 정정 계보로 복구해 재무/연구 버전에 함께 저장")
+    parser.add_argument('--connection-cached-only', action='store_true',
+                        help='공시 연결 복구에서 이미 저장한 공식 원문만 사용; 미수집 원천은 대기로 보존')
     parser.add_argument(
         "--end-year",
         type=int,
@@ -667,6 +673,18 @@ if __name__ == "__main__":
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.research_dataset import run
         print(json.dumps(run(RAW_DIR, PROC_DIR, financial_repair=args.financial_repair), ensure_ascii=False))
+    elif args.mode == 'collect-snapshot-prices':
+        from config import RAW_DIR
+        from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline
+        if args.event_snapshot is None or args.snapshot_output is None:
+            parser.error('--event-snapshot and --snapshot-output are required')
+        if args.snapshot_output.resolve() == RAW_DIR.resolve():
+            parser.error('--snapshot-output must not be the historical raw directory')
+        result = HistoricalIPOPipeline(raw_dir=args.snapshot_output,
+            processed_dir=args.snapshot_output / 'processed').collect_snapshot_prices(
+                args.event_snapshot, RAW_DIR / 'ipo_listing_prices.parquet')
+        print(json.dumps(result, ensure_ascii=False))
+        sys.exit(0 if result['status']=='complete' else 2)
     elif args.mode in ("plan-financials", "collect-financials"):
         from config import RAW_DIR, PROC_DIR
         from data.collectors.dart_collector import DARTCollector
@@ -674,7 +692,9 @@ if __name__ == "__main__":
         try:
             result = run_repair(DARTCollector(), RAW_DIR, PROC_DIR, args.start_year,
                                 args.end_year, dry_run=args.mode == "plan-financials",
-                                event_limit=args.financial_limit, documents_only=args.financial_documents_only)
+                                event_limit=args.financial_limit, documents_only=args.financial_documents_only,
+                                repair_connections=args.repair_disclosure_connections,
+                                connection_cached_only=args.connection_cached_only)
             if args.mode == "collect-financials":
                 from data.pipelines.research_dataset import run
                 result = {"financial_repair": result,

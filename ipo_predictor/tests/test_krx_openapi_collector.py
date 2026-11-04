@@ -138,7 +138,13 @@ class KRXOpenAPICollectorTests(unittest.TestCase):
 
         self.assertEqual(repaired["offering_type"].tolist(), ["common_stock_ipo", "spac_ipo"])
         self.assertEqual(repaired["event_class"].tolist(), ["general_ipo", "spac_ipo"])
-        self.assertTrue((repaired["classification_rule_version"] == 2).all())
+        self.assertTrue((repaired["classification_rule_version"] == 3).all())
+
+    def test_formal_spac_name_without_spac_abbreviation(self):
+        row = pd.Series({'corp_name': '에스케이증권제14호기업인수목적',
+                         'listing_type': '신규상장', 'security_type': '주권',
+                         'stock_type': '보통주', 'country': '대한민국'})
+        self.assertEqual(KRXCollector._classify_official_listing_event(row)['event_class'], 'spac_ipo')
 
     def test_foreign_listing_uses_company_name_after_code_match_fails(self):
         session = Mock()

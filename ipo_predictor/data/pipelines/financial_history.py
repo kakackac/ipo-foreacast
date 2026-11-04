@@ -71,6 +71,11 @@ def get_annual_history(dart, corp_code, listing_date, cache_dir, cached_only=Fal
                         continue
                     day = receipt[:8]
                     disclosures = dart.get_company_disclosure_list(corp_code, day, day)
+                    if disclosures.empty:
+                        submitted = pd.Timestamp(day)
+                        disclosures = dart.get_company_disclosure_list(
+                            corp_code, (submitted - pd.Timedelta(days=7)).strftime('%Y%m%d'),
+                            (submitted + pd.Timedelta(days=7)).strftime('%Y%m%d'))
                     matched = disclosures[
                         disclosures.rcept_no.astype(str).eq(receipt)
                         & disclosures.corp_code.astype(str).eq(corp_code)
@@ -79,7 +84,7 @@ def get_annual_history(dart, corp_code, listing_date, cache_dir, cached_only=Fal
                     for report in matched.itertuples(index=False):
                         published = pd.to_datetime(report.rcept_dt, errors="coerce")
                         title = str(report.report_nm)
-                        if (pd.notna(published) and published.strftime("%Y%m%d") == day
+                        if (pd.notna(published)
                                 and "사업보고서" in title and re.search(rf"\({year}\.\d{{2}}\)", title)):
                             valid.append(published.strftime("%Y-%m-%d"))
                     if len(set(valid)) == 1:
@@ -188,7 +193,7 @@ def summarize_asof(financials, corp_code, cutoff):
 
 
 def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry_run=False, event_limit=None,
-               documents_only=False):
+               documents_only=False, repair_connections=False, connection_cached_only=False):
     """Repair financial features without recollecting IPO documents or KRX prices."""
     started_at = datetime.now(timezone.utc).isoformat()
     from data.processors.feature_engineer import FeatureEngineer
@@ -196,6 +201,11 @@ def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry
     features_path = processed_dir / "features_all.parquet"
     original_hash = hashlib.sha256(features_path.read_bytes()).hexdigest()
     features = pd.read_parquet(features_path)
+    connection_resolutions, connected_lineage = None, None
+    if repair_connections and not dry_run:
+        from data.pipelines.disclosure_connections import repair_features
+        features, connection_resolutions, connected_lineage = repair_features(
+            dart, raw_dir, features, event_limit, cached_only=connection_cached_only)
     dates = pd.to_datetime(features.listing_date, errors="coerce")
     targets = features[features.event_class.eq("general_ipo") & features.market.isin(["KOSPI", "KOSDAQ"])
                        & dates.dt.year.between(start_year, end_year)].copy()
@@ -225,6 +235,8 @@ def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry
             "krx_recollection_required": False,
             "legacy_amount_only_cache_rows": len(pd.read_parquet(raw_dir / "dart_financials.parquet")),
             "training_executed": False}
+    plan['parameters']['repair_disclosure_connections'] = repair_connections
+    plan['parameters']['connection_cached_only'] = connection_cached_only
     if dry_run:
         destination = processed_dir / "financial_collection_plan.json"
         atomic_json(destination, {**plan, "input_sha256": original_hash,
@@ -245,10 +257,11 @@ def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry
         summary = summarize_asof(history, row.corp_code, cutoff)
         structured_status = summary["financial_time_validation_status"]
         document_status = "not_required"
+        details = {}
         if not {"operating_margin", "debt_ratio"}.issubset(summary):
             from data.pipelines.disclosure_financials import collect_disclosure_financials
             extra, document_status = collect_disclosure_financials(
-                dart, raw_dir, row.event_id, row.corp_code, row.corp_name, cutoff)
+                dart, raw_dir, row.event_id, row.corp_code, row.corp_name, cutoff, diagnostics=details)
             if not extra.empty:
                 history = pd.concat([history, extra], ignore_index=True) if not history.empty else extra
                 summary = summarize_asof(history, row.corp_code, cutoff)
@@ -256,7 +269,15 @@ def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry
                 summary["financial_time_validation_status"] = document_status
         resolutions.append({"event_id": row.event_id, "structured_status": structured_status,
                             "disclosure_status": document_status,
-                            "result_status": summary["financial_time_validation_status"]})
+                            "result_status": summary["financial_time_validation_status"],
+                            "source_evidence": json.dumps(details, ensure_ascii=False),
+                            "absence_confirmed": False,
+                            "missing_category": (
+                                "not_missing" if summary["financial_time_validation_status"] == FINANCIAL_STATUS else
+                                "source_access_failed" if 'access_failed' in document_status else
+                                "section_not_identified" if 'section_not_found' in document_status else
+                                "format_unsupported" if 'format_unhandled' in document_status else
+                                "annual_basis_or_integrity_unverified")})
         if not history.empty:
             history["event_id"] = row.event_id
             all_rows.append(history)
@@ -282,6 +303,7 @@ def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry
     if hashlib.sha256(features_path.read_bytes()).hexdigest() != original_hash:
         raise RuntimeError("financial_repair_inputs_changed")
     fingerprint = hashlib.sha256((original_hash + json.dumps(plan, sort_keys=True) + pd.DataFrame(summaries).to_json()
+                                  + hashlib.sha256(pd.util.hash_pandas_object(repaired.astype(str), index=True).values.tobytes()).hexdigest()
                                   + Path(__file__).read_text()
                                   + (Path(__file__).with_name("disclosure_financials.py")).read_text()).encode()).hexdigest()[:20]
     root = processed_dir / "financial_repairs" / fingerprint
@@ -296,6 +318,9 @@ def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry
     outputs = {"features_all.parquet": repaired, "feature_observations.parquet": observations,
                "source_resolutions.parquet": pd.DataFrame(resolutions),
                "financial_sources.parquet": pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame()}
+    if connection_resolutions is not None:
+        outputs['connection_resolutions.parquet'] = connection_resolutions
+        outputs['disclosure_lineage.parquet'] = connected_lineage
     for name, frame in outputs.items():
         frame.to_parquet(staging / name, index=False)
     report = {**plan, "input_sha256": original_hash,
@@ -305,6 +330,8 @@ def run_repair(dart, raw_dir, processed_dir, start_year=2015, end_year=2026, dry
               "output_sha256": {name: hashlib.sha256((staging / name).read_bytes()).hexdigest() for name in outputs},
               "production_files_replaced": False, "asof_policy": "listing_eve_2100_core_v1",
               "disclosure_resolution_counts": pd.Series([r["disclosure_status"] for r in resolutions]).value_counts().to_dict(),
+              "connection_resolution_counts": (connection_resolutions.status.value_counts().to_dict()
+                                                 if connection_resolutions is not None else {}),
               "financial_missing_counts": repaired.loc[selected, owned_values].isna().sum().to_dict(),
               "financial_observation_quality": {
                   field: {"observed_rows": int((~group.is_missing).sum()),

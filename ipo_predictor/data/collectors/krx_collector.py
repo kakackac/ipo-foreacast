@@ -31,7 +31,7 @@ KIND_LISTING_PAGE_URL = (
 )
 # KIND 원천 필드에서 다시 계산할 수 있는 분류임을 표시한다. 이전 캐시에
 # 분류 열이 없거나 비어 있을 때도, 네트워크 재호출 없이 안전하게 보정한다.
-LISTING_CLASSIFICATION_RULE_VERSION = 2
+LISTING_CLASSIFICATION_RULE_VERSION = 3
 
 MARKETS = {
     "KOSPI": {
@@ -490,9 +490,9 @@ class KRXCollector:
             )
         # '메리츠'처럼 '리츠'를 포함하는 일반·스팩 종목을 리츠로 오인하지 않도록
         # 스팩 판정을 리츠 문자열보다 먼저 한다.
-        if "스팩" in name or "SPAC" in normalized:
+        if "스팩" in name or "SPAC" in normalized or "기업인수목적" in normalized:
             return result(
-                "spac_ipo", "종목명 스팩/SPAC 단서", "high", offering_type="spac_ipo",
+                "spac_ipo", "종목명 스팩/SPAC/기업인수목적 단서", "high", offering_type="spac_ipo",
             )
         if "리츠" in normalized or "REIT" in normalized or "부동산투자회사" in security_text:
             return result(

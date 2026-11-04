@@ -62,8 +62,13 @@ def build_frames(features, observations, index, lineage):
         receipt = str(key[1])
         if len(dates) == 1 and re.fullmatch(r'\d{14}', receipt):
             published = next(iter(dates))
-            if published.strftime('%Y%m%d') == receipt[:8]:
-                filing_dates[(str(key[0]), receipt)] = published
+            # Receipt prefixes are not publication dates (weekend submissions,
+            # deferred publication). Bind the date supplied by the event lineage.
+            identities = set(group.corp_code.dropna().astype(str)) if 'corp_code' in group else set()
+            event_corps = set(features.loc[features.event_id.astype(str).eq(str(key[0])), 'corp_code'].dropna().astype(str)) if 'corp_code' in features else set()
+            if len(identities) > 1 or (identities and event_corps and identities != event_corps):
+                continue
+            filing_dates[(str(key[0]), receipt)] = published
     rows, excluded, evidence = [], [], []
     eligible_targets = features[
         features.event_class.eq('general_ipo') & features.market.isin(['KOSPI', 'KOSDAQ'])
@@ -123,14 +128,24 @@ def build_frames(features, observations, index, lineage):
                         and number(row.get(feature)) is not None
                         and math.isclose(value, number(row.get(feature)), rel_tol=1e-9, abs_tol=1e-9))
             values[feature] = value if accepted else None
+            failures = []
+            if value is None: failures.append('value_missing')
+            if not range_valid: failures.append('invalid_value_or_unit')
+            if obs.get('validation_status') not in approved: failures.append('source_status_unapproved')
+            if obs.get('human_review_required') != False: failures.append('review_required')
+            if not receipt_bound: failures.append('receipt_or_publication_not_bound_to_event')
+            if pd.isna(published): failures.append('publication_missing')
+            elif pd.notna(cutoff) and not published < cutoff: failures.append('after_cutoff')
+            if number(row.get(feature)) is None or value != number(row.get(feature)): failures.append('feature_value_not_connected')
             row_evidence.append({'event_id': event, 'feature': feature, 'used': bool(accepted),
                                  'source_reference': obs.get('source_reference'),
                                  'available_at': published.isoformat() if pd.notna(published) else None,
-                                 'reason': 'approved_asof_observation' if accepted else 'missing_unverified_or_after_cutoff'})
+                                 'reason': 'approved_asof_observation' if accepted else '|'.join(failures) or 'source_contract_failed'})
         if reason is None and values['institutional_demand_ratio'] is None:
             reason = 'required_institutional_observation_unverified_at_cutoff'
         if reason:
             excluded.append({'event_id': event, 'reason': reason})
+            evidence.extend(row_evidence)
             continue
         row_evidence.append({'event_id': event, 'feature': 'offering_price', 'used': True,
                              'source_reference': str(price_receipt), 'available_at': price_at.isoformat(),
@@ -178,6 +193,8 @@ def run(raw_dir, processed_dir, financial_repair=None):
                 raise RuntimeError('financial_repair_output_hash_mismatch')
         sources['features'] = repair / 'features_all.parquet'
         sources['observations'] = repair / 'feature_observations.parquet'
+        if 'disclosure_lineage.parquet' in manifest['output_sha256']:
+            sources['lineage'] = repair / 'disclosure_lineage.parquet'
     hashes = {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in sources.items()}
     frames = {key: pd.read_parquet(path) for key, path in sources.items()}
     dataset, excluded, evidence = build_frames(**frames)

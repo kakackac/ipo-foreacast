@@ -48,6 +48,19 @@ class ResearchDatasetTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.build()
 
+    def test_official_lineage_date_can_differ_from_receipt_prefix(self):
+        self.lineage.loc[0, 'rcept_dt'] = '2020-01-13'
+        self.observations.loc[0, 'available_at'] = '2020-01-13'
+        self.assertEqual(len(self.build()[0]), 1)
+
+    def test_same_receipt_with_conflicting_corp_or_date_is_rejected(self):
+        self.features['corp_code'] = '12345678'
+        self.lineage['corp_code'] = '87654321'
+        data, excluded, proof = self.build()
+        self.assertEqual(len(data), 0)
+        self.assertEqual(len(proof), 5)
+        self.assertIn('receipt_or_publication_not_bound', proof.iloc[0].reason)
+
     def test_institutional_receipt_must_belong_to_same_event_and_public_day(self):
         self.observations.loc[0, 'source_reference'] = '20200110000002'
         self.assertEqual(len(self.build()[0]), 0)

@@ -1,11 +1,13 @@
 import json
+import fcntl
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from datetime import datetime
+from unittest.mock import Mock, patch
 
 from data.collectors.upcoming_ipo_collector import HEADERS, parse_candidates
-from scripts.prospective_listing_eve import connect, append
+from scripts.prospective_listing_eve import connect, append, KST
 from scripts.resolve_prospective_prices import build_outcome, run
 
 
@@ -35,6 +37,39 @@ class UpcomingTests(unittest.TestCase):
                 parse_candidates(a, b, "KOSDAQ", "2026-09-22T10:00:00+09:00")
 
 class OutcomeBatchTests(unittest.TestCase):
+    def test_2100_boundary_uses_real_ledger_and_official_price_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); database = root/'ledger.sqlite'
+            db = connect(database)
+            append(db, 'predictions', 'e', {'event_id':'e', 'ticker':'123450', 'market':'KOSDAQ',
+                'listing_date':'2025-01-01', 'offering_price':100,
+                'predictions':{'open_return_pct':{'model':5},'close_return_pct':{'model':5}}})
+            db.close()
+            collector = Mock(is_configured=True)
+            collector.get_listing_day_price.return_value = {'price_match_status':'matched','market':'KOSDAQ',
+                'price_matched_ticker':'123450','listing_date':'20250101',
+                'price_raw_response_evidence':'{}','open_price':100,'close_price':110}
+            with patch('scripts.resolve_prospective_prices.datetime') as clock, patch('scripts.prospective_listing_eve.datetime') as outcome_clock:
+                for c in (clock,outcome_clock):
+                    c.strptime.side_effect = datetime.strptime
+                    c.fromisoformat.side_effect = datetime.fromisoformat
+                    c.now.return_value = datetime(2025,1,1,20,59,59,tzinfo=KST)
+                self.assertEqual(run(database,root/'runs',collector)['events'][0]['status'],'not_due')
+                collector.get_listing_day_price.assert_not_called()
+                for c in (clock,outcome_clock): c.now.return_value = datetime(2025,1,1,21,tzinfo=KST)
+                self.assertEqual(run(database,root/'runs',collector)['events'][0]['status'],'resolved')
+                self.assertEqual(run(database,root/'runs',collector)['events'],[])
+            self.assertEqual(collector.get_listing_day_price.call_count,1)
+
+    def test_worker_lock_prevents_duplicate_calls(self):
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / 'ledger.sqlite'
+            collector = Mock(is_configured=True)
+            with Path(str(database) + '.outcomes.lock').open('a') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual(run(database, Path(directory) / 'runs', collector)['status'], 'already_running')
+            collector.get_listing_day_price.assert_not_called()
+
     def test_exact_identity_required(self):
         prediction = {"event_id": "test", "ticker": "123450", "market": "KOSDAQ", "listing_date": "2025-01-01"}
         price = {"price_match_status": "matched", "market": "KOSDAQ", "price_matched_ticker": "123450",

@@ -26,6 +26,11 @@ class DisclosureAuditTests(unittest.TestCase):
         result = parse_viewer(html, "20260909000381", "01028933", "2026-09-22")
         self.assertEqual(result["status"], "newer_or_ambiguous_registration_review")
 
+    def test_withdrawal_does_not_leave_old_registration_current(self):
+        html = HTML.replace('</select>', '<option value="rcpNo=20260921000001">2026.09.21 철회신고서</option></select>')
+        self.assertEqual(parse_viewer(html, '20260909000381', '01028933', '2026-09-22')['status'], 'withdrawn_or_cancelled_family')
+        self.assertEqual(parse_viewer(html, '20260909000381', '01028933', '2026-09-20')['status'], 'calendar_receipt_latest_in_viewer_family')
+
     def test_summary_metadata_not_executed_and_receipt_bound(self):
         node = '''<script>var node1 = {};
 node1['text'] = "요약정보";

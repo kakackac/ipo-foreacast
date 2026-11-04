@@ -2,6 +2,7 @@
 import hashlib
 import json
 import re
+from collections import Counter
 from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
@@ -40,6 +41,9 @@ def public_financial_section(dart, receipt, corp_name, cache_dir, corp_code=None
     path = Path(cache_dir) / f"{receipt}.json"
     if path.exists():
         payload = json.loads(path.read_text())
+        if (corp_code is not None and payload.get('official_corp_code') is not None
+                and str(corp_code) != payload['official_corp_code']):
+            raise RuntimeError('financial_disclosure_cache_corp_code_mismatch')
         issuer_matches = issuer_name(payload.get("issuer", "")) == issuer_name(corp_name)
         identity_matches = corp_code is not None and payload.get("official_corp_code") == str(corp_code)
         date_matches = (published is None or payload.get("official_publication_date") == str(published)[:10]
@@ -95,11 +99,27 @@ ACCOUNTS = {
     "자산총계": "total_assets", "부채총계": "total_liabilities", "자본총계": "equity",
     "주당순이익원": "eps", "기본주당순이익원": "eps",
     "당분기순이익": "net_income", "당기순손익손실": "net_income",
+    "영업이익영업손실": "operating_income", "당기순이익당기순손실": "net_income",
 }
 
 
 def account_name(value):
     return ACCOUNTS.get(clean(re.sub(r"^\s*(?:[IVX]+|\d+)[.)]\s*", "", value)))
+
+
+def financial_table_document(html, soup=None):
+    """Keep single-cell unit/heading tables in the following table's context."""
+    soup = soup if soup is not None else BeautifulSoup(html, "html.parser")
+    for table in list(soup.find_all("table")):
+        if table.find("table") is not None:
+            # Layout wrappers are not financial grids. Preserve their inner tables.
+            table.unwrap()
+        elif (len(table.find_all(["td", "th"])) == 1
+              and re.search(r"단위\s*[:：]|요약\s*(?:연결|별도)?\s*재무", table.get_text(" ", strip=True))):
+            paragraph = soup.new_tag("p")
+            paragraph.string = table.get_text(" ", strip=True)
+            table.replace_with(paragraph)
+    return str(soup)
 
 
 def income_period(table, first_account, row_id, column, year):
@@ -123,17 +143,19 @@ def income_period(table, first_account, row_id, column, year):
     return False, period
 
 
-def parse_disclosure_financials(html, corp_code, receipt, published, source_url):
+def parse_disclosure_financials(html, corp_code, receipt, published, source_url, diagnostics=None):
     """Require issuer summary scope, annual periods, IFRS, explicit monetary units."""
     parser = _TableRowParser()
-    parser.feed(html)
+    soup = BeautifulSoup(html, "html.parser")
+    narrative = soup.get_text(" ", strip=True)
+    parser.feed(financial_table_document(html, soup))
     scope, scale, rows = None, None, []
     standards = set()
     scope_standard = None
     term_years = {}
+    rejected = Counter()
     # This is an affirmative preparation statement, not a generic IFRS mention.
-    narrative = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
-    framework = re.search(r"(?:연결)?재무제표는[^.。]{0,180}?한국채택국제회계기준(?:\([^)]*\))?에\s*따라\s*작성(?:되었|하였|하고)", narrative)
+    framework = re.search(r"(?:연결)?재무제표는[^.。]{0,180}?한국채택국제회계기준(?:\([^)]*\))?\s*(?:작성기준)?에\s*따라\s*작성(?:되었|됐|하였|하고)", narrative)
     framework_evidence = framework.group(0) if framework else None
     for table in parser.tables:
         for row in table:
@@ -144,16 +166,21 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url)
     digest = hashlib.sha256(html.encode()).hexdigest()
     for table_id, (context, table) in enumerate(zip(parser.table_contexts, parser.tables)):
         heading = clean(context)
+        scope_headings = list(re.finditer(r"(?:연결|별도)?요약(?:연결|별도)?재무(?:정보|제표)", heading))
+        if scope_headings:
+            # A preceding CFS footnote must not override the next OFS heading.
+            heading = heading[scope_headings[-1].start():]
         boundary = bool(re.search(r"(?:연결대상|회계정책|중단영업|[2345](?:연결)?재무제표)", heading))
         new_scope = False
         if ("요약연결재무정보" in heading or "요약연결재무제표" in heading
-                or "연결요약재무정보" in heading):
+                or "연결요약재무정보" in heading or "연결요약재무제표" in heading):
             scope = "CFS"
             new_scope = True
-        elif "요약별도재무정보" in heading or "별도재무제표" in heading and not boundary:
+        elif ("요약별도재무정보" in heading or "별도요약재무제표" in heading
+              or "별도재무제표" in heading and not boundary):
             scope = "OFS"
             new_scope = True
-        elif "요약재무정보" in heading:
+        elif "요약재무정보" in heading or "요약재무제표" in heading:
             scope = "CFS" if "연결재무제표" in heading else "OFS"
             new_scope = True
         elif boundary:
@@ -173,13 +200,19 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url)
         if unit:
             scale = {"백만원": 1_000_000, "천원": 1_000, "원": 1, "KRW": 1}[unit.group(1)]
         if scope is None or scale is None or len(table) < 4:
+            if len(table) >= 4:
+                rejected['summary_scope_unresolved' if scope is None else 'krw_unit_unverified'] += 1
             continue
         account_positions = [(i, r, account_name(r[0])) for i, r in enumerate(table) if r]
         account_positions = [(i, r, name) for i, r, name in account_positions if name]
         if len(account_positions) < 2:
             continue
         first_account = account_positions[0][0]
-        headers = table[:first_account]
+        data_start = next((i for i, row in enumerate(table[:first_account])
+                           if any(re.fullmatch(r"\(?-?\d[\d,]*(?:\.\d+)?\)?", cell.strip())
+                                  for cell in row[1:])
+                           and clean(row[0]) not in {"구분", "기간", "사업연도"}), first_account)
+        headers = table[:data_start]
         adjacent = ""
         if table_id + 1 < len(parser.tables):
             adjacent = parser.table_contexts[table_id + 1].split("2. 연결재무제표")[0]
@@ -193,7 +226,8 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url)
             if not years:
                 term = re.search(r"제\s*(\d+)\s*기", header)
                 years = term_years.get(str(int(term[1])), set()) if term else set()
-            if len(years) != 1 or re.search(r"분기|반기|잠정|추정|예상|가결산", header):
+            if len(years) != 1 or re.search(r"분기|반기|잠정|추정|예상|가결산|수정전|수정후", header):
+                rejected['annual_period_unresolved_or_not_annual'] += 1
                 continue
             if re.search(r"설립\s*전|분할\s*전|사업부|carve\s*out", header, re.I):
                 continue
@@ -210,12 +244,15 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url)
             if pd.Timestamp(f"{year}-12-31") >= pd.Timestamp(published).tz_localize(None):
                 continue
             if "KGAAP" in clean(header):
+                rejected['explicit_gaap_not_ifrs'] += 1
                 continue
             if scope_standard == "K-GAAP" and "KIFRS" not in clean(header):
+                rejected['explicit_gaap_not_ifrs'] += 1
                 continue
             if "KIFRS" in clean(header) or table_ifrs or scope_standard == "K-IFRS" or framework_evidence:
                 standards.add(year)
             if year not in standards:
+                rejected['accounting_basis_unverified'] += 1
                 continue
             for row_id, row, account in account_positions:
                 if len(row) <= column:
@@ -240,10 +277,19 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url)
                              "table_id": table_id, "row_id": row_id, "column_id": column,
                              "period_name": period or header, "accounting_standard": "K-IFRS"})
                 rows[-1]["accounting_standard_evidence"] = framework_evidence or header + adjacent
+    if diagnostics is not None:
+        diagnostics.update(tables=len(parser.tables), extracted_accounts=len(rows),
+                           document_sha256=digest, source_url=source_url, receipt=receipt,
+                           absence_confirmed=False,
+                           reason="annual_accounts_extracted" if rows else "annual_summary_format_or_basis_unverified")
+        diagnostics['rejected_table_or_column_counts'] = dict(rejected)
+        diagnostics['selected_document_explicit_summary_absence'] = bool(
+            not rows and re.search(r'요약\s*재무정보\s*(?:당사는\s*)?해당사항\s*없', narrative[:2000]))
     return pd.DataFrame(rows)
 
 
-def collect_disclosure_financials(dart, raw_dir, event_id, corp_code, corp_name, cutoff, lineage=None):
+def collect_disclosure_financials(dart, raw_dir, event_id, corp_code, corp_name, cutoff, lineage=None,
+                                 diagnostics=None):
     lineage_path = Path(raw_dir) / "dart_disclosure_lineage.parquet"
     if lineage is None:
         if not lineage_path.exists():
@@ -273,7 +319,28 @@ def collect_disclosure_financials(dart, raw_dir, event_id, corp_code, corp_name,
     payload = public_financial_section(dart, receipt, corp_name, Path(raw_dir) / "dart_ipo_financial_sections",
                                        corp_code=corp_code, published=pd.Timestamp(chosen.rcept_dt).date())
     if payload.get("status") != "official_section_downloaded":
+        if diagnostics is not None:
+            diagnostics.update(receipt=receipt, reason=payload.get('status'), absence_confirmed=False)
         return pd.DataFrame(), payload.get("status", "financial_source_unverified")
+    identity = {'document_sha256': payload['sha256'], 'corp_code': str(corp_code),
+                'published': str(pd.Timestamp(chosen.rcept_dt).date()),
+                'parser_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+    cache_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    cache = Path(raw_dir) / 'dart_financial_parsed' / f'{receipt}_{cache_id}.json'
+    if cache.exists():
+        saved = json.loads(cache.read_text())
+        records_hash = hashlib.sha256(json.dumps(saved['records'], sort_keys=True).encode()).hexdigest()
+        if saved['identity'] != identity or records_hash != saved['records_sha256']:
+            raise RuntimeError('parsed_financial_cache_integrity_failed')
+        result = pd.DataFrame(saved['records'])
+        if diagnostics is not None: diagnostics.update(saved['diagnostics'])
+        return result, saved['status']
+    details = {}
     result = parse_disclosure_financials(payload["html"], corp_code, receipt,
-                                        pd.Timestamp(chosen.rcept_dt).date(), payload["source_url"])
-    return result, "official_annual_financial_tables_found" if not result.empty else "annual_financial_table_format_unhandled"
+                                        pd.Timestamp(chosen.rcept_dt).date(), payload["source_url"], details)
+    status = "official_annual_financial_tables_found" if not result.empty else "annual_financial_table_format_unhandled"
+    records = json.loads(result.to_json(orient='records'))
+    atomic_json(cache, {'identity': identity, 'records': records, 'diagnostics': details, 'status': status,
+                       'records_sha256': hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()})
+    if diagnostics is not None: diagnostics.update(details)
+    return result, status

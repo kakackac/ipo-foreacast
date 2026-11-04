@@ -40,6 +40,27 @@ class DisclosureFinancialTests(unittest.TestCase):
         self.assertEqual(result['operating_margin'], -.05)
         self.assertEqual(result['debt_ratio'], .5)
 
+    def test_unit_in_separate_one_cell_table_is_not_lost(self):
+        html = '1. 요약재무정보' + table([['(단위: 백만원)']]) + table(summary())
+        self.assertEqual(summarize_asof(parse(html), '12345678', '2023-04-01')['revenue'], 1_000_000_000)
+
+    def test_numeric_non_total_accounts_are_not_part_of_year_header(self):
+        rows = summary()
+        rows.insert(2, ['유동자산', '2019'])
+        self.assertEqual(set(parse('1. 요약재무정보 (단위: 원)' + table(rows)).year), {2022})
+
+    def test_previous_cfs_footnote_cannot_change_next_ofs_scope(self):
+        html = '1. 요약연결재무정보 (단위: 원)' + table(summary())
+        html += '요약연결재무제표는 한국채택국제회계기준에 따라 작성되었습니다. 나. 요약별도재무정보 (단위: 원)'
+        html += table(summary())
+        frame = parse(html)
+        self.assertEqual(set(frame.loc[frame.table_id.eq(0), 'fs_div']), {'CFS'})
+        self.assertEqual(set(frame.loc[frame.table_id.eq(1), 'fs_div']), {'OFS'})
+
+    def test_summary_statement_heading_is_not_dropped_when_trimming_scope(self):
+        frame = parse('1. 요약재무정보 가. 요약재무제표(K-IFRS) (단위: 원)' + table(summary()))
+        self.assertEqual(len(frame), 6)
+
     def test_income_period_overrides_annual_balance_header(self):
         frame = parse('1. 요약재무정보 (단위: 원)' + table(summary(period='2022.01.01~2022.09.30')))
         self.assertEqual(set(frame.account_name_en), {'total_assets', 'total_liabilities', 'equity'})

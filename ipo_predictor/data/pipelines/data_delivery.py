@@ -36,7 +36,7 @@ def publish(processed_dir, financial_repair, research_dataset):
     evidence = pd.read_parquet(research / 'evidence.parquet')
     if data.event_id.duplicated().any():
         raise RuntimeError('data_delivery_duplicate_event')
-    used = evidence[evidence.used.eq(True)].merge(data[['event_id', 'prediction_at']], on='event_id',
+    used = evidence[evidence.used.eq(True) & evidence.event_id.isin(data.event_id)].merge(data[['event_id', 'prediction_at']], on='event_id',
                                                 how='left', validate='many_to_one')
     available = pd.to_datetime(used.available_at, utc=True, errors='coerce')
     cutoffs = pd.to_datetime(used.prediction_at, utc=True, errors='coerce')

@@ -51,9 +51,12 @@ def parse_viewer(content, receipt, corp_code, as_of):
         raise ValueError("No eligible registration")
     latest_day = max(r["published_date"] for r in eligible)
     latest = sorted({r["rcept_no"] for r in eligible if r["published_date"] == latest_day})
+    withdrawn = any(re.search(r"철회|취소", r['label']) and latest_day <= r['published_date'] <= as_of
+                    for r in family)
     return {"corp_code": corp_code, "rcept_no": receipt, "family": family,
             "latest_registration_candidates": latest,
-            "status": "calendar_receipt_latest_in_viewer_family" if latest == [receipt] else "newer_or_ambiguous_registration_review",
+            "status": ("withdrawn_or_cancelled_family" if withdrawn else
+                       "calendar_receipt_latest_in_viewer_family" if latest == [receipt] else "newer_or_ambiguous_registration_review"),
             "model_eligible": False}
 
 

@@ -1,6 +1,7 @@
 """과거 IPO의 DART 공시, KRX 실적, 시장 데이터를 하나의 학습셋으로 만든다."""
 
 import json
+import hashlib
 import logging
 from pathlib import Path
 from typing import Any
@@ -787,6 +788,54 @@ class HistoricalIPOPipeline:
         # Parquet은 같은 열의 혼합 자료형을 저장할 수 없으므로 여기서 통일한다.
         prices["listing_date"] = pd.to_datetime(prices["listing_date"], errors="coerce")
         return prices.drop_duplicates(["ticker", "listing_date"], keep="last")
+
+    def collect_snapshot_prices(self, snapshot_path: Path, historical_price_cache: Path | None = None):
+        """Incremental sidecar collection; never replace the historical event master."""
+        from data.pipelines.financial_history import atomic_json
+        snapshot_path = Path(snapshot_path)
+        source_hash = hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
+        events = pd.read_parquet(snapshot_path)
+        if not {'event_id', 'ticker', 'listing_date', 'market'}.issubset(events) or events.event_id.duplicated().any():
+            raise ValueError('snapshot_event_identity_invalid')
+        if self._listing_key(events).duplicated().any():
+            raise ValueError('snapshot_trading_identity_ambiguous')
+        if historical_price_cache is not None and not (self.raw_dir / 'ipo_listing_prices.parquet').exists():
+            original = pd.read_parquet(historical_price_cache)
+            original.to_parquet(self.raw_dir / 'ipo_listing_prices.parquet', index=False)
+        now = pd.Timestamp.now(tz='Asia/Seoul')
+        listing = pd.to_datetime(events.listing_date, errors='coerce')
+        if listing.isna().any(): raise ValueError('snapshot_listing_date_invalid')
+        due = listing.dt.tz_localize('Asia/Seoul') + pd.Timedelta(hours=21)
+        selected = events.loc[due.le(now) & events.market.isin(['KOSPI', 'KOSDAQ'])].copy()
+        report = {'snapshot_sha256': source_hash, 'events': len(events), 'due_events': len(selected),
+                  'not_due_or_unsupported': len(events)-len(selected), 'started_at': now.isoformat(),
+                  'scope': 'snapshot_price_sidecar_only_not_dart_or_model_integration',
+                  'production_files_replaced': False, 'training_executed': False}
+        try:
+            if selected.empty:
+                report.update(status='complete', result_rows=0, validation_counts={})
+                return report
+            if not self.krx.is_configured:
+                report['status'] = 'credentials_missing'
+                return report
+            prices = self._collect_listing_prices(selected)
+            self._checkpoint_listing_prices(self._load_cached_frame('ipo_listing_prices.parquet'), prices.to_dict('records'))
+            attached = self._attach_prices(selected, prices)
+            audit = self._build_listing_price_audit(selected, prices)
+            attached = self._attach_price_resolution(attached, audit)
+            audit.to_parquet(self.raw_dir / 'krx_listing_price_audit.parquet', index=False)
+            attached.to_parquet(self.raw_dir / 'events_with_prices.parquet', index=False)
+            report.update(status='complete', result_rows=len(attached),
+                          validation_counts=attached.price_resolution_status.value_counts(dropna=False).to_dict())
+            return report
+        except (RuntimeError, ConnectionError, TimeoutError) as exc:
+            report.update(status='partial_failure_retryable', error_type=type(exc).__name__)
+            return report
+        finally:
+            report['finished_at'] = pd.Timestamp.now(tz='Asia/Seoul').isoformat()
+            if hashlib.sha256(snapshot_path.read_bytes()).hexdigest() != source_hash:
+                raise RuntimeError('snapshot_changed_during_collection')
+            atomic_json(self.raw_dir / 'snapshot_prices_manifest.json', report)
 
     def _checkpoint_listing_prices(self, cached: pd.DataFrame, records: list[dict]) -> None:
         """Preserve previous dates and atomically checkpoint completed requests only."""
