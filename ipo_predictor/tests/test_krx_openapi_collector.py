@@ -1,6 +1,6 @@
 import json
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pandas as pd
 import requests
@@ -23,6 +23,28 @@ def _html_response(content: str):
 
 
 class KRXOpenAPICollectorTests(unittest.TestCase):
+    def test_placeholder_unicode_and_control_header_values_fail_before_request(self):
+        for key in ('실제_KRX_인증키', 'YOUR_KRX_API_KEY', 'abc\ndef', 'abc def', 'abc\u00a0def'):
+            session = Mock()
+            collector = KRXCollector(api_key=key, session=session)
+            self.assertEqual(collector.credential_status, 'credentials_invalid')
+            with patch('data.collectors.krx_collector.time.sleep') as sleep:
+                with self.assertRaises(RuntimeError) as caught:
+                    collector._get_daily_records('sto/ksq_bydd_trd', '20260910')
+                self.assertNotIn(key, str(caught.exception))
+                sleep.assert_not_called()
+            session.get.assert_not_called()
+
+    def test_transport_errors_do_not_echo_credentials(self):
+        secret = 'private-test-token'
+        session = Mock()
+        session.get.side_effect = requests.ConnectionError(secret)
+        collector = KRXCollector(api_key=secret, session=session)
+        with patch('data.collectors.krx_collector.time.sleep'), self.assertLogs('data.collectors.krx_collector', level='WARNING') as logs:
+            with self.assertRaises(RuntimeError) as caught:
+                collector._get_daily_records('sto/ksq_bydd_trd', '20260910')
+        self.assertNotIn(secret, str(caught.exception) + str(logs.output))
+
     def test_listing_price_uses_auth_header_and_full_issue_code(self):
         session = Mock()
         session.get.return_value = _response({"OutBlock_1": [{

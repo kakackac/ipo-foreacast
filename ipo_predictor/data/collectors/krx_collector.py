@@ -69,10 +69,21 @@ class KRXCollector:
     @property
     def is_configured(self) -> bool:
         """KRX OpenAPI 키가 준비됐는지 반환한다."""
-        return bool(self.api_key)
+        return self.credential_status == 'configured'
+
+    @property
+    def credential_status(self) -> str:
+        if not self.api_key:
+            return 'credentials_missing'
+        if (not re.fullmatch(r'[!-~]+', self.api_key)
+                or self.api_key.upper() in {'YOUR_KRX_API_KEY', 'YOUR_API_KEY'}):
+            return 'credentials_invalid'
+        return 'configured'
 
     def _get_daily_records(self, endpoint: str, bas_dd: str) -> list[dict[str, Any]]:
         """한 기준일의 KRX OpenAPI 응답을 표준 레코드 목록으로 바꾼다."""
+        if self.credential_status == 'credentials_invalid':
+            raise RuntimeError('KRX_API_KEY 설정 오류: 안내 문구가 아닌 발급된 인증키를 입력하세요. 키 값은 출력하지 않습니다.')
         if not self.is_configured:
             raise RuntimeError("KRX_API_KEY를 설정한 뒤 KRX OpenAPI 수집을 실행하세요.")
         if self.request_count >= MAX_REQUESTS_PER_RUN:
@@ -102,14 +113,14 @@ class KRXCollector:
                 delay = RETRY_BACKOFF_SECONDS * attempt
                 logger.warning(
                     "KRX OpenAPI 일시 오류, %.1f초 후 재시도 (%d/%d): %s %s (%s)",
-                    delay, attempt, MAX_RETRIES, endpoint, bas_dd, exc,
+                    delay, attempt, MAX_RETRIES, endpoint, bas_dd, type(exc).__name__,
                 )
                 time.sleep(delay)
 
         if payload is None:
             raise RuntimeError(
-                f"KRX OpenAPI 요청 실패 ({endpoint}, {bas_dd}, {MAX_RETRIES}회 재시도): {last_error}"
-            ) from last_error
+                f"KRX OpenAPI 요청 실패 ({endpoint}, {bas_dd}, {MAX_RETRIES}회 재시도): {type(last_error).__name__}"
+            ) from None
 
         if self.request_delay:
             time.sleep(self.request_delay)

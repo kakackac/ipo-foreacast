@@ -6,9 +6,21 @@ from unittest.mock import Mock
 import pandas as pd
 
 from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline
+from data.collectors.krx_collector import KRXCollector
 
 
 class SnapshotPriceTests(unittest.TestCase):
+    def test_invalid_key_is_recorded_as_configuration_error_not_retryable_network(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); snapshot = root/'events.parquet'
+            pd.DataFrame([self.event()]).to_parquet(snapshot,index=False)
+            session = Mock()
+            collector = KRXCollector(api_key='실제_KRX_인증키',session=session)
+            pipeline = HistoricalIPOPipeline(krx_collector=collector,raw_dir=root/'out',processed_dir=root/'proc')
+            result = pipeline.collect_snapshot_prices(snapshot)
+            self.assertEqual(result['status'],'credentials_invalid')
+            session.get.assert_not_called()
+
     def event(self, ticker='123450', day='2020-01-02'):
         return {'event_id': ticker+'|'+day, 'ticker': ticker, 'listing_date': day,
                 'market': 'KOSDAQ', 'corp_name': '테스트', 'event_class': 'general_ipo'}

@@ -816,7 +816,8 @@ class HistoricalIPOPipeline:
                 report.update(status='complete', result_rows=0, validation_counts={})
                 return report
             if not self.krx.is_configured:
-                report['status'] = 'credentials_missing'
+                status = getattr(self.krx, 'credential_status', 'credentials_missing')
+                report['status'] = status if status in ('credentials_missing', 'credentials_invalid') else 'credentials_missing'
                 return report
             prices = self._collect_listing_prices(selected)
             self._checkpoint_listing_prices(self._load_cached_frame('ipo_listing_prices.parquet'), prices.to_dict('records'))

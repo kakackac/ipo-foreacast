@@ -2,6 +2,8 @@
 
 ## 최신 판정: 2026-11-04 데이터·연결 우선 복구
 
+후속 인증 설정 오류: 사용자 실행에서 한글 안내용 키가 HTTP 헤더에 들어가 latin-1 인코딩 실패를 일으켰다. 실제 인증 API 응답이나 가격 미존재가 아니다. 키를 출력하지 않는 사전 검사와 `credentials_invalid` 상태를 추가했고 네트워크 재시도 전에 차단한다. 로그의 39행은 캐시 재사용/보존 건수이며 신규 수집 성공 건수로 세지 않는다. 기존 데이터 버전/모델은 변경하지 않았다.
+
 이 절이 아래 모델 실험 및 이전 재무 처리 기록보다 최신이다. 모델 비교·재학습·성능 산출은 하지 않았다. 원본 features와 기존 모델/실험은 보존했다. 코드 수정, 원문 표본 검증, 전체 처리, 운영 대기를 같은 의미의 '완료'로 쓰지 않는다.
 
 ### 완료 수준
@@ -91,7 +93,8 @@ python ipo_predictor/pipeline.py --mode collect-financials --start-year 2015 --e
 미수집 공시 연결을 공개 DART에서 재개할 때만 마지막 `--connection-cached-only`를 뺀다. 통신 장애가 계속되면 재호출을 반복하지 말고 대기한다. 최신 가격에는 KRX 키가 필요하며, 개인 로그인 정보가 아니라 실행 셸의 비밀 환경변수로만 설정한다:
 
 ```bash
-export KRX_API_KEY='실제_KRX_인증키'
+read -s "KRX_API_KEY?발급받은 KRX 인증키를 입력하고 Enter: "
+export KRX_API_KEY
 python ipo_predictor/pipeline.py --mode collect-snapshot-prices --event-snapshot ipo_predictor/data/processed/event_snapshots/20261104_classification_v3/events.parquet --snapshot-output ipo_predictor/data/raw/event_snapshots/20261104/prices
 ```
 
