@@ -24,7 +24,7 @@
 | 피처 엔지니어링 | `ipo_predictor/data/processors/feature_engineer.py` | 구현됨. 결측/출처/공개 시점 확인 필요 |
 | 재무 복구 | `ipo_predictor/data/pipelines/disclosure_financials.py` | 실제 전체 표본 처리, 일부 미지원/검토 상태 유지 |
 | 연구 데이터 버전 | `ipo_predictor/data/pipelines/data_delivery.py` | 해시·중복·시점 검사 후 연결. 학습/배포 승인 아님 |
-| 예측 모델 | `ipo_predictor/models/baseline/gradient_boost_model.py` | 연구용 Open/Close 분리 구현, 출시 미승인 |
+| 예측 모델 | `ipo_predictor/models/training/listing_eve.py` | 시초가/종가 Ridge 후보 실제 학습·저장 완료, 시간순 개발 검증 및 출시 미승인 |
 | 백테스터·오차 분석 | `ipo_predictor/models/evaluation/` | 구현됨. 과거 평가 소진 및 전향 검증 조건 확인 필요 |
 | 예측 API | `ipo_predictor/api/server.py` | 승인 모델이 없으면 차단. 서비스 전체 백엔드와 별개 |
 | Django 서비스 | `backend/` | 계정·관심종목·내부 알림·검토형 게시판·관리자 기본 API, 실결제/외부 푸시/운영 배포 미완료 |
