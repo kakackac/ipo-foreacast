@@ -31,13 +31,14 @@ class EventDisclosureBundleTests(unittest.TestCase):
             result[field + '_parse_evidence'] = str(value) if value is not None else None
         return result
 
-    def connect(self, primary, extra=None, extra_meta=None, failure=None):
+    def connect(self, primary, extra=None, extra_meta=None, failure=None, primary_scope=None):
         extra_meta = extra_meta or self.extra_meta
         event = SimpleNamespace(ticker='123456', market='KOSDAQ', listing_date='2020-02-01', offering_price=1000)
         company_url = 'https://dart.fss.or.kr/dsae001/selectPopup.ax?' + urlencode({'selectKey': '12345678'})
         primary_url = 'https://dart.fss.or.kr/dsaf001/main.do?rcpNo=' + self.primary_meta['rcept_no']
         extra_url = 'https://dart.fss.or.kr/dsaf001/main.do?rcpNo=' + extra_meta['rcept_no']
         proof = {'corp_code': '12345678', 'family': [self.primary_meta], 'source_url': primary_url, 'sections': []}
+        if primary_scope is not None: proof['content_scope']=primary_scope
         extra_proof = {'corp_code': '12345678', 'family': [extra_meta], 'source_url': extra_url, 'sections': []}
         dart = Mock()
         dart.session.get.side_effect = AssertionError('network is forbidden')
@@ -111,25 +112,33 @@ class EventDisclosureBundleTests(unittest.TestCase):
         event=SimpleNamespace(event_id='one',ticker='123456',corp_name='Historical',listing_date='2020-02-01')
         record=source_record(event,values,meta,proof,raw)
         self.assertEqual(record['lockup_commitment_ratio'],values['lockup_commitment_ratio'])
-        self.assertEqual(record['lockup_rcept_no'],self.primary_meta['rcept_no'])
+        self.assertEqual(record['lockup_rcept_no'],self.extra_meta['rcept_no'])
+
+    def test_notice_before_after_price_is_not_the_complete_current_statement(self):
+        values,_,proof,_,_,_=self.connect(self.document(offering_price=500),self.document(),
+            primary_scope='partial_or_terms_notice')
+        self.assertEqual(values['offering_price'],1000)
+        self.assertEqual(proof['field_sources']['offering_price']['receipt'],self.extra_meta['rcept_no'])
+        with self.assertRaises(ValueError):
+            self.connect(self.document(),primary_scope='partial_or_terms_notice')
 
     def test_incomplete_documents_never_form_cross_source_pair(self):
         values, _, proof, _, _, _ = self.connect(
             self.document(**self.structure(new=100)), self.document(**self.structure(secondary=50)))
         self.assertIsNone(values['new_shares'])
         self.assertIsNone(values['secondary_shares'])
-        self.assertEqual(proof['resolved_structure']['offering_structure_resolution_status'], 'no_complete_verified_source')
+        self.assertEqual(proof['resolved_structure']['offering_structure_resolution_status'], 'latest_partial_structure_requires_review')
         self.assertNotIn('secondary_shares', proof['field_sources'])
 
-    def test_partial_or_unverified_supplement_does_not_replace_complete_primary(self):
+    def test_new_partial_or_unverified_structure_cannot_revive_old_pair(self):
         for fields in [self.structure(secondary=50),
                        self.structure(new=200, secondary=50) | {'secondary_shares_parser_validation_status': 'candidate_rejected'},
                        self.structure(new=200, secondary=50) | {'new_shares_parse_method': None}]:
             with self.subTest(fields=fields):
                 values, _, proof, _, _, _ = self.connect(
                     self.document(**self.structure(new=100, secondary=0)), self.document(**fields))
-                self.assertEqual((values['new_shares'], values['secondary_shares']), (100, 0))
-                self.assertEqual(proof['resolved_structure']['offering_structure_rcept_no'], self.primary_meta['rcept_no'])
+                self.assertEqual((values['new_shares'], values['secondary_shares']), (None, None))
+                self.assertIsNone(proof['resolved_structure']['offering_structure_rcept_no'])
 
     def test_newer_complete_structure_wins_and_older_supplement_does_not(self):
         primary = self.document(**self.structure(new=100, secondary=0))
@@ -205,15 +214,16 @@ class EventDisclosureBundleTests(unittest.TestCase):
         primary = self.document(**self.structure(new=100, secondary=0))
         extra = self.document(**self.structure(new=200, secondary=50), public_float_ratio_disclosed=.3,
                               public_float_parse_method='disclosed_public_float_ratio_direct_context')
-        for document, metadata in [(extra, {**self.extra_meta, 'rcept_dt': '2020-01-31'}),
-                                   ({**extra, 'offering_price': 999}, self.extra_meta)]:
+        for document, metadata in [(extra, {**self.extra_meta, 'rcept_dt': '2020-01-31'})]:
             with self.subTest(metadata=metadata, price=document['offering_price']):
                 values, _, proof, _, _, _ = self.connect(primary, document, metadata)
                 self.assertEqual((values['new_shares'], values['secondary_shares']), (100, 0))
                 self.assertIsNone(values['public_float_ratio_disclosed'])
                 self.assertNotIn('supplementary', proof)
+        with self.assertRaisesRegex(ValueError,'krx_mismatch'):
+            self.connect(primary,{**extra,'offering_price':999})
 
-    def test_institutional_raw_values_approval_and_primary_precedence_are_unchanged(self):
+    def test_latest_complete_institutional_source_wins_without_mutating_raw_values(self):
         primary = self.document(institutional_demand_ratio=500, institutional_demand_parser_validation_status='candidate_rejected',
                                 institutional_demand_rule_id='rejected', lockup_commitment_ratio=.1,
                                 lockup_parser_validation_status='structurally_verified', lockup_rule_id='aggregate')
@@ -224,12 +234,12 @@ class EventDisclosureBundleTests(unittest.TestCase):
         self.assertEqual(values['institutional_demand_ratio'], 600)
         self.assertEqual(raw['institutional_demand_ratio'], 500)
         self.assertEqual(raw['institutional_demand_parser_validation_status'], 'candidate_rejected')
-        self.assertEqual(values['lockup_commitment_ratio'], .1)
+        self.assertEqual(values['lockup_commitment_ratio'], .3)
         self.assertEqual(proof['field_sources']['institutional_demand_ratio']['receipt'], self.extra_meta['rcept_no'])
         primary['institutional_demand_parser_validation_status'] = 'structurally_verified'
         values, _, proof, _, _, _ = self.connect(primary, extra)
-        self.assertEqual(values['institutional_demand_ratio'], 500)
-        self.assertNotIn('institutional_demand_ratio', proof['field_sources'])
+        self.assertEqual(values['institutional_demand_ratio'], 600)
+        self.assertEqual(proof['field_sources']['institutional_demand_ratio']['receipt'],self.extra_meta['rcept_no'])
 
     def test_bundle_scalar_normalization_is_strict_json_and_preserves_explicit_nulls(self):
         bundle = _bundle_scalars({'date': pd.Timestamp('2020-01-02'), 'missing': pd.NA,

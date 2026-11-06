@@ -74,6 +74,14 @@ class FinancialHistoryTests(unittest.TestCase):
         self.assertEqual(result['operating_margin'], -.05)
         self.assertEqual(json.loads(result['financial_feature_provenance'])['operating_margin']['business_years'], [2022])
 
+    def test_null_unit_column_from_mixed_sources_cannot_bypass_balance_integrity(self):
+        frame=self.history().iloc[:3].copy()
+        frame['account_name_en']=['total_assets','total_liabilities','equity']
+        frame['amount']=[100.,200.,300.]
+        frame['unit_multiplier']=float('nan')
+        result=summarize_asof(frame,'12345678','2023-04-01')
+        self.assertEqual(result['financial_time_validation_status'],'no_verified_pre_cutoff_krw_annual_values')
+
     def test_future_corrected_receipt_wrong_company_and_currency_are_excluded(self):
         for field, value in [("published_at", "2023-05-01"), ("corp_code", "87654321"),
                              ("currency", "USD"), ("publication_verified", False)]:
@@ -88,6 +96,15 @@ class FinancialHistoryTests(unittest.TestCase):
         conflict["amount"] = 2000
         summary = summarize_asof(pd.concat([frame, conflict]), "12345678", "2023-04-01")
         self.assertNotIn("operating_margin", summary)
+
+    def test_date_only_and_explicit_kst_timestamp_have_same_availability(self):
+        for published in ['2023-03-15','2023-03-15T23:10:00+09:00']:
+            frame=self.history();frame['published_at']=published
+            self.assertNotIn('revenue',summarize_asof(frame,'12345678','2023-03-15 23:59'))
+            result=summarize_asof(frame,'12345678','2023-03-16 00:01')
+            self.assertIn('revenue',result)
+            self.assertEqual(json.loads(result['financial_feature_provenance'])['revenue']['available_at'],
+                             '2023-03-16T00:00:00+09:00')
 
     def test_three_year_growth_requires_exact_year_and_same_basis(self):
         frame = self.history()

@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 12
+DEMAND_PARSER_VERSION = 13
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -765,13 +765,15 @@ class DARTCollector:
             r"\s*[:：(]?\s*([0-9][0-9,]*)\s*(?:원|KRW)?\s*[~～]"
             r"\s*([0-9][0-9,]*)\s*(?:원|KRW)"
         )
-        bands = {(int(m[1].replace(",", "")), int(m[2].replace(",", "")))
-                 for m in re.finditer(band_pattern, text)}
+        band_matches = list(re.finditer(band_pattern,text))
+        bands = {(int(m[1].replace(",", "")), int(m[2].replace(",", ""))) for m in band_matches}
         if len(bands) == 1:
             low, high = next(iter(bands))
             if 0 < low < high:
                 result.update(price_band_low=low, price_band_high=high,
-                              price_band_validation_status="direct_currency_band")
+                              price_band_validation_status="direct_currency_band",
+                              price_band_parse_method="direct_currency_range_v1",
+                              price_band_parse_evidence=json.dumps([m.group(0) for m in band_matches],ensure_ascii=False))
         elif len(bands) > 1:
             result["price_band_validation_status"] = "conflicting_bands_review_required"
 
@@ -1440,10 +1442,16 @@ class DARTCollector:
         column = columns[0]
         quantities = {}
         dash_rows = []
+        total_label_alias = False
         for i, row in enumerate(table[start:], start):
             if not row or column >= len(row):
                 return None
             label = re.sub(r"\s+", "", row[0])
+            if label == '계':
+                if application_total is None:
+                    return None
+                label = '합계'
+                total_label_alias = True
             if not re.fullmatch(r"\d+(?:개월|일)확약|미확약|확약없음|합계", label):
                 return None
             quantity = row[column].strip()
@@ -1485,6 +1493,7 @@ class DARTCollector:
                 inferred_total_unit_from_repeated_schema=inferred_header,
                 independently_disclosed_application_total=application_total,
                 dash_rows_reconciled_as_zero=dash_rows,
+                total_label_alias_reconciled=total_label_alias,
             ),
         }
 

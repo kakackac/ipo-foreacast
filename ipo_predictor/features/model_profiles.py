@@ -16,6 +16,7 @@ from features.source_contracts import (
     APPROVED_OFFERING_STRUCTURE_STATUSES,
     APPROVED_PUBLIC_FLOAT_STATUSES,
     APPROVED_UNDERWRITER_TIER_STATUSES,
+    APPROVED_PRICE_BAND_STATUSES,
 )
 
 
@@ -68,6 +69,14 @@ VERIFIED_OFFERING_PRICE_STATUSES = frozenset({
 })
 
 FEATURE_SOURCE_APPROVAL = {
+    # Existing heuristic values remain audit candidates until a real source
+    # contract is implemented. Optional NULLs do not require an approval label.
+    "major_shareholder_lockup_months": ("shareholder_lockup_validation_status", frozenset()),
+    "risk_factor_count": ("risk_factor_validation_status", frozenset()),
+    "offering_per": ("valuation_validation_status", frozenset()),
+    "per_vs_sector_median": ("valuation_validation_status", frozenset()),
+    "offering_price_band_position": ("price_band_validation_status", APPROVED_PRICE_BAND_STATUSES),
+    "band_exceeded": ("price_band_validation_status", APPROVED_PRICE_BAND_STATUSES),
     "float_share_ratio": (
         "float_share_validation_status",
         APPROVED_PUBLIC_FLOAT_STATUSES,
@@ -139,10 +148,8 @@ def stage_source_valid(features: pd.DataFrame, profile: PredictionProfile) -> pd
         if contract is None:
             continue
         status_column, approved_statuses = contract
-        if status_column not in features.columns:
-            return pd.Series(False, index=features.index, dtype=bool)
-        observed = pd.to_numeric(features[feature_name], errors="coerce").notna()
-        approved = features[status_column].fillna("").astype(str).isin(approved_statuses)
+        observed = pd.to_numeric(features.get(feature_name,pd.Series(index=features.index,dtype=float)), errors="coerce").notna()
+        approved = features.get(status_column,pd.Series("",index=features.index)).fillna("").astype(str).isin(approved_statuses)
         valid &= ~observed | approved
     return valid
 

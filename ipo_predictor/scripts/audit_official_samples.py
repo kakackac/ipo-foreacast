@@ -37,6 +37,7 @@ SAMPLES = {
     "maint_prospectus_2015": "20150331001027",
     "dypiston_prospectus_2017": "20171127000116",
     "maxst_prospectus_2021": "20210715000154",
+    "yas_correction_2017": "20170926000244",
 }
 
 
@@ -138,6 +139,11 @@ def main():
                                 "status": "source_access_failed", "error_type": type(exc).__name__})
                 continue
         body = body_path.read_text(encoding="utf-8")
+        reference = references.get(name)
+        view_evidence=None
+        if reference and reference.get('extraction_view')=='explicit_after_correction_v1':
+            from data.pipelines.correction_views import after_correction_view
+            body,view_evidence=after_correction_view(body)
         record = {
             "sample": name, "receipt": receipt, "source_url": url,
             "document_path": str(body_path), "selection": parameters,
@@ -147,8 +153,8 @@ def main():
             "status": "parsed_not_independently_approved",
             "offering": collector._parse_offering_html(body, receipt),
             "demand": collector._parse_demand_forecast_html(body, name),
+            "view_evidence": view_evidence,
         }
-        reference = references.get(name)
         record["comparison_failures"] = verify_record(record, reference) if reference else ["reference_missing"]
         record["status"] = "sample_passed" if not record["comparison_failures"] else "sample_failed"
         records.append(record)

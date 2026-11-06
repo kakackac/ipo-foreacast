@@ -170,9 +170,15 @@ def source_record(event, values, meta, proof, document):
     origins = proof.get('field_sources', {})
     price_receipt = origins.get('offering_price', {}).get('receipt', meta['rcept_no'])
     price_meta, price_doc = next((m,d) for m,d in documents if m['rcept_no'] == price_receipt)
+    def field_source(receipt):
+        bundle = proof if receipt==meta['rcept_no'] else proof.get('supplementary',{})
+        return {'url':bundle.get('source_url'),
+                'sha256':'|'.join(sorted(section['sha256'] for section in bundle.get('sections',[])))}
     record.update({key:value for key,value in price_doc.items() if key.startswith('offering_price')})
     record.update(offering_price=values['offering_price'],offering_price_rcept_no=price_receipt,
-                  offering_price_rcept_dt=pd.Timestamp(price_meta['rcept_dt']))
+                  offering_price_rcept_dt=pd.Timestamp(price_meta['rcept_dt']),
+                  offering_price_source_url=field_source(price_receipt)['url'],
+                  offering_price_source_sha256=field_source(price_receipt)['sha256'])
     for prefix, field in [('institutional', 'institutional_demand_ratio'), ('lockup', 'lockup_commitment_ratio')]:
         if values[field] is not None:
             receipt = origins.get(field, {}).get('receipt', meta['rcept_no'])
@@ -186,7 +192,18 @@ def source_record(event, values, meta, proof, document):
             record[prefix+'_validation_status'] = DART_STRUCTURAL_AGGREGATE_STATUS
             record[prefix+'_available_at'] = pd.Timestamp(selected_meta['rcept_dt'])
             record[prefix+'_source_url'] = origins.get(field, {}).get('source_url',proof.get('source_url'))
+            record[prefix+'_source_sha256'] = field_source(receipt)['sha256']
             record[prefix+'_source_scope'] = 'dart_lineage_aggregate_institutional'
+        else:
+            parser_prefix = 'institutional_demand_' if prefix=='institutional' else 'lockup_'
+            record.update({key:value for key,value in price_doc.items()
+                           if key.startswith(parser_prefix) and pd.api.types.is_scalar(value)})
+            record[field] = None
+            record[prefix+'_rcept_no'] = price_receipt
+            record[prefix+'_rcept_dt'] = pd.Timestamp(price_meta['rcept_dt'])
+            record[prefix+'_source_url'] = field_source(price_receipt)['url']
+            record[prefix+'_source_sha256'] = field_source(price_receipt)['sha256']
+            record[prefix+'_validation_status'] = 'dart_aggregate_value_not_verified'
     for group, field in [('price_band', 'price_band_low')]:
         if values[field] is None:
             continue
@@ -195,6 +212,8 @@ def source_record(event, values, meta, proof, document):
         selected_meta, selected_doc = next((m,d) for m,d in documents if m['rcept_no'] == receipt)
         record[group+'_rcept_no'] = receipt
         record[group+'_rcept_dt'] = pd.Timestamp(selected_meta['rcept_dt'])
+        record[group+'_source_url'] = field_source(receipt)['url']
+        record[group+'_source_sha256'] = field_source(receipt)['sha256']
         prefixes = ('price_band_',)
         record.update({k:v for k,v in selected_doc.items()
                        if k.startswith(prefixes) and pd.api.types.is_scalar(v)})

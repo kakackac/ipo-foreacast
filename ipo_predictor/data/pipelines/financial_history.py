@@ -46,6 +46,10 @@ def get_annual_history(dart, corp_code, listing_date, cache_dir, cached_only=Fal
                         and timedelta(0) <= age and (cached_only or age < timedelta(days=7))
                         and hashlib.sha256(body).hexdigest() == payload["sha256"]):
                     cached = pd.DataFrame(payload["records"])
+                    if not cached.empty:
+                        cached['source_collected_at']=cached.get('collected_at',payload['collected_at'])
+                        cached['source_sha256']=payload['sha256']
+                        cached['source_hash_scope']='normalized_official_api_records_cache'
             except (ValueError, KeyError, TypeError):
                 pass
         if cached is not None:
@@ -93,11 +97,15 @@ def get_annual_history(dart, corp_code, listing_date, cache_dir, cached_only=Fal
                         frame.loc[group.index, "missing_reason"] = None
                     else:
                         frame.loc[group.index, "missing_reason"] = "annual_receipt_not_verified_in_official_list"
+        if not frame.empty:frame['source_collected_at']=frame.get('collected_at',datetime.now(timezone.utc).isoformat())
         records = json.loads(frame.to_json(orient="records", date_format="iso"))
         payload = {"schema_version": CACHE_VERSION, "corp_code": corp_code, "year": year,
                    "collected_at": now.isoformat(), "records": records,
                    "sha256": hashlib.sha256(json.dumps(records, sort_keys=True, allow_nan=False).encode()).hexdigest()}
         atomic_json(path, payload)
+        if not frame.empty:
+            frame['source_sha256']=payload['sha256']
+            frame['source_hash_scope']='normalized_official_api_records_cache'
         frames.append(frame)
     return pd.concat([f for f in frames if not f.empty], ignore_index=True) if any(
         not f.empty for f in frames) else pd.DataFrame()
@@ -116,7 +124,12 @@ def summarize_asof(financials, corp_code, cutoff):
     cutoff = pd.Timestamp(cutoff)
     cutoff = cutoff.tz_localize("Asia/Seoul") if cutoff.tzinfo is None else cutoff.tz_convert("Asia/Seoul")
     frame = financials.copy()
-    dates = pd.to_datetime(frame.published_at, errors="coerce", utc=True)
+    def local_date(value):
+        date = pd.to_datetime(value, errors="coerce")
+        if pd.isna(date):
+            return pd.NaT
+        return date.tz_localize("Asia/Seoul") if date.tzinfo is None else date.tz_convert("Asia/Seoul")
+    dates = pd.to_datetime(frame.published_at.map(local_date), utc=True)
     # Public dates have no intraday publication time: permit only from the next local day.
     frame["available_at"] = dates.dt.tz_convert("Asia/Seoul").dt.normalize() + pd.Timedelta(days=1)
     frame["amount"] = pd.to_numeric(frame.amount, errors="coerce")
@@ -141,8 +154,15 @@ def summarize_asof(financials, corp_code, cutoff):
         if accounts:
             assets, liabilities, equity = (accounts.get(x) for x in ("total_assets", "total_liabilities", "equity"))
             if assets is not None and liabilities is not None and equity is not None:
-                scale = max(float(x.get("unit_multiplier", 1)) for x in (assets, liabilities, equity))
-                if abs(assets.amount - liabilities.amount - equity.amount) > max(2*scale, abs(assets.amount)*1e-6):
+                scales=[]
+                for entry in (assets,liabilities,equity):
+                    multiplier=entry.get('unit_multiplier')
+                    if pd.isna(multiplier) and entry.report_code=='11011':multiplier=1
+                    if pd.isna(multiplier) or not math.isfinite(float(multiplier)) or float(multiplier)<=0:
+                        scales=[];break
+                    scales.append(float(multiplier))
+                if (not scales or abs(assets.amount - liabilities.amount - equity.amount)
+                        > max(2*max(scales),abs(assets.amount)*1e-6)):
                     for name in ("total_assets", "total_liabilities", "equity"):
                         accounts.pop(name, None)
             if accounts:
@@ -164,6 +184,11 @@ def summarize_asof(financials, corp_code, cutoff):
             "business_years": sorted({int(x.year) for x in entries}),
             "source_urls": sorted({str(x.get("source_url")) for x in entries if pd.notna(x.get("source_url"))}),
             "source_sha256": sorted({str(x.get("source_sha256")) for x in entries if pd.notna(x.get("source_sha256"))}),
+            "published_at": sorted({str(x.published_at) for x in entries}),
+            "source_collected_at": sorted({str(x.get('source_collected_at')) for x in entries if pd.notna(x.get('source_collected_at'))}),
+            "source_kinds": sorted({str(x.get('source_kind')) if pd.notna(x.get('source_kind')) else
+                                    'OpenDART_annual_structured' for x in entries}),
+            "source_hash_scopes": sorted({str(x.get('source_hash_scope')) for x in entries if pd.notna(x.get('source_hash_scope'))}),
         }
 
     for name, row in latest.items():

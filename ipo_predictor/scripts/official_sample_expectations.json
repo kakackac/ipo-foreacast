@@ -2,6 +2,14 @@
   "description": "Official DART original-table references reviewed 2026-09-09 and 2026-11-06. New aggregate quantity references: Melcon 748389000/2074742000; EST 2489000/1039659000; SK14 14625000/5988330000. Numerator plus noncommitment quantity reconciles to the independently disclosed demand quantity. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
   "samples": [
     {
+      "sample": "yas_correction_2017",
+      "receipt": "20170926000244",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170926000244&dcmNo=5797330&eleId=1&offset=738&length=171428&dtd=dart3.xsd",
+      "sha256": "8ea48d58db52c364fe0e7bf72ed580db6f437ff05d2c8b8ca3b81863bb6c7ddf",
+      "extraction_view": "explicit_after_correction_v1",
+      "expected": {"offering_price": 23500, "institutional_demand_ratio": 28.9, "price_band_low": 23500, "price_band_high": 26500}
+    },
+    {
       "sample": "dypiston_prospectus_2017",
       "receipt": "20171127000116",
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20171127000116&dcmNo=5860150&eleId=10&offset=66771&length=209454&dtd=dart3.xsd",
@@ -13,7 +21,7 @@
       "receipt": "20210715000154",
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210715000154&dcmNo=8144128&eleId=8&offset=95424&length=175424&dtd=dart3.xsd",
       "sha256": "300d48aa86f838819cad9f7bbd7dff1f78941407e40f7d80f9d68b009149199c",
-      "expected": {"demand_offering_price": 15000, "institutional_demand_ratio": 1587.01}
+      "expected": {"demand_offering_price": 15000, "institutional_demand_ratio": 1587.01, "lockup_commitment_ratio": 0.39131380869845755}
     },
     {
       "sample": "maint_prospectus_2015",

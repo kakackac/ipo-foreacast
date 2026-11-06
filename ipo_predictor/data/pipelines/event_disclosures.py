@@ -143,6 +143,9 @@ def _resolve_supply_bundles(values, proof, documents, expected_price, listing_da
     # A pair is usable only when both values passed approval in the same document.
     for metadata, document, approved in ordered:
         if approved['new_shares'] is None or approved['secondary_shares'] is None:
+            if document.get('new_shares') is not None or document.get('secondary_shares') is not None:
+                structure['offering_structure_resolution_status'] = 'latest_partial_structure_requires_review'
+                break
             continue
         structure.update({field: document.get(field) for field in structure_fields})
         structure.update(offering_structure_rcept_no=metadata['rcept_no'],
@@ -156,6 +159,8 @@ def _resolve_supply_bundles(values, proof, documents, expected_price, listing_da
     proof['resolved_structure'] = _bundle_scalars(structure)
     for field in ('new_shares', 'secondary_shares'):
         values[field] = proof['resolved_structure'][field]
+        if values[field] is None:
+            proof['field_sources'].pop(field,None)
 
     # Replace, rather than fill, so a newer conflict also clears older values.
     resolved_float = dict.fromkeys(FLOAT_FIELDS)
@@ -196,19 +201,21 @@ def connect_event(dart, raw_dir, event, candidates, cached_only=False, *, verify
     document = dart._parse_offering_html(body,metadata['rcept_no'])
     demand = dart._parse_demand_forecast_html(body,corp)
     document.update({k:v for k,v in demand.items() if k not in {'corp_code','parse_success'}})
-    primary_price_missing = False
-    try:
-        values = accepted_values(document,event.offering_price)
-    except ValueError as exc:
-        if str(exc) != 'latest_official_price_not_explicitly_confirmed':
-            raise
-        primary_price_missing = True
-        values = dict.fromkeys(FIELDS)
+    primary_price_missing = proof.get('content_scope') == 'partial_or_terms_notice'
+    values = dict.fromkeys(FIELDS)
+    if not primary_price_missing:
+        try:
+            values = accepted_values(document,event.offering_price)
+        except ValueError as exc:
+            if str(exc) != 'latest_official_price_not_explicitly_confirmed':
+                raise
+            primary_price_missing = True
     cutoff = pd.Timestamp(event.listing_date).tz_localize('Asia/Seoul')-pd.Timedelta(hours=3)
     available = pd.Timestamp(metadata['rcept_dt']).tz_localize('Asia/Seoul')+pd.Timedelta(days=1)
     if available >= cutoff: raise ValueError('publication_not_before_listing_eve_cutoff')
     proof['field_sources'] = {}
     documents = [] if primary_price_missing else [({**metadata, 'source_url': proof['source_url']}, document, values.copy())]
+    extra_meta = None
     try:
         extra_meta, extra_body, extra_proof = official_related_prospectus(
             dart,raw_dir,proof,event.listing_date,cached_only)
@@ -218,33 +225,53 @@ def connect_event(dart, raw_dir, event, candidates, cached_only=False, *, verify
         approved = accepted_values(extra,event.offering_price)
         extra_available = pd.Timestamp(extra_meta['rcept_dt']).tz_localize('Asia/Seoul')+pd.Timedelta(days=1)
         if extra_available>=cutoff: raise ValueError('supplementary_publication_after_cutoff')
+        current_companion = pd.Timestamp(extra_meta['rcept_dt']) >= pd.Timestamp(metadata['rcept_dt'])
         if primary_price_missing:
             # A partial correction is not a complete price statement. Only the
             # latest bidirectionally linked prospectus, at least as recent as the
             # correction, may supply its own explicitly confirmed currency price.
-            if pd.Timestamp(extra_meta['rcept_dt']) < pd.Timestamp(metadata['rcept_dt']):
+            if not current_companion:
                 raise ValueError('price_source_predates_latest_partial_correction')
+            proof['price_resolution_status'] = 'latest_related_prospectus_price_verified'
+        document['supplementary_document'] = extra
+        proof.update(supplementary_status='official_related_prospectus_verified',supplementary=extra_proof)
+        if current_companion:
             values['offering_price'] = approved['offering_price']
             proof['field_sources']['offering_price'] = {'source_url':extra_proof['source_url'],
                 'receipt':extra_meta['rcept_no'],'available_at':extra_available.isoformat()}
-            proof['price_resolution_status'] = 'latest_related_prospectus_price_verified'
-        for field,value in approved.items():
-            if field in {'offering_price', 'new_shares', 'secondary_shares', 'public_float_ratio_disclosed'}:
-                continue
-            if value is None or values[field] is not None: continue
-            values[field] = value
-            proof['field_sources'][field] = {'source_url':extra_proof['source_url'],
-                'receipt':extra_meta['rcept_no'],'available_at':extra_available.isoformat()}
-        document['supplementary_document'] = extra
-        proof.update(supplementary_status='official_related_prospectus_verified',supplementary=extra_proof)
-        documents.append(({**extra_meta, 'source_url': extra_proof['source_url'], 'supplementary': True},
-                          extra, approved))
+            documents.append(({**extra_meta,'source_url':extra_proof['source_url'],'supplementary':True},extra,approved))
+        else:
+            proof['supplementary_status'] = 'older_related_prospectus_audit_only'
     except requests.RequestException:
         proof['supplementary_status'] = 'supplementary_source_access_failed'
     except ValueError as exc:
+        if (str(exc) == 'latest_official_price_krx_mismatch' and extra_meta is not None
+                and pd.Timestamp(extra_meta['rcept_dt']) >= pd.Timestamp(metadata['rcept_dt'])):
+            raise
         proof['supplementary_status'] = str(exc)
     if values['offering_price'] is None:
         raise ValueError(proof.get('supplementary_status','latest_official_price_not_explicitly_confirmed'))
+    ordered = sorted(documents,key=lambda item:(pd.Timestamp(item[0]['rcept_dt']),item[0]['rcept_no']),reverse=True)
+    for fields,status_key in [(('institutional_demand_ratio',),'institutional_demand_parser_validation_status'),
+                               (('lockup_commitment_ratio',),'lockup_parser_validation_status'),
+                               (('price_band_low','price_band_high'),'price_band_validation_status')]:
+        for field in fields:
+            values[field] = None
+            proof['field_sources'].pop(field,None)
+        for source_meta,source_document,source_values in ordered:
+            status=source_document.get(status_key,'')
+            if status in {'candidate_rejected','conflicting_bands_review_required'}:
+                break
+            if any(source_values[field] is None for field in fields):
+                continue
+            for field in fields:
+                values[field]=source_values[field]
+                if source_meta.get('supplementary'):
+                    proof['field_sources'][field]={'source_url':source_meta['source_url'],
+                        'receipt':source_meta['rcept_no'],'available_at':(
+                            pd.Timestamp(source_meta['rcept_dt']).tz_localize('Asia/Seoul')+pd.Timedelta(days=1)).isoformat()}
+            break
+    proof['source_selection_policy'] = 'latest_complete_pre_cutoff_document_v2'
     _resolve_supply_bundles(values, proof, documents, event.offering_price, event.listing_date)
     proof.update(company_url=url,company_sha256=company_hash,company_identity=company)
     proof['candidate_calendars'] = sorted({s['path']:s for c in candidates for s in c.get('calendar_sources',[])}.values(),

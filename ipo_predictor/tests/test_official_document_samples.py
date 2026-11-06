@@ -115,6 +115,14 @@ class OfficialDocumentSampleTests(unittest.TestCase):
         final = self.collector._parse_offering_html(table(35.27), "final-body")
         self.assertAlmostEqual(final["public_float_ratio_disclosed"], 0.3527)
 
+    def test_maxst_total_alias_requires_independent_application_quantity(self):
+        table=[['기관투자자','합계','합계'],['구분','건수','수량'],['3개월 확약','1','465,764,000'],
+               ['미확약','1','724,493,000'],['계','2','1,190,257,000']]
+        result=self.collector._extract_aggregate_lockup_shares(table,application_total=1190257000)
+        self.assertAlmostEqual(result['lockup_commitment_ratio'],465764000/1190257000)
+        self.assertIsNone(self.collector._extract_aggregate_lockup_shares(table))
+        self.assertIsNone(self.collector._extract_aggregate_lockup_shares(table,application_total=1190257001))
+
     def test_ns_shopping_post_offering_float_column_and_all_secondary(self):
         # DART 20150210000401: source table has pre/post offering columns.
         html = """구주매출 878,181 주. 공모는 100% 구주매출로 진행됩니다.

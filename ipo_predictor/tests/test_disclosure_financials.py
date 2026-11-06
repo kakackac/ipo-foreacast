@@ -32,7 +32,21 @@ def parse(html):
     return parse_disclosure_financials(html, '12345678', '20230315000001', '2023-03-15', 'https://dart.fss.or.kr/report/viewer.do')
 
 
+def financial_index(receipt='20230315000001',date='2023.03.15',corp='12345678',name='테스트'):
+    text=f"<title>{name}/투자설명서/{date}</title>openCorpInfoNew('{corp}');"
+    text+=f'<select id="family"><option selected value="rcpNo={receipt}">{date} 투자설명서</option></select>'
+    text+='var node1 = {};'
+    for key,value in dict(text='III. 재무에 관한 사항',rcpNo=receipt,dcmNo='1',eleId='2',offset='3',length='4',dtd='dart3.xsd').items():
+        text+=f"node1['{key}'] = \"{value}\";"
+    return text
+
+
 class DisclosureFinancialTests(unittest.TestCase):
+    def test_korean_unit_spacing_does_not_change_currency_or_scale(self):
+        for unit in ['백만원','백 만원','백 만 원']:
+            result=summarize_asof(parse('1. 요약재무정보 (단위: '+unit+')'+table(summary())), '12345678','2023-04-01')
+            self.assertEqual(result['revenue'],1_000_000_000)
+        self.assertTrue(parse('1. 요약재무정보 (단위: 백만달러)'+table(summary())).empty)
     def test_annual_summary_without_date_range_and_negative_income(self):
         frame = parse('1. 요약재무정보 (단위: 백만원)' + table(summary()))
         result = summarize_asof(frame, '12345678', '2023-04-01')
@@ -43,6 +57,11 @@ class DisclosureFinancialTests(unittest.TestCase):
     def test_unit_in_separate_one_cell_table_is_not_lost(self):
         html = '1. 요약재무정보' + table([['(단위: 백만원)']]) + table(summary())
         self.assertEqual(summarize_asof(parse(html), '12345678', '2023-04-01')['revenue'], 1_000_000_000)
+
+    def test_heading_and_unit_in_separate_multicell_table_are_not_lost(self):
+        html='1. 요약재무정보'+table([['요약재무제표(K-IFRS)'],['제7기 2022년 12월 31일 현재'],
+                                           ['주식회사 테스트','','(단위 : 원)']])+table(summary(standard=False))
+        self.assertEqual(summarize_asof(parse(html),'12345678','2023-04-01')['revenue'],1000)
 
     def test_numeric_non_total_accounts_are_not_part_of_year_header(self):
         rows = summary()
@@ -90,18 +109,13 @@ class DisclosureFinancialTests(unittest.TestCase):
 
     def test_company_rename_requires_matching_official_corp_code(self):
         dart = Mock()
-        index = "<title>변경회사/투자설명서/2023.03.16</title>"
-        index += "openCorpInfoNew('12345678', 'info');"
-        index += "var node1 = {};"
-        for key, value in dict(text='III. 재무에 관한 사항', rcpNo='20230315000001',
-                               dcmNo='1', eleId='2', offset='3', length='4', dtd='dart3.xsd').items():
-            index += f"node1['{key}'] = \"{value}\";"
+        index = financial_index(date='2023.03.16',name='변경회사')
         first, second = Mock(), Mock()
         first.text = index
         second.text = '재무' + table(summary())
         dart.session.get.side_effect = [first, second]
         with tempfile.TemporaryDirectory() as root:
-            payload = public_financial_section(dart, '20230315000001', '이전회사', root,
+            payload = public_financial_section(dart, '20230315000001', '이전회사', Path(root)/'sections',
                                                corp_code='12345678', published='2023-03-16')
         self.assertEqual(payload['status'], 'official_section_downloaded')
         self.assertEqual(payload['official_publication_date'], '2023-03-16')
@@ -110,7 +124,7 @@ class DisclosureFinancialTests(unittest.TestCase):
         dart = Mock()
         dart.session.get.return_value.text = "<title>테스트/투자설명서/2023.03.15</title>openCorpInfoNew('87654321', 'info');"
         with tempfile.TemporaryDirectory() as root:
-            result = public_financial_section(dart, '20230315000001', '테스트', root, corp_code='12345678')
+            result = public_financial_section(dart, '20230315000001', '테스트', Path(root)/'sections', corp_code='12345678')
         self.assertEqual(result['status'], 'official_document_corp_code_mismatch')
 
     def test_adjacent_ifrs_footnote(self):
@@ -118,6 +132,11 @@ class DisclosureFinancialTests(unittest.TestCase):
                       + table([['주1 한국채택국제회계기준(K-IFRS)에 따라 작성']]))
         self.assertEqual(set(frame.fs_div), {'CFS'})
         self.assertEqual(len(frame), 6)
+
+    def test_adjacent_future_ifrs_plan_does_not_approve_current_accounts(self):
+        html='1. 요약재무정보 (단위: 원)'+table(summary(standard=False))
+        html+=table([['차기부터 한국채택국제회계기준에 따라 작성할 예정입니다.']])
+        self.assertTrue(parse(html).empty)
 
     def test_fiscal_term_requires_explicit_calendar_mapping(self):
         html = '1. 요약재무정보 (단위: 백만원)' + table(summary('제10기', False))
@@ -145,6 +164,15 @@ class DisclosureFinancialTests(unittest.TestCase):
     def test_carve_out_history_is_not_issuer_annual_history(self):
         self.assertTrue(parse('1. 요약재무정보 (단위: 원)' + table(summary('설립 전 2022년'))).empty)
 
+    def test_cfs_framework_does_not_approve_unlabelled_ofs_accounts(self):
+        html='1. 요약별도재무정보 (단위: 원)'+table(summary(standard=False))
+        self.assertTrue(parse(html+'연결재무제표는 한국채택국제회계기준에 따라 작성되었습니다.').empty)
+
+    def test_affirmative_issuer_ifrs_application_not_future_plan(self):
+        html='1. 요약재무정보 (단위: 원)'+table(summary(standard=False))
+        self.assertEqual(len(parse(html+'당사는 한국채택국제회계기준을 적용하여 재무제표를 작성하고 있습니다.')),6)
+        self.assertTrue(parse(html+'당사는 한국채택국제회계기준을 적용하여 재무제표를 작성할 예정입니다.').empty)
+
     def test_gaap_heading_cannot_use_ifrs_statement_elsewhere_in_report(self):
         html = '1. 요약재무정보(K-GAAP) (단위: 원)' + table(summary(standard=False))
         html += '다른 재무제표는 한국채택국제회계기준에 따라 작성되었습니다.'
@@ -163,7 +191,7 @@ class DisclosureFinancialTests(unittest.TestCase):
             (cache / f'{receipt}.json').write_text(json.dumps({
                 'receipt': receipt, 'issuer': '테스트', 'status': 'official_section_downloaded',
                 'html': html, 'sha256': hashlib.sha256(html.encode()).hexdigest(),
-                'source_url': 'https://dart.fss.or.kr/report/viewer.do',
+                'source_url': 'https://dart.fss.or.kr/report/viewer.do?rcpNo='+receipt+'&dcmNo=1&eleId=2&offset=3&length=4&dtd=dart3.xsd',
             }))
             lineage = pd.DataFrame([
                 dict(event_id='event', corp_code='12345678', rcept_no=receipt,
@@ -171,16 +199,34 @@ class DisclosureFinancialTests(unittest.TestCase):
                 dict(event_id='event', corp_code='12345678', rcept_no='20230315000002',
                      rcept_dt='2023-03-15', filing_report_nm='[발행조건확정]증권신고서(지분증권)'),
             ])
-            result, status = collect_disclosure_financials(Mock(), root, 'event', '12345678',
+            dart=Mock();dart.session.get.return_value.text=financial_index()
+            result, status = collect_disclosure_financials(dart, root, 'event', '12345678',
                                                            '테스트', '2023-03-17', lineage)
             self.assertEqual(status, 'official_annual_financial_tables_found')
             self.assertEqual(set(result.rcept_no), {receipt})
+            self.assertEqual(dart.session.get.call_count,1)
+
+    def test_legacy_receipt_prefix_date_is_replaced_by_verified_official_date(self):
+        receipt='20230315000001'
+        html='재무 1. 요약재무정보 (단위: 원)'+table(summary())
+        with tempfile.TemporaryDirectory() as root:
+            path=Path(root)/'sections';path.mkdir()
+            (path/(receipt+'.json')).write_text(json.dumps({'receipt':receipt,'issuer':'테스트',
+                'status':'official_section_downloaded','html':html,'sha256':hashlib.sha256(html.encode()).hexdigest(),
+                'source_url':'https://dart.fss.or.kr/report/viewer.do?rcpNo='+receipt+'&dcmNo=1&eleId=2&offset=3&length=4&dtd=dart3.xsd'}))
+            dart=Mock();dart.session.get.return_value.text=financial_index(date='2023.03.16')
+            payload=public_financial_section(dart,receipt,'테스트',path,corp_code='12345678',published='2023-03-15')
+            self.assertEqual(payload['official_publication_date'],'2023-03-16')
+            self.assertTrue(payload['publication_date_corrected'])
+            self.assertEqual(payload['identity_schema_version'],2)
+            public_financial_section(dart,receipt,'테스트',path,corp_code='12345678',published='2023-03-15')
+            self.assertEqual(dart.session.get.call_count,1)
 
     def test_public_document_issuer_mismatch_is_rejected(self):
         dart = Mock()
         dart.session.get.return_value.text = '<title>다른회사/투자설명서</title>'
         with tempfile.TemporaryDirectory() as root:
-            result = public_financial_section(dart, '20230315000001', '테스트', root)
+            result = public_financial_section(dart, '20230315000001', '테스트', Path(root)/'sections')
         self.assertEqual(result['status'], 'official_document_issuer_mismatch')
 
 

@@ -160,12 +160,18 @@ def official_family_document(dart, raw_dir, receipt, corp_code, listing_date, ca
         if (fields.get('rcpNo') != latest['rcept_no'] or fields.get('dtd') not in ('dart3.xsd', 'dart4.xsd')
                 or any(not re.fullmatch(r'\d+', fields.get(k, '')) for k in ('dcmNo', 'eleId', 'offset', 'length'))):
             raise ValueError('official_section_identity_conflict')
-        nodes.append({k: v for k, v in fields.items() if k != 'text'})
+        nodes.append(fields)
     if not nodes or len(nodes) > 6:
         raise ValueError('official_terms_section_not_identified')
+    full = [node for node in nodes if re.match(r'^[IVX]+[.]\s*(?:모집.*매출.*일반사항|투자위험요소)',
+                                               unicodedata.normalize('NFKC',node['text']).strip())]
+    full_general = any('일반사항' in node['text'] for node in full)
+    if full_general:
+        nodes = full
+    scope = 'full_offering_sections' if full_general else 'partial_or_terms_notice'
     parts, proofs = [], []
     for node in nodes:
-        url = 'https://dart.fss.or.kr/report/viewer.do?' + urlencode(node)
+        url = 'https://dart.fss.or.kr/report/viewer.do?' + urlencode({key:value for key,value in node.items() if key!='text'})
         def validate_body(text):
             if '<table' not in text.lower():
                 raise ValueError('official_terms_response_invalid')
@@ -176,7 +182,8 @@ def official_family_document(dart, raw_dir, receipt, corp_code, listing_date, ca
         proofs.append({'url': url, 'sha256': digest})
     return latest, '\n'.join(parts), {'initial_receipt': receipt, 'initial_index_sha256': initial_hash,
              'final_index_sha256': final_hash, 'source_url': final_url,
-             'corp_code': str(corp_code), 'family': final['family'], 'sections': proofs}
+             'corp_code': str(corp_code), 'family': final['family'], 'sections': proofs,
+             'content_scope':scope}
 
 
 def official_related_prospectus(dart, raw_dir, terms_proof, listing_date, cached_only=False):

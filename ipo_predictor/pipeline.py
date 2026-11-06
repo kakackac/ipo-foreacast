@@ -599,7 +599,7 @@ if __name__ == "__main__":
             "train", "backtest", "analyze", "demo", "collect", "collect-events",
             "audit-dart-failures", "prepare-underwriter-institutional-review-queue",
             "audit-underwriter-source-readiness", "build-research-dataset", "collect-and-build",
-            "plan-financials", "collect-financials", "collect-snapshot-prices", "integrate-event-snapshot", "collect-event-disclosures", "collect-event-context", "recover-historical-events",
+            "plan-financials", "collect-financials", "collect-snapshot-prices", "integrate-event-snapshot", "collect-event-disclosures", "collect-event-context", "recover-historical-events", "reconcile-historical-sources", "reconcile-historical-financials", "build-reconciled-dataset", "collect-reconciled-context",
         ],
         default="demo",
         help="실행 모드",
@@ -630,6 +630,10 @@ if __name__ == "__main__":
     parser.add_argument("--start-year", type=int, default=2015, help="실제 수집 시작 연도")
     parser.add_argument("--financial-limit", type=int, help="재무 수집 공식 API 검증용 연도 분산 표본 개수")
     parser.add_argument("--recovery-limit", type=int, help="과거 누락 이벤트 복구 표본 개수; 전체 복구 버전 포인터는 갱신하지 않음")
+    parser.add_argument("--reconcile-limit", type=int, help="기존 공식 원천 연결 검증의 연도 분산 표본 개수")
+    parser.add_argument("--financial-unresolved-only", action="store_true",
+                        help="기존 재무 미해결 범위만 별도 재처리; 전체 통합 버전 포인터는 변경하지 않음")
+    parser.add_argument("--financial-reconciliation", type=Path,help="통합 저장에 연결할 전체 대상 재무 재검증 버전")
     parser.add_argument("--financial-documents-only", action="store_true",
                         help="재무 API 캐시와 공식 DART 신고서 재무 절만 사용; 새 인증 API 호출 없음")
     parser.add_argument("--financial-repair", type=str, help="연구 데이터 생성에 연결할 재무 복구 디렉터리 또는 latest")
@@ -676,6 +680,36 @@ if __name__ == "__main__":
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.research_dataset import run
         print(json.dumps(run(RAW_DIR, PROC_DIR, financial_repair=args.financial_repair), ensure_ascii=False))
+    elif args.mode == 'reconcile-historical-sources':
+        from config import RAW_DIR, PROC_DIR
+        from data.pipelines.historical_reconciliation import collect_connections
+        result=collect_connections(RAW_DIR,PROC_DIR,cached_only=args.connection_cached_only,event_limit=args.reconcile_limit)
+        if args.reconcile_limit is None:
+            from data.pipelines.correction_views import amend_connections
+            result=amend_connections(RAW_DIR,PROC_DIR)
+        print(json.dumps(result,ensure_ascii=False))
+    elif args.mode == 'reconcile-historical-financials':
+        from config import RAW_DIR, PROC_DIR
+        from data.pipelines.historical_financial_reconciliation import run
+        print(json.dumps(run(RAW_DIR,PROC_DIR,unresolved_only=args.financial_unresolved_only),ensure_ascii=False))
+    elif args.mode == 'build-reconciled-dataset':
+        from config import RAW_DIR, PROC_DIR
+        from data.pipelines.reconciled_dataset import run
+        if args.financial_reconciliation is None:
+            parser.error('--financial-reconciliation is required')
+        print(json.dumps(run(RAW_DIR,PROC_DIR,args.financial_reconciliation),ensure_ascii=False))
+    elif args.mode == 'collect-reconciled-context':
+        from config import RAW_DIR, PROC_DIR
+        from data.pipelines.historical_reconciliation import load_inputs
+        from data.pipelines.event_model_inputs import collect_days
+        from data.collectors.krx_collector import KRXCollector
+        inputs=load_inputs(RAW_DIR,PROC_DIR)
+        events=inputs['events'][inputs['events'].event_class.eq('general_ipo')]
+        _,days,result=collect_days(KRXCollector(),RAW_DIR,pd.read_parquet(RAW_DIR/'kospi_index.parquet'),
+                                  events,cached_only=args.connection_cached_only)
+        print(json.dumps({'collection':result,'checked_days':len(days),'scope':'index_source_cache_only',
+                          'dart_recollection_required':False,'listing_price_recollection_required':False,
+                          'training_executed':False},ensure_ascii=False))
     elif args.mode == 'recover-historical-events':
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.historical_event_recovery import run

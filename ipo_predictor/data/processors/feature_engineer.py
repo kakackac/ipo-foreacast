@@ -34,6 +34,8 @@ from features.source_contracts import (
     DART_PUBLIC_FLOAT_STATUS,
     KRX_UNDERWRITER_TIER_STATUS,
     DART_ANNUAL_FINANCIAL_STATUS,
+    DART_PRICE_BAND_STATUS,
+    DART_UNDERWRITER_TIER_STATUS,
 )
 from config import FEATURE_CFG, PROC_DIR, RAW_DIR
 
@@ -181,8 +183,13 @@ class FeatureEngineer:
             "kosdaq_momentum_5d_available_at", "kosdaq_momentum_20d_available_at",
             "recent_ipo_avg_return_sector_available_at",
             "recent_ipo_avg_return_all_available_at",
+            "recent_ipo_avg_return_all_source_event_ids", "recent_ipo_avg_return_sector_source_event_ids",
             "public_float_rcept_no", "public_float_rcept_dt",
             "price_band_rcept_no", "price_band_rcept_dt",
+            "price_band_low", "price_band_high", "price_band_parse_method", "price_band_parse_evidence",
+            "price_band_validation_status", "price_band_source_url", "price_band_source_sha256",
+            "offering_price_source_url", "offering_price_source_sha256",
+            "institutional_source_sha256", "lockup_source_sha256",
             "offering_price_rcept_no", "offering_price_rcept_dt",
             "offering_structure_rcept_no", "offering_structure_rcept_dt",
         ]
@@ -358,7 +365,23 @@ class FeatureEngineer:
             (df["offering_price"] - df["price_band_low"]) / band_range,
             np.nan,
         )
-        df["offering_price_band_position"] = df["offering_price_band_position"].clip(-0.5, 2.0)
+        # Keep the original derivation; clipping belongs to the fitted transform.
+        from features.model_profiles import VERIFIED_OFFERING_PRICE_STATUSES
+        def verified_band(row):
+            try:
+                evidence=json.loads(row.get("price_band_parse_evidence", "[]"))
+                pairs={tuple(float(n.replace(",","")) for n in re.findall(r"\d[\d,]*",text)) for text in evidence}
+            except (TypeError,ValueError):
+                return False
+            hashes=[row.get(key) for key in ("price_band_source_sha256","offering_price_source_sha256")]
+            return (row.get("price_band_parse_method")=="direct_currency_range_v1"
+                    and pairs=={(row.price_band_low,row.price_band_high)}
+                    and all(isinstance(h,str) and re.fullmatch(r"[a-f0-9]{64}(?:\|[a-f0-9]{64})*",h) for h in hashes)
+                    and row.get("offering_price_review_status") in VERIFIED_OFFERING_PRICE_STATUSES
+                    and all(pd.notna(row.get(k)) for k in ("price_band_rcept_no","price_band_rcept_dt",
+                                                          "offering_price_rcept_no","offering_price_rcept_dt")))
+        approved=df.apply(verified_band,axis=1) & valid_band
+        df["price_band_validation_status"]=np.where(approved,DART_PRICE_BAND_STATUS,"price_band_source_unverified")
         df["band_exceeded"] = np.where(
             df["offering_price_band_position"].notna(),
             (df["offering_price_band_position"] > 1.0).astype(float),
@@ -593,6 +616,14 @@ class FeatureEngineer:
             df["open_return_pct"] = np.nan
 
         df = df.sort_values("listing_date").reset_index(drop=True)
+        eligible = pd.Series(True,index=df.index)
+        if "event_class" in df:
+            eligible &= df.event_class.eq("general_ipo")
+        if "offering_price_review_status" in df:
+            from features.model_profiles import VERIFIED_OFFERING_PRICE_STATUSES
+            eligible &= df.offering_price_review_status.isin(VERIFIED_OFFERING_PRICE_STATUSES)
+        if "price_target_validation_status" in df:
+            eligible &= df.price_target_validation_status.eq("official_price_verified")
 
         n_sector = FEATURE_CFG.sector_lookback_n   # 5
         n_all    = 10
@@ -601,17 +632,19 @@ class FeatureEngineer:
         all_temps    = []
         sector_available_dates = []
         all_available_dates = []
+        all_source_ids,sector_source_ids=[],[]
 
         for _, row in df.iterrows():
             # 같은 상장일의 다른 종목 수익률도 아직 장 마감 전에는 알 수 없으므로 제외한다.
-            past = df.loc[df["listing_date"] < row["listing_date"]]
+            past = df.loc[eligible & (df["listing_date"] < row["listing_date"])]
 
             # 전체 최근 N개
             past_valid = past["open_return_pct"].dropna()
             all_temp = past_valid.tail(n_all).mean() if len(past_valid) > 0 else np.nan
             all_temps.append(all_temp)
+            all_source_ids.append(json.dumps(past.loc[past_valid.tail(n_all).index,'event_id'].tolist()) if 'event_id' in past else '[]')
             all_available_dates.append(
-                past.loc[past_valid.index, "listing_date"].max()
+                past.loc[past_valid.index, "listing_date"].max()+pd.Timedelta(hours=21)
                 if len(past_valid) > 0 else pd.NaT
             )
 
@@ -620,12 +653,15 @@ class FeatureEngineer:
                 sect = row.get("industry_name")
                 past_sect = past[past["industry_name"] == sect]["open_return_pct"].dropna()
                 sect_temp = past_sect.tail(n_sector).mean() if len(past_sect) > 0 else all_temp
+                sector_source_ids.append(json.dumps(past.loc[past_sect.tail(n_sector).index,'event_id'].tolist())
+                                         if len(past_sect)>0 and 'event_id' in past else all_source_ids[-1])
                 sector_available_dates.append(
-                    past.loc[past_sect.index, "listing_date"].max()
+                    past.loc[past_sect.index, "listing_date"].max()+pd.Timedelta(hours=21)
                     if len(past_sect) > 0 else all_available_dates[-1]
                 )
             else:
                 sect_temp = all_temp
+                sector_source_ids.append(all_source_ids[-1])
                 sector_available_dates.append(all_available_dates[-1])
             sector_temps.append(sect_temp)
 
@@ -633,6 +669,8 @@ class FeatureEngineer:
         df["recent_ipo_avg_return_all"]    = all_temps
         df["recent_ipo_avg_return_sector_available_at"] = sector_available_dates
         df["recent_ipo_avg_return_all_available_at"] = all_available_dates
+        df['recent_ipo_avg_return_all_source_event_ids']=all_source_ids
+        df['recent_ipo_avg_return_sector_source_event_ids']=sector_source_ids
         return df
 
     # ── 밸류에이션 피처 ───────────────────────────────────────
@@ -868,6 +906,12 @@ class FeatureEngineer:
                     missing_reason = values.get("financial_time_validation_status")
                     if not isinstance(missing_reason, str) or missing_reason == DART_ANNUAL_FINANCIAL_STATUS:
                         missing_reason = "financial_account_or_period_unavailable"
+                    if values.get('financial_time_validation_status')==DART_ANNUAL_FINANCIAL_STATUS:
+                        denominator=values.get({'operating_margin':'revenue','debt_ratio':'equity'}.get(feature_name,''))
+                        if denominator is not None and pd.notna(denominator) and float(denominator)<=0:
+                            missing_reason='verified_non_positive_denominator_ratio_undefined'
+                        elif feature_name=='revenue_growth_3y':
+                            missing_reason='exact_three_year_positive_comparable_revenue_history_unverified'
                 elif missing:
                     missing_reason = "official_source_field_unavailable_or_unverified"
                     status_key = {
@@ -881,10 +925,19 @@ class FeatureEngineer:
                         missing_reason = "selected_document_parser_value_not_found"
                 else:
                     missing_reason = None
+                if missing and feature_name=='underwriter_tier':
+                    missing_reason=values.get('underwriter_validation_status') or 'underwriter_source_unverified'
+                if missing and feature_name.startswith(('kospi_momentum_','kosdaq_momentum_')):
+                    missing_reason=values.get(feature_name+'_missing_reason') or 'market_source_unverified'
                 source_ref = values.get("rcept_no")
                 available_at = values.get("feature_available_at")
                 financial_record = financial_evidence.get(feature_name, {})
+                if missing_reason=='verified_non_positive_denominator_ratio_undefined':
+                    financial_record=financial_evidence.get('equity' if feature_name=='debt_ratio' else 'revenue',{})
                 if feature.group == FeatureGroup.FINANCIAL:
+                    kinds=financial_record.get('source_kinds',[])
+                    if kinds==['ipo_disclosure']:source='DART_IPO_financial_section'
+                    elif 'ipo_disclosure' in kinds:source='DART_structured_and_IPO_financial_sources'
                     source_ref = financial_record.get("source_reference")
                     available_at = pd.to_datetime(financial_record.get("available_at"), errors="coerce")
                     if pd.notna(available_at) and available_at.tzinfo is not None:
@@ -902,6 +955,10 @@ class FeatureEngineer:
                         "institutional_source_url", "institutional_rcept_no", "demand_rcept_no"
                     )
                     available_at = values.get("institutional_available_at")
+                if feature_name == 'underwriter_tier' and values.get('underwriter_validation_status')==DART_UNDERWRITER_TIER_STATUS:
+                    source='DART_pre_listing_underwriter_table'
+                    source_ref=first_present('underwriter_source_url','underwriter_rcept_no')
+                    available_at=values.get('underwriter_available_at')
                 if feature_name.startswith(("kospi_momentum_", "kosdaq_momentum_")):
                     source = "KRX_OpenAPI_index_daily_close"
                     available_at = values.get(f"{feature_name}_available_at")
@@ -971,12 +1028,35 @@ class FeatureEngineer:
                     validation = values.get("float_share_validation_status")
                 elif feature_name == "secondary_offering_ratio":
                     validation = values.get("offering_structure_validation_status")
+                elif feature_name in {"offering_price_band_position", "band_exceeded"}:
+                    validation = values.get("price_band_validation_status")
                 elif feature_name == "offering_type_spac_ipo":
                     if not missing and pd.notna(available_at):
                         validation = "verified_pre_listing_dart_name_derivation_v1"
                 if pd.isna(validation) or str(validation).strip() == "":
                     validation = "needs_review"
                 validation = str(validation)
+                source_hash=None
+                evidence=None
+                if feature.group == FeatureGroup.FINANCIAL:
+                    source_hash=json.dumps(financial_record.get('source_sha256',[]))
+                    evidence=json.dumps(financial_record,ensure_ascii=False)
+                elif feature_name in {'offering_price_band_position','band_exceeded'}:
+                    source_hash='|'.join(str(first_present(key) or '') for key in (
+                        'price_band_source_sha256','offering_price_source_sha256'))
+                    evidence=first_present('price_band_parse_evidence')
+                elif feature_name == 'institutional_demand_ratio':
+                    source_hash=first_present('institutional_source_sha256')
+                    evidence=first_present('institutional_demand_structured_evidence')
+                elif feature_name == 'lockup_commitment_ratio':
+                    source_hash=first_present('lockup_source_sha256')
+                    evidence=first_present('lockup_structured_evidence')
+                elif feature_name == 'underwriter_tier':
+                    source_hash=first_present('underwriter_source_sha256')
+                    evidence=first_present('underwriter_source_evidence')
+                elif feature_name in {'recent_ipo_avg_return_all','recent_ipo_avg_return_sector'}:
+                    evidence=json.dumps({'prior_event_ids':first_present(feature_name+'_source_event_ids'),
+                                         'target':'open_return_pct','scope':'verified_prior_general_ipo_targets'},ensure_ascii=False)
                 approved_validation_statuses = {
                     "verified_currency_unit", "verified_text_and_structured",
                     "verified_structured_api", "manual_verified",
@@ -988,6 +1068,8 @@ class FeatureEngineer:
                     DART_PUBLIC_FLOAT_STATUS,
                     DART_OFFERING_STRUCTURE_STATUS,
                     DART_ANNUAL_FINANCIAL_STATUS,
+                    DART_PRICE_BAND_STATUS,
+                    DART_UNDERWRITER_TIER_STATUS,
                     *APPROVED_INSTITUTIONAL_DEMAND_STATUSES,
                     *APPROVED_LOCKUP_STATUSES,
                 }
@@ -1001,7 +1083,17 @@ class FeatureEngineer:
                     "missing_reason": missing_reason,
                     "source": source,
                     "source_reference": source_ref,
+                    "source_sha256": source_hash,
+                    "source_collected_at": json.dumps(financial_record.get('source_collected_at',[])),
+                    "source_publication_dates": json.dumps(financial_record.get('published_at',[])),
+                    "extraction_evidence": evidence,
+                    "unit": ('times_to_one' if feature_name=='institutional_demand_ratio' else
+                             'fraction' if feature_name in {'lockup_commitment_ratio','float_share_ratio',
+                                 'secondary_offering_ratio','operating_margin','debt_ratio','revenue_growth_3y'} else
+                             'dimensionless' if feature_name in {'offering_price_band_position','band_exceeded'} else None),
                     "available_at": available_at,
+                    "available_at_is_effective": bool(feature.group == FeatureGroup.FINANCIAL or
+                                                       values.get(feature_name+'_availability_is_effective')==True),
                     "collected_at": pd.Timestamp.now(tz="Asia/Seoul"),
                     "validation_status": validation,
                     "human_review_required": bool(

@@ -75,6 +75,30 @@ class Phase2FeatureTests(unittest.TestCase):
         ])
         self.assertTrue(result["human_review_required"].all())
 
+    def test_recent_ipo_derivation_excludes_spacs_and_unapproved_price_targets(self):
+        frame=pd.DataFrame({'listing_date':pd.date_range('2024-01-01',periods=4),
+            'event_class':['general_ipo','spac_ipo','general_ipo','general_ipo'],
+            'offering_price_review_status':['verified_currency_unit']*2+['needs_review','verified_currency_unit'],
+            'price_target_validation_status':['official_price_verified']*4,
+            'open_return_pct':[10,999,999,20]})
+        result=FeatureEngineer()._calc_sector_ipo_temperature(frame)
+        self.assertEqual(result.iloc[-1].recent_ipo_avg_return_all,10)
+        self.assertEqual(result.iloc[-1].recent_ipo_avg_return_all_available_at,pd.Timestamp('2024-01-01 21:00'))
+
+    def test_band_requires_its_own_evidence_and_does_not_clip_raw_derivation(self):
+        row={'offering_price':50000,'price_band_low':10000,'price_band_high':20000,
+            'offering_price_review_status':'verified_currency_unit','price_band_parse_method':'direct_currency_range_v1',
+            'price_band_parse_evidence':'["공모희망가액 10,000원 ~ 20,000원"]',
+            'price_band_source_sha256':'a'*64,'offering_price_source_sha256':'b'*64,
+            'price_band_rcept_no':'20240101000001','price_band_rcept_dt':'2024-01-01',
+            'offering_price_rcept_no':'20240102000001','offering_price_rcept_dt':'2024-01-02'}
+        result=FeatureEngineer()._calc_band_position(pd.DataFrame([row]))
+        self.assertEqual(result.iloc[0].offering_price_band_position,4)
+        self.assertEqual(result.iloc[0].price_band_validation_status,'verified_dart_currency_band_and_final_price_v1')
+        row['price_band_parse_evidence']='["공모희망가액 1,000원 ~ 2,000원"]'
+        rejected=FeatureEngineer()._calc_band_position(pd.DataFrame([row]))
+        self.assertEqual(rejected.iloc[0].price_band_validation_status,'price_band_source_unverified')
+
     def test_feature_observation_does_not_inherit_offering_price_approval(self):
         engineer = FeatureEngineer(feature_set="phase2")
         features = pd.DataFrame({
@@ -253,10 +277,13 @@ class Phase2FeatureTests(unittest.TestCase):
             for feature_name in profile.feature_names:
                 features[feature_name] = 1.0
         features["institutional_validation_status"] = "verified_dart_structural_aggregate_v1"
+        features["price_band_validation_status"] = "verified_dart_currency_band_and_final_price_v1"
         features["lockup_validation_status"] = "verified_dart_structural_aggregate_v1"
         features["float_share_validation_status"] = "verified_dart_public_float_direct_v1"
         features["offering_structure_validation_status"] = "verified_dart_offering_structure_v1"
         features["underwriter_validation_status"] = "verified_krx_underwriter_registry_mapping_v1"
+        features['major_shareholder_lockup_months']=pd.NA
+        features['risk_factor_count']=pd.NA
         audit = pd.DataFrame([
             {
                 "event_id": event_id, "feature_name": feature_name,
@@ -305,6 +332,7 @@ class Phase2FeatureTests(unittest.TestCase):
             "offering_price_review_status": ["verified_currency_unit"],
             "open_return_pct": [10.0], "close_return_pct": [8.0],
             "institutional_validation_status": ["verified_official_underwriter_aggregate_v1"],
+            "price_band_validation_status": ["verified_dart_currency_band_and_final_price_v1"],
             "lockup_validation_status": ["verified_official_underwriter_aggregate_v1"],
         })
         for feature_name in profile.feature_names:
@@ -329,6 +357,7 @@ class Phase2FeatureTests(unittest.TestCase):
         profile = get_model_profile("post_demand")
         features = pd.DataFrame({
             "event_id": ["optional-missing"], "event_class": ["general_ipo"], "market": ["KOSDAQ"],
+            "price_band_validation_status": ["verified_dart_currency_band_and_final_price_v1"],
             "offering_price_review_status": ["verified_currency_unit"],
             "open_return_pct": [10.0], "close_return_pct": [8.0],
             "institutional_validation_status": ["verified_dart_structural_aggregate_v1"],
@@ -395,6 +424,7 @@ class Phase2FeatureTests(unittest.TestCase):
                 "lockup_validation_status": "verified_dart_structural_aggregate_v1",
                 "stage_offering_price_verified": True, "stage_dual_target_ready": True,
                 "stage_time_valid": True, "stage_model_candidate": False,
+                "price_band_validation_status": "verified_dart_currency_band_and_final_price_v1",
             }
             row.update({feature: 1.0 for feature in profile.feature_names})
             rows.append(row)

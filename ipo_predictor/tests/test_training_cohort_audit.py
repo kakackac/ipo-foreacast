@@ -10,6 +10,7 @@ class TrainingCohortAuditTests(unittest.TestCase):
             "event_class": ["general_ipo"] * 3, "market": ["KOSDAQ"] * 3,
             "institutional_demand_ratio": [100, 200, 300],
             "offering_price_band_position": [1, 1, 1],
+            "price_band_validation_status": ["verified_dart_currency_band_and_final_price_v1"] * 3,
             "lockup_commitment_ratio": [None, None, None],
             "institutional_validation_status": ["verified_dart_structural_aggregate_v1", "needs_review", "verified_dart_structural_aggregate_v1"],
             "lockup_validation_status": ["missing"] * 3,
