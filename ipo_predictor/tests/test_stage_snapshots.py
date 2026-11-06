@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 import pandas as pd
 
-from data.pipelines.stage_snapshots import demand_schedule, stage_documents, values_from_document, amendment_view, horizontal_after_cells, original_cache_hashes, reusable_checkpoint, document_analysis, section_text, StageResponseInvalid, result_day_document, same_demand_printed_rounding
+from data.pipelines.stage_snapshots import demand_schedule, stage_documents, values_from_document, amendment_view, horizontal_after_cells, original_cache_hashes, reusable_checkpoint, document_analysis, section_text, StageResponseInvalid, result_day_document, same_demand_printed_rounding, set_stage_offering_price_metadata, stage_collection_fields, stage_observation
 from features.model_profiles import get_model_profile
 from features.prediction_time_contract import validate_prediction_times
 
@@ -16,6 +16,65 @@ def schedule(start='2024년 02월 08일',end='02월 09일'):
 
 
 class StageSnapshotTests(unittest.TestCase):
+    def test_collection_is_a_superset_not_a_mutation_of_model_profiles(self):
+        before=get_model_profile('post_demand').feature_names
+        fields=stage_collection_fields()
+        self.assertTrue(set(get_model_profile('pre_demand').feature_names).issubset(fields))
+        self.assertTrue(set(before).issubset(fields))
+        self.assertIn('price_band_low',fields);self.assertIn('debt_ratio',fields)
+        self.assertNotIn('retail_subscription_ratio',fields);self.assertNotIn('lockup_6m_ratio',fields)
+        self.assertEqual(get_model_profile('post_demand').feature_names,before)
+
+    def test_stage_observation_keeps_dimensionless_units_and_phase_missing_reasons(self):
+        row={'event_id':'e','prediction_stage':'pre_demand','status':'historical_document_selected','prediction_at':'2024-01-01'}
+        missing=stage_observation(row,'offering_price_band_position',None,{}, {'offering_price_band_position':'direct_currency_band'})
+        self.assertEqual(missing['unit'],'dimensionless')
+        self.assertEqual(missing['missing_reason'],'not_available_before_demand_result')
+        row['prediction_stage']='post_demand'
+        present=stage_observation(row,'float_share_ratio',.3,{'available_at':'2023-12-31','source_url':'official'}, {})
+        self.assertFalse(present['is_missing']);self.assertEqual(present['value'],.3)
+        self.assertEqual(present['unit'],'fraction');self.assertIsNone(present['missing_reason'])
+
+    def price_metadata_case(self):
+        row={'prediction_stage':'post_demand','status':'historical_document_selected',
+             'prediction_at':'2024-02-02T00:01:00+09:00','offering_price':None,'target_offering_price':20000}
+        selected={'analysis':{'offering':{'offering_price':19000,
+            'offering_price_review_status':'verified_currency_unit','offering_price_finality':'confirmed_price_language',
+            'offering_price_parse_method':'final_price_table_row','offering_price_audit_context':'confirmed 19,000 KRW'}},
+            'proof':{'receipt':'20240201000001','corp_code':'00000001','available_at':'2024-02-02T00:00:00+09:00',
+                     'source_url':'https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20240201000001',
+                     'index_sha256':'a'*64,'sections':[{'url':'official','sha256':'b'*64}]}}
+        return row,selected
+
+    def test_post_stage_retains_its_verified_price_not_the_eventual_target(self):
+        row,selected=self.price_metadata_case();set_stage_offering_price_metadata(row,selected)
+        self.assertEqual(row['offering_price'],19000)
+        self.assertEqual(row['target_offering_price'],20000)
+        source=json.loads(row['offering_price_source'])
+        self.assertEqual(source['receipt'],'20240201000001')
+        self.assertEqual(source['unit'],'KRW_per_share')
+        self.assertEqual(source['role'],'stage_input_not_realized_target')
+
+    def test_pre_stage_never_inherits_a_confirmed_or_target_price(self):
+        row,selected=self.price_metadata_case();row['prediction_stage']='pre_demand'
+        set_stage_offering_price_metadata(row,selected)
+        self.assertIsNone(row['offering_price']);self.assertNotIn('offering_price_source',row)
+
+    def test_unverified_or_late_price_cannot_enter_stage_metadata(self):
+        row,selected=self.price_metadata_case();selected['analysis']['offering']['offering_price_finality']='planned'
+        set_stage_offering_price_metadata(row,selected);self.assertIsNone(row['offering_price'])
+        row,selected=self.price_metadata_case();selected['proof']['available_at']=row['prediction_at']
+        with self.assertRaisesRegex(ValueError,'not_available_at_cutoff'):
+            set_stage_offering_price_metadata(row,selected)
+        self.assertIsNone(row['offering_price'])
+
+    def test_stage_price_requires_an_original_section_and_leaves_held_rows_alone(self):
+        row,selected=self.price_metadata_case();selected['proof']['sections']=[]
+        with self.assertRaisesRegex(ValueError,'original_sections_missing'):
+            set_stage_offering_price_metadata(row,selected)
+        row['status']='source_access_failed';set_stage_offering_price_metadata(row,selected)
+        self.assertIsNone(row['offering_price'])
+
     def test_offering_analysis_cache_tracks_the_float_parser_dependency(self):
         from data.pipelines import stage_snapshots
         original=stage_snapshots.digest;revision=['first']
@@ -87,6 +146,25 @@ class StageSnapshotTests(unittest.TestCase):
         with self.assertRaises(ValueError):result_day_document(early,[early,full],unlinked,analyse)
         def wrong(m):return load(m)[0].replace('4,000원</td>','4,500원</td>'),load(m)[1]
         with self.assertRaisesRegex(ValueError,'price_not_reconciled'):result_day_document(early,[early,full],wrong,analyse)
+
+    def test_horizontal_price_label_aliases_only_crosscheck_a_linked_confirmed_document(self):
+        early={'rcept_no':'20211015000418','rcept_dt':'2021-10-15','report_nm':'[발행조건확정]증권신고서(지분증권)'}
+        full={'rcept_no':'20211015000435','rcept_dt':'2021-10-15','report_nm':'투자설명서'}
+        def analyse(m,b,c):
+            return {'offering':{'offering_price':25000,'offering_price_finality':'confirmed_price_language',
+                'offering_price_review_status':'verified_currency_unit'} if m==full else {},'demand':{}}
+        for label in ['모집가액','모집 및 매출가액','매출가액','모집(매출)확정가액','모집(매출)가액(확정)']:
+            body=f'<table><tr><td>항목</td><td>정정 전</td><td>정정 후</td></tr><tr><td>공통</td><td>예정</td><td>{label}: 25,000원</td></tr></table>'
+            def load(m):
+                return body if m==early else 'complete',{'corp_code':'00000001',
+                    'content_scope':'partial_terms_notice' if m==early else 'full',
+                    'related_receipts':[early['rcept_no'],full['rcept_no']]}
+            self.assertEqual(result_day_document(early,[early,full],load,analyse)[0],full)
+            for wrong in ['모집가액 총액: 25,000원','모집총액: 25,000원','액면가액: 25,000원',
+                          '모집가액: 25,000원 ~ 30,000원','모집가액: 26,000원','모집가액: 25,000주']:
+                def invalid(m):return (body.replace(f'{label}: 25,000원',wrong) if m==early else 'complete'),load(m)[1]
+                with self.assertRaisesRegex(ValueError,'price_not_reconciled'):
+                    result_day_document(early,[early,full],invalid,analyse)
 
     def test_http_200_error_html_is_not_saved_as_a_completed_original(self):
         class Response:

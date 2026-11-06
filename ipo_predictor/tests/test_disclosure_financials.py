@@ -9,6 +9,7 @@ import pandas as pd
 
 from data.pipelines.disclosure_financials import (
     collect_disclosure_financials, parse_disclosure_financials, public_financial_section,
+    select_financial_node,
 )
 from data.pipelines.financial_history import summarize_asof
 
@@ -42,6 +43,25 @@ def financial_index(receipt='20230315000001',date='2023.03.15',corp='12345678',n
 
 
 class DisclosureFinancialTests(unittest.TestCase):
+    def test_financial_chapter_not_its_other_financial_matters_subsection(self):
+        index=financial_index()
+        other=index[index.index('var node1'):].replace('node1','node2').replace('III. 재무에 관한 사항','8. 기타 재무에 관한 사항').replace('"3"','"300"')
+        for title in ['III. 재무에 관한 사항','Ⅲ. 재무에 관한 사항','3. 재무에 관한 사항']:
+            with self.subTest(title=title):
+                selected=select_financial_node(index.replace('III. 재무에 관한 사항',title)+other,'20230315000001')
+                self.assertEqual(selected['offset'],'3')
+        self.assertIsNone(select_financial_node(index+other,'20230315000002'))
+        self.assertIsNone(select_financial_node(other,'20230315000001'))
+
+    def test_identical_viewer_nodes_deduplicate_but_different_financial_chapters_do_not(self):
+        index=financial_index();node=index[index.index('var node1'):].replace('node1','node2')
+        self.assertEqual(select_financial_node(index+node,'20230315000001')['offset'],'3')
+        self.assertIsNone(select_financial_node(index+node.replace('"3"','"300"'),'20230315000001'))
+
+    def test_financial_index_javascript_whitespace_does_not_change_selection(self):
+        index=financial_index().replace('var node1 = {};','var  node1={ };')
+        self.assertEqual(select_financial_node(index,'20230315000001')['eleId'],'2')
+
     def test_explicit_annual_consolidated_reference_approves_only_its_year_and_basis(self):
         body='1. 요약연결재무정보 (단위: 원)'+table(summary(standard=False))
         note='이 중간연결재무제표는 2023년 9월 30일 현재의 자료입니다. 동 연결재무제표에 대한 이해를 위해서는 한국채택국제회계기준에 따라 작성된 2022년 12월 31일자로 종료하는 회계연도에 대한 연차연결재무제표를 함께 이용해야 합니다.'

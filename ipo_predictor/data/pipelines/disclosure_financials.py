@@ -28,12 +28,15 @@ def issuer_name(value):
 
 def select_financial_node(index, receipt):
     matches = []
-    for block in re.split(r"var node\d+ = \{\};", index)[1:]:
+    for block in re.split(r"var\s+node\d+\s*=\s*\{\s*\}\s*;", index)[1:]:
         fields = dict(re.findall(r"node\d+\['(text|rcpNo|dcmNo|eleId|offset|length|dtd)'\]\s*=\s*\"([^\"]*)\"", block))
-        if fields.get("rcpNo") == receipt and "재무에관한사항" in clean(fields.get("text", "")):
+        # The chapter and its "기타 재무에 관한 사항" subsection are distinct.
+        title = clean(fields.get("text", "")).upper()
+        if fields.get("rcpNo") == receipt and re.fullmatch(r"(?:[IVXLC]+|\d+)?재무에관한사항", title):
             if all(key in fields for key in ("rcpNo", "dcmNo", "eleId", "offset", "length", "dtd")):
                 matches.append({key: fields[key] for key in ("rcpNo", "dcmNo", "eleId", "offset", "length", "dtd")})
-    return matches[0] if len(matches) == 1 else None
+    unique = {tuple(node.items()): node for node in matches}
+    return next(iter(unique.values())) if len(unique) == 1 else None
 
 
 def public_financial_section(dart, receipt, corp_name, cache_dir, corp_code=None, published=None):

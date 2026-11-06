@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 19
+DEMAND_PARSER_VERSION = 20
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -1074,19 +1074,29 @@ class DARTCollector:
         if not table:
             return None
         table_text = " ".join(" ".join(row) for row in table)
+        # Only the immediate result heading establishes scope. Earlier bidding
+        # instructions may mention retail subscriptions and are not this table.
+        heading_text = re.sub(r"\s+", "", heading)
+        numbering = r"(?:[①-⑳]|\d+[.)]|\([가-하]\))*"
+        result_heading = re.search(
+            r"(?:수요예측결과(?:및배정결과)?(?:통보)?" + numbering
+            + r"(?:기관투자자)?수요예측(?:참여|참가)(?:내역|결과)"
+            r"|기관투자자수요예측(?:참여|참가)(?:내역|결과))$",
+            heading_text,
+        )
+        if result_heading and re.search(r"(?:국내|해외|일부|당사)$", heading_text[:result_heading.start()]):
+            result_heading = None
         # A two-row summary can carry its institutional scope in the immediate heading.
-        if len(table) == 2 and re.search(
-            r"수요예측결과(?:및배정결과)?(?:통보)?(?:[①1.]|\(가\))*(?:기관투자자)?수요예측참여내역$",
-            re.sub(r"\s+", "", heading)
-        ):
+        if len(table) == 2 and result_heading:
             headers = [re.sub(r"\s+", "", c) for c in table[0]]
             row = table[1]
             if headers[:1] == ['구분'] and len(row)==4 and re.sub(r'\s+','',row[0]) in {
                     '국내외기관투자자','국내및해외기관투자자','전체기관투자자','합계','전체'}:
                 headers,row=headers[1:],row[1:]
-            if (headers[0:1] in (["참여건수(건)"], ["참여건수"])
-                    and headers[1:2] in (["신청수량(주)"], ["신청수량"],['참여수량(주)'],['참여수량'])
-                    and headers[2:] == ["단순경쟁률"] and len(row) == 3):
+            if (len(headers) == 3 and len(row) == 3
+                    and re.fullmatch(r"(?:참여|참가)건수(?:\(건\))?", headers[0])
+                    and re.fullmatch(r"(?:신청수량|참여수량|참가수량|참여주식수)(?:\(주\))?", headers[1])
+                    and re.fullmatch(r"단순경쟁률(?:\([:：]1\))?", headers[2])):
                 counts = [re.fullmatch(r"([0-9][0-9,]*)\s*"+unit+'?', c.strip())
                           for c,unit in zip(row[:2],['건','주'])]
                 rate = re.fullmatch(r"([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s*[:：]\s*1)?", row[2].strip())
@@ -1095,7 +1105,7 @@ class DARTCollector:
                         "institutional_demand_ratio": float(rate.group(1).replace(",", "")),
                         "institutional_demand_parse_method": "demand_ratio_institutional_summary",
                         "institutional_demand_evidence": " | ".join(table[1]),
-                        "institutional_demand_rule_id": "DART_DEMAND_INSTITUTIONAL_SUMMARY_V3",
+                        "institutional_demand_rule_id": "DART_DEMAND_INSTITUTIONAL_SUMMARY_V4",
                         "institutional_demand_parser_validation_status": "structurally_verified",
                         "institutional_demand_structured_evidence": cls._table_evidence(
                             table, heading=heading, selected_row=1, selected_column=len(table[1])-1,
@@ -1104,8 +1114,10 @@ class DARTCollector:
                             scope="institutional_demand_participation_summary",
                         ),
                     }
-        institutional_header = bool(re.search(r'수요\s*예측\s*참여\s*(?:내역|결과)\s*$',heading)
-            and not re.search(r'일반\s*청약|개인\s*청약|비례\s*배정',heading)
+        category_heading = bool(result_heading or (
+            re.search(r'수요\s*예측\s*참여\s*(?:내역|결과)\s*$', heading)
+            and not re.search(r'일반\s*청약|개인\s*청약|비례\s*배정', heading)))
+        institutional_header = bool(category_heading
             and table and all(any(label in re.sub(r'\s+', '',cell) for cell in table[0])
                               for label in ('운용사(집합)','운용사(고유)','투자일임사')))
         if not institutional_header and not re.search(r"기관\s*(?:투자자)?|수요\s*예측", table_text):

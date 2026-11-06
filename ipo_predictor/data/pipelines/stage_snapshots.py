@@ -194,7 +194,8 @@ def result_day_document(metadata, terms, load, analyse=None):
         price=partial_analysis['offering'];demand=partial_analysis['demand']
         if view and view.get('rule')=='horizontal_after_cells_consistency_only_v1':
             explicit_prices={int(x.replace(',','')) for x in re.findall(
-                r'모집\s*\(\s*매출\s*\)\s*(?:확정)?가액\s*(?:\(\s*예정\s*\))?\s*[:：]\s*([0-9][0-9,]*)\s*원(?!\s*[~～])',
+                r'(?:모집\s*\(\s*매출\s*\)|모집\s*및\s*매출|모집|매출)\s*'
+                r'(?:확정)?가액\s*(?:\(\s*(?:예정|확정)\s*\))?\s*[:：]\s*([0-9][0-9,]*)\s*원(?!\s*[~～])',
                 DARTCollector._normalize_text(body))}
             if not explicit_prices or explicit_prices!={full_price.get('offering_price')}:
                 raise ValueError('stage_horizontal_amendment_price_not_reconciled')
@@ -450,6 +451,62 @@ def values_from_document(dart, selected, corp, stage):
     return values, reasons
 
 
+def set_stage_offering_price_metadata(row, selected):
+    """Keep the contemporaneous price separate from the eventual target price."""
+    if row['prediction_stage']!='post_demand' or row['status']!='historical_document_selected':
+        return
+    price=selected['analysis']['offering'];origin=selected['proof']
+    if (price.get('offering_price_review_status')!='verified_currency_unit'
+            or price.get('offering_price_finality')!='confirmed_price_language'):
+        return
+    value=price.get('offering_price')
+    if value is None or not math.isfinite(float(value)) or value<=0:
+        raise ValueError('post_demand_input_price_invalid')
+    if not local(origin['available_at'])<local(row['prediction_at']):
+        raise ValueError('post_demand_input_price_not_available_at_cutoff')
+    if not origin.get('sections'):
+        raise ValueError('post_demand_input_price_original_sections_missing')
+    source={key:origin[key] for key in ('receipt','corp_code','source_url','index_sha256','sections','available_at')}
+    source.update(unit='KRW_per_share',validation_status='verified_stage_asof_offering_price_v1',
+        parse_method=price.get('offering_price_parse_method'),
+        raw_context=price.get('offering_price_audit_context'),role='stage_input_not_realized_target')
+    row.update(offering_price=float(value),offering_price_available_at=origin['available_at'],
+               offering_price_source=json.dumps(source,ensure_ascii=False,sort_keys=True))
+
+
+def stage_collection_fields():
+    """Retain collected observations independently of a model's feature subset."""
+    return tuple(dict.fromkeys((*get_model_profile('pre_demand').feature_names,
+                                *get_model_profile('post_demand').feature_names,*EXTRA_FEATURES)))
+
+
+def stage_feature_missing_reason(stage, field, reasons, status):
+    if stage=='pre_demand' and field in {'institutional_demand_ratio','lockup_commitment_ratio',
+                                        'offering_price_band_position','band_exceeded'}:
+        return 'not_available_before_demand_result'
+    return reasons.get(field,status if status!='historical_document_selected' else 'selected_asof_source_not_verified')
+
+
+def stage_feature_unit(field):
+    if field in ('price_band_low','price_band_high'):return 'KRW_per_share'
+    return {'institutional_demand_ratio':'times','underwriter_tier':'ordinal_tier',
+            'offering_price_band_position':'dimensionless','major_shareholder_lockup_months':'months',
+            'risk_factor_count':'count','band_exceeded':'flag','offering_type_spac_ipo':'flag',
+            'recent_ipo_avg_return_all':'percent','recent_ipo_avg_return_sector':'percent'}.get(field,'fraction')
+
+
+def stage_observation(row, field, value, origin, reasons):
+    return {'event_id':row['event_id'],'stage':row['prediction_stage'],'feature_name':field,'value':value,
+        'is_missing':value is None,'missing_reason':None if value is not None else
+            stage_feature_missing_reason(row['prediction_stage'],field,reasons,row['status']),
+        'unit':stage_feature_unit(field),
+        'validation_status':origin.get('validation_status','verified_stage_asof_input_v1') if value is not None else 'unverified_or_missing',
+        'available_at':origin.get('available_at'),'prediction_at':row['prediction_at'],
+        'available_at_is_effective':True,
+        'time_validation_status':'pre_listing_verified' if value is not None else 'missing',
+        'source':json.dumps(origin,ensure_ascii=False),'absence_confirmed':False}
+
+
 def financials_from_selected_document(dart,raw,selected,corp,cached_only):
     """An early stage needs its own annual section, not the eventual final prospectus."""
     origin=selected['proof'];receipt=origin['receipt'];cache=Path(raw)/'dart_connection_sources'
@@ -606,7 +663,7 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
         analyse=lambda m,b,c:document_analysis(dart,b,m['rcept_no'],c,raw)
         stages=stage_documents(list(family.values()),load,record['listing_date'],anchor,analyse)
         for stage,selected in stages.items():
-            fields=tuple(dict.fromkeys((*get_model_profile(stage).feature_names,*EXTRA_FEATURES)))
+            fields=stage_collection_fields()
             row={'event_id':event.event_id,'corp_code':record['corp_code'],'corp_name':event.corp_name,
                 'listing_date':record['listing_date'],'prediction_stage':stage,'status':selected['status'],
                 'prediction_at':None,'selected_receipt':None,'offering_price':None,
@@ -630,6 +687,7 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
                     if 'analysis' not in selected:
                         selected['analysis']=analyse(selected['metadata'],selected['html'],str(record['corp_code']))
                     values,reasons=values_from_document(dart,selected,str(record['corp_code']),stage)
+                    set_stage_offering_price_metadata(row,selected)
                 except ValueError as exc:row['status']=str(exc);values={}
                 origins={f:{**origin,'extraction_evidence':selected.get('field_evidence',{}).get(f)}
                          for f in set(values)|set(reasons)}
@@ -687,21 +745,7 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
                 if value is not None and (not math.isfinite(float(value)) or not local(origin['available_at'])<local(row['prediction_at'])):
                     raise RuntimeError('stage_feature_time_or_value_violation')
                 row[field]=value
-                ledger.append({'event_id':event.event_id,'stage':stage,'feature_name':field,'value':value,
-                    'is_missing':value is None,'missing_reason':None if value is not None else reasons.get(field,
-                        row['status'] if row['status']!='historical_document_selected' else 'selected_asof_source_not_verified'),
-                    'unit':('KRW_per_share' if field in ('price_band_low','price_band_high') else
-                            'times' if field=='institutional_demand_ratio' else
-                            'ordinal_tier' if field=='underwriter_tier' else
-                            'percent' if field.startswith('recent_ipo_avg_return') else
-                            'months' if field=='major_shareholder_lockup_months' else
-                            'count' if field=='risk_factor_count' else
-                            'flag' if field in ('band_exceeded','offering_type_spac_ipo') else 'fraction'),
-                    'validation_status':origin.get('validation_status','verified_stage_asof_input_v1') if value is not None else 'unverified_or_missing',
-                    'available_at':origin.get('available_at'),'prediction_at':row['prediction_at'],
-                    'available_at_is_effective':True,
-                    'time_validation_status':'pre_listing_verified' if value is not None else 'missing',
-                    'source':json.dumps(origin,ensure_ascii=False),'absence_confirmed':False})
+                ledger.append(stage_observation(row,field,value,origin,reasons))
             critical=get_model_profile(stage).critical_features
             time_audit=pd.DataFrame([x for x in ledger[-len(fields):]])
             row['stage_time_valid']=bool(validate_prediction_times(pd.DataFrame([row]),get_model_profile(stage),time_audit).iloc[0])
