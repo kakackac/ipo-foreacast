@@ -332,7 +332,9 @@ class FeatureEngineer:
             df["lockup_commitment_ratio"] = np.nan
         df["lockup_commitment_ratio"] = pd.to_numeric(
             df["lockup_commitment_ratio"], errors="coerce"
-        ).clip(0, 1)
+        )
+        df["lockup_commitment_ratio"] = df["lockup_commitment_ratio"].where(
+            df["lockup_commitment_ratio"].between(0, 1))
         return df
 
     # ── 공모가 밴드 위치 ───────────────────────────────────────
@@ -415,7 +417,9 @@ class FeatureEngineer:
             )
         df["secondary_offering_ratio"] = pd.to_numeric(
             df["secondary_offering_ratio"], errors="coerce"
-        ).clip(0, 1)
+        )
+        df["secondary_offering_ratio"] = df["secondary_offering_ratio"].where(
+            df["secondary_offering_ratio"].between(0, 1))
         new_status = df.get("new_shares_parser_validation_status", pd.Series("", index=df.index))
         secondary_status = df.get(
             "secondary_shares_parser_validation_status", pd.Series("", index=df.index)
@@ -445,7 +449,8 @@ class FeatureEngineer:
             df["float_share_ratio"] = valid_disclosed_ratio.combine_first(calculated_ratio)
         df["float_share_ratio"] = pd.to_numeric(
             df["float_share_ratio"], errors="coerce"
-        ).clip(0, 1)
+        )
+        df["float_share_ratio"] = df["float_share_ratio"].where(df["float_share_ratio"].between(0, 1))
         float_method = df.get("public_float_parse_method", pd.Series("", index=df.index))
         total_status = df.get(
             "total_post_listing_shares_parser_validation_status",
@@ -456,6 +461,8 @@ class FeatureEngineer:
             | (
                 float_method.eq("disclosed_public_float_shares_direct_context")
                 & total_status.eq("structurally_verified")
+                & df.get("total_post_listing_shares_parse_method", pd.Series("", index=df.index)).eq(
+                    "same_table_post_offering_scope_v1")
             )
         )
         df["float_share_validation_status"] = np.where(

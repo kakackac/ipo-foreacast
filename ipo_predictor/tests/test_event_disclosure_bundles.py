@@ -179,7 +179,7 @@ class EventDisclosureBundleTests(unittest.TestCase):
                                 total_post_listing_shares=1000)
         extra = self.document(public_float_shares=100, public_float_parse_method='disclosed_public_float_shares_direct_context',
                               public_float_parse_evidence='100 shares', total_post_listing_shares=200,
-                              total_post_listing_shares_parse_method='direct_table_row_v1',
+                              total_post_listing_shares_parse_method='same_table_post_offering_scope_v1',
                               total_post_listing_shares_parse_evidence='200 shares',
                               total_post_listing_shares_parser_validation_status='structurally_verified')
         values, _, proof, _, _, _ = self.connect(primary, extra)
@@ -264,6 +264,7 @@ class EventDisclosureBundleTests(unittest.TestCase):
     def test_structure_cannot_overwrite_independently_selected_float_denominator(self):
         primary = self.document(**self.structure(new=100, secondary=0),
                                 public_float_shares=100, public_float_parse_method='disclosed_public_float_shares_direct_context',
+                                total_post_listing_shares_parse_method='same_table_post_offering_scope_v1',
                                 total_post_listing_shares=200, total_post_listing_shares_parser_validation_status='structurally_verified')
         extra = self.document(**self.structure(new=200, secondary=50), total_post_listing_shares=1000)
         _, _, proof, _, _, _ = self.connect(primary, extra)

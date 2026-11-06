@@ -38,7 +38,20 @@ SAMPLES = {
     "dypiston_prospectus_2017": "20171127000116",
     "maxst_prospectus_2021": "20210715000154",
     "yas_correction_2017": "20170926000244",
+    "airbusan_risks_2018": "20181217000216",
+    "koreacenter_risks_2019": "20191120000496",
 }
+
+
+def reuse_verified_original(url, path):
+    cache=path.parent.parent/'dart_connection_sources'/(hashlib.sha256(url.encode()).hexdigest()+'.json')
+    if not cache.exists():
+        return False
+    original=json.loads(cache.read_text())
+    if original.get('url')!=url or hashlib.sha256(original['text'].encode()).hexdigest()!=original.get('sha256'):
+        raise ValueError('official_sample_cached_original_integrity_failed')
+    path.write_text(original['text'],encoding='utf-8')
+    return True
 
 
 def select_document(index, receipt, section=None):
@@ -105,6 +118,8 @@ def main():
         main_url = "https://dart.fss.or.kr/dsaf001/main.do?" + urlencode({"rcpNo": receipt})
         main_path = output / f"{name}_index.html"
         if not main_path.exists():
+            reuse_verified_original(main_url,main_path)
+        if not main_path.exists():
             if args.cached_only:
                 records.append({"sample": name, "status": "cache_missing"})
                 continue
@@ -122,12 +137,16 @@ def main():
                    "maint_prospectus_2015": "Ⅰ. 모집 또는 매출에 관한 일반사항",
                    "dypiston_prospectus_2017": "Ⅰ. 모집 또는 매출에 관한 일반사항",
                    "maxst_prospectus_2021": "Ⅰ. 모집 또는 매출에 관한 일반사항"}.get(name)
+        if name in {'airbusan_risks_2018','koreacenter_risks_2019'}:
+            section='Ⅲ. 투자위험요소'
         parameters = select_document(index, receipt, section)
         if not parameters:
             records.append({"sample": name, "receipt": receipt, "status": "viewer_link_not_found"})
             continue
         url = "https://dart.fss.or.kr/report/viewer.do?" + urlencode(parameters)
         body_path = output / (f"{name}_section_{parameters['eleId']}.html" if section else f"{name}_body.html")
+        if not body_path.exists():
+            reuse_verified_original(url,body_path)
         if not body_path.exists():
             if args.cached_only:
                 records.append({"sample": name, "status": "cache_missing"})

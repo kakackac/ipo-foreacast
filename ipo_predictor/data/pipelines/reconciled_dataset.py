@@ -131,7 +131,20 @@ def validate_snapshot(features,observations):
     if (features.event_id.duplicated().any() or observations.duplicated(['event_id','feature_name']).any()
             or not set(observations.event_id).issubset(features.event_id)):
         raise RuntimeError('reconciled_snapshot_identity_violation')
+    names=set(FeatureEngineer('phase2').feature_names)
+    if (set(observations.feature_name)!=names or set(observations.event_id)!=set(features.event_id)
+            or len(observations)!=len(features)*len(names)):
+        raise RuntimeError('reconciled_snapshot_observation_lattice_incomplete')
     lookup=features.set_index('event_id')
+    for row in observations.itertuples(index=False):
+        event=lookup.loc[row.event_id]
+        value=event[row.feature_name]
+        missing=pd.isna(value)
+        if (bool(event[row.feature_name+'__missing'])!=missing
+                or pd.isna(row.model_value)!=missing
+                or bool(row.model_eligible)==missing
+                or (not missing and not math.isclose(float(value),float(row.model_value),rel_tol=1e-10,abs_tol=1e-10))):
+            raise RuntimeError('reconciled_snapshot_ledger_value_or_missing_flag_mismatch')
     time_violations=value_violations=scope_violations=0
     used=observations[observations.model_eligible]
     for row in used.itertuples(index=False):

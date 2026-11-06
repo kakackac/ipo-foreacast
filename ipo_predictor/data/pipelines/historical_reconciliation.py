@@ -88,7 +88,9 @@ def connection_contract():
              'connection':here.with_name('disclosure_connections.py'),
              'resolver':here.with_name('event_disclosures.py'),
              'record':here.with_name('historical_event_recovery.py'),
-             'float':here.with_name('float_source_resolver.py'), 'adapter':here}
+             'float':here.with_name('float_source_resolver.py'),
+             'float_tables':here.parents[1]/'collectors/float_tables.py',
+             'corrections':here.with_name('correction_views.py'), 'adapter':here}
     return {name:digest(path) for name,path in paths.items()}
 
 
@@ -104,6 +106,9 @@ def connect_one(dart, raw, event, record, cached_only):
     try:
         result = connect_event(dart,raw,event,[candidate],cached_only,verify_current_market=False)
     except ValueError as exc:
+        if str(exc)=='price_source_predates_latest_partial_correction':
+            from data.pipelines.correction_views import connect_corrected_notice
+            return connect_corrected_notice(dart,raw,event,record)[0]
         # Discover a new seed only for linkage failures. Select the latest body
         # from a complete official date-bounded list, never search for a value fit.
         if str(exc) not in {'official_selected_receipt_conflict','official_family_reverse_link_missing',
@@ -127,10 +132,70 @@ def connect_one(dart, raw, event, record, cached_only):
                                      for field,value in values.items()}}
 
 
+def reusable_connections(raw, processed, inputs, contract):
+    """Reuse only a complete, source-checked version of the same execution contract."""
+    if not (processed/'current_historical_source_connections.json').exists():
+        return None
+    from data.pipelines.reconciled_dataset import pin_connections
+    path, report = pin_connections(processed)
+    stored_contract = report.get('replay_contract', report['inputs']['contract'])
+    if report['inputs']['inputs'] != inputs['input_sha256'] or stored_contract != contract:
+        return None
+    rows = pd.read_parquet(path/'connection_results.parquet')
+    target = inputs['events'].loc[inputs['events'].event_class.eq('general_ipo'), 'event_id']
+    if (rows.event_id.duplicated().any() or set(rows.event_id) != set(target)
+            or not rows.status.eq('official_sources_connected').all()):
+        return None
+    originals = {}
+    for row in rows.itertuples(index=False):
+        capture_sources(raw, json.loads(row.proof).get('sources', []), originals)
+    return {**report, 'path':str(path), 'reused':True}
+
+
+def feature_tasks(results):
+    """Account for every event/field, including optional fields missed by old gates."""
+    fields = {
+        'offering_price': ('offering_price', 'offering_price_review_status'),
+        'institutional_demand_ratio': ('institutional_demand_ratio', 'institutional_demand_parser_validation_status'),
+        'lockup_commitment_ratio': ('lockup_commitment_ratio', 'lockup_parser_validation_status'),
+        'price_band': ('price_band_low', 'price_band_validation_status'),
+        'public_float': ('public_float_ratio_disclosed', 'public_float_resolution_status'),
+        'new_shares': ('new_shares', 'new_shares_parser_validation_status'),
+        'secondary_shares': ('secondary_shares', 'secondary_shares_parser_validation_status'),
+    }
+    tasks=[]
+    for row in results:
+        record=json.loads(row['record']);proof=json.loads(row['proof'])
+        for field,(value_key,status_key) in fields.items():
+            status=record.get(status_key)
+            value=record.get(value_key)
+            if field=='public_float' and value is None and record.get('public_float_shares') is not None:
+                value=record['public_float_shares']
+            reason=(row['reason'] if row['status']!='official_sources_connected' else
+                    None if value is not None else status or 'selected_document_no_extraction_record')
+            tasks.append({'event_id':row['event_id'],'corp_name':row['corp_name'],'feature':field,
+                'processed':row['status']=='official_sources_connected','value_present':value is not None,
+                'validation_status':status,'missing_reason':reason,'absence_confirmed':False,
+                'attempt':'cached_official_lineage_and_latest_related_prospectus',
+                'source_urls':json.dumps([s['url'] for s in proof.get('sources',[])]),
+                'source_hashes':json.dumps([s['sha256'] for s in proof.get('sources',[])]),
+                'remaining_action':None if value is not None else 'inspect_recorded_source_and_rejection_evidence_not_nonpublication',
+                'record_evidence':json.dumps({k:v for k,v in record.items() if k.startswith(
+                    ('public_float','total_post_listing'))},ensure_ascii=False) if field=='public_float' else
+                    json.dumps({k:v for k,v in record.items() if k.startswith(
+                        'institutional_demand_' if field=='institutional_demand_ratio' else
+                        'lockup_' if field=='lockup_commitment_ratio' else value_key)},ensure_ascii=False)})
+    return pd.DataFrame(tasks)
+
+
 def collect_connections(raw_dir, processed_dir, dart=None, cached_only=False, event_limit=None):
     raw, processed = Path(raw_dir).resolve(), Path(processed_dir).resolve()
     inputs = load_inputs(raw,processed)
     contract = connection_contract()
+    if event_limit is None:
+        reused = reusable_connections(raw, processed, inputs, contract)
+        if reused is not None:
+            return reused
     dart = dart or DARTCollector()
     records = inputs['records'].set_index('event_id')
     features = inputs['features'].set_index('event_id')
@@ -199,6 +264,7 @@ def collect_connections(raw_dir, processed_dir, dart=None, cached_only=False, ev
         destination.parent.mkdir(parents=True,exist_ok=True)
         staging=Path(tempfile.mkdtemp(prefix='.reconcile.',dir=destination.parent))
         pd.DataFrame(results).to_parquet(staging/'connection_results.parquet',index=False)
+        feature_tasks(results).to_parquet(staging/'feature_tasks.parquet',index=False)
         inputs['events'].to_parquet(staging/'events.parquet',index=False)
         atomic_json(staging/'source_documents.json',originals)
         report={'version':version,'phase':'source_connections','population':population,'processed':len(results),
@@ -206,11 +272,13 @@ def collect_connections(raw_dir, processed_dir, dart=None, cached_only=False, ev
                 'inputs':identity,'started_at':started,'finished_at':pd.Timestamp.now(tz='Asia/Seoul').isoformat(),
                 'training_executed':False,'deployment_authorized':False,'production_files_replaced':False,
                 'remaining_phases':['financial_reconciliation','feature_contracts','integrated_time_and_unit_validation'],
-                'output_sha256':{name:digest(staging/name) for name in ['connection_results.parquet','events.parquet','source_documents.json']}}
+                'output_sha256':{name:digest(staging/name) for name in ['connection_results.parquet','feature_tasks.parquet','events.parquet','source_documents.json']}}
         atomic_json(staging/'manifest.json',report)
         staging.rename(destination)
     else: report=checked_artifact(destination)
-    if event_limit is None:
+    # A failed batch remains inspectable/resumable but cannot replace a complete
+    # source version consumed by the financial and dataset pipelines.
+    if event_limit is None and all(row['status']=='official_sources_connected' for row in results):
         atomic_json(processed/'current_historical_source_connections.json',
                     {'manifest':str((destination/'manifest.json').relative_to(processed)),'sha256':digest(destination/'manifest.json')})
     return {**report,'path':str(destination)}

@@ -7,6 +7,7 @@ FLOAT_FIELDS = (
     "public_float_parse_evidence", "total_post_listing_shares",
     "total_post_listing_shares_parse_method", "total_post_listing_shares_parse_evidence",
     "total_post_listing_shares_parser_validation_status",
+    "public_float_basis_status",
 )
 
 
@@ -44,6 +45,10 @@ def resolve_public_float(documents, offering_price, listing_date):
             "total_post_listing_shares_parser_validation_status"
         ) != "structurally_verified":
             result["public_float_resolution_status"] = "latest_source_denominator_unverified"
+            return result
+        if (method == "disclosed_public_float_shares_direct_context" and document.get(
+                "total_post_listing_shares_parse_method") != "same_table_post_offering_scope_v1"):
+            result["public_float_resolution_status"] = "latest_source_denominator_scope_unverified"
             return result
         result.update({field: document.get(field) for field in FLOAT_FIELDS})
         result.update(public_float_rcept_no=str(metadata["rcept_no"]),

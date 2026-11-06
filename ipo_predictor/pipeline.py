@@ -599,7 +599,7 @@ if __name__ == "__main__":
             "train", "backtest", "analyze", "demo", "collect", "collect-events",
             "audit-dart-failures", "prepare-underwriter-institutional-review-queue",
             "audit-underwriter-source-readiness", "build-research-dataset", "collect-and-build",
-            "plan-financials", "collect-financials", "collect-snapshot-prices", "integrate-event-snapshot", "collect-event-disclosures", "collect-event-context", "recover-historical-events", "reconcile-historical-sources", "reconcile-historical-financials", "build-reconciled-dataset", "collect-reconciled-context",
+            "plan-financials", "collect-financials", "collect-snapshot-prices", "integrate-event-snapshot", "collect-event-disclosures", "collect-event-context", "recover-historical-events", "reconcile-historical-sources", "reconcile-historical-financials", "build-reconciled-dataset", "collect-reconciled-context", "reconcile-data",
         ],
         default="demo",
         help="실행 모드",
@@ -680,13 +680,14 @@ if __name__ == "__main__":
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.research_dataset import run
         print(json.dumps(run(RAW_DIR, PROC_DIR, financial_repair=args.financial_repair), ensure_ascii=False))
+    elif args.mode == 'reconcile-data':
+        from config import RAW_DIR, PROC_DIR
+        from data.pipelines.reconciliation_run import run
+        print(json.dumps(run(RAW_DIR,PROC_DIR,cached_only=args.connection_cached_only),ensure_ascii=False))
     elif args.mode == 'reconcile-historical-sources':
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.historical_reconciliation import collect_connections
         result=collect_connections(RAW_DIR,PROC_DIR,cached_only=args.connection_cached_only,event_limit=args.reconcile_limit)
-        if args.reconcile_limit is None:
-            from data.pipelines.correction_views import amend_connections
-            result=amend_connections(RAW_DIR,PROC_DIR)
         print(json.dumps(result,ensure_ascii=False))
     elif args.mode == 'reconcile-historical-financials':
         from config import RAW_DIR, PROC_DIR

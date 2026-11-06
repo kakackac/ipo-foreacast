@@ -8,7 +8,7 @@ import pandas as pd
 
 from data.pipelines.data_delivery import digest
 from data.pipelines.financial_history import atomic_json
-from data.pipelines.reconciled_dataset import run,market_asof,normalise_observation_times,prior_targets_asof
+from data.pipelines.reconciled_dataset import run,market_asof,normalise_observation_times,prior_targets_asof,validate_snapshot
 
 
 class ReconciledDatasetTests(unittest.TestCase):
@@ -82,3 +82,15 @@ class ReconciledDatasetTests(unittest.TestCase):
             self.assertFalse(pointer['deployment_authorized'])
             self.assertTrue((Path(first['path'])/'kospi_index_snapshot.parquet').exists())
             self.assertTrue((Path(first['path'])/'event_master.parquet').exists())
+            observations=pd.read_parquet(Path(first['path'])/'feature_observations.parquet')
+            with self.assertRaisesRegex(RuntimeError,'lattice_incomplete'):
+                validate_snapshot(features,observations.iloc[1:])
+            corrupted=observations.copy()
+            used=corrupted.index[corrupted.model_eligible][0]
+            corrupted.at[used,'model_value']=999999
+            with self.assertRaisesRegex(RuntimeError,'ledger_value_or_missing_flag'):
+                validate_snapshot(features,corrupted)
+            corrupted=observations.copy()
+            corrupted.at[used,'available_at']=pd.Timestamp('2025-01-01',tz='UTC')
+            with self.assertRaisesRegex(RuntimeError,'time_value_or_scope'):
+                validate_snapshot(features,corrupted)

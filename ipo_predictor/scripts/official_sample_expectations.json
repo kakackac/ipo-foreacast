@@ -234,6 +234,20 @@
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260929000194&dcmNo=11593668&eleId=14&offset=935732&length=674714&dtd=dart4.xsd",
       "sha256": "241762fbe88fac21aeff565e576bc4d29afb6ae128ea4cfb42cd30222f346efd",
       "expected": {"public_float_ratio_disclosed": 0.345}
+    },
+    {
+      "sample": "airbusan_risks_2018",
+      "receipt": "20181217000216",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20181217000216&dcmNo=6420067&eleId=16&offset=492453&length=282212&dtd=dart3.xsd",
+      "sha256": "f888c96c0ffa0844f7c8483d643c806faa78aeaf85add7548e6f178acbd60c57",
+      "expected": {"public_float_shares": 27920600, "total_post_listing_shares": 52070000, "public_float_ratio_disclosed": 0.5362}
+    },
+    {
+      "sample": "koreacenter_risks_2019",
+      "receipt": "20191120000496",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20191120000496&dcmNo=6967054&eleId=17&offset=561146&length=307625&dtd=dart3.xsd",
+      "sha256": "18dc936d0d62ce2812c2651ea8b29dee4f15de75b2b9ec43e08ad9097a62f54d",
+      "expected": {"public_float_shares": 2396023, "total_post_listing_shares": 24031048, "public_float_ratio_disclosed": 0.0997}
     }
   ]
 }

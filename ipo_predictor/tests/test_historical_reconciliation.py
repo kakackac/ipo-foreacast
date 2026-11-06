@@ -64,3 +64,26 @@ class HistoricalReconciliationTests(unittest.TestCase):
         self.assertEqual(missing_category('annual_financial_table_format_unhandled',
                          {'rejected_table_or_column_counts':{'accounting_basis_unverified':2}}),
                          'accounting_basis_unverified')
+
+    def test_failed_full_batch_preserves_last_complete_pointer(self):
+        with tempfile.TemporaryDirectory() as root, patch('data.pipelines.historical_reconciliation.load_inputs',return_value=self.inputs()), \
+                patch('data.pipelines.historical_reconciliation.capture_sources'), \
+                patch('data.pipelines.historical_reconciliation.connect_one',return_value=self.result()):
+            raw,processed=Path(root)/'raw',Path(root)/'processed'
+            collect_connections(raw,processed,dart=object())
+            pointer=processed/'current_historical_source_connections.json'
+            previous=pointer.read_bytes()
+            with patch('data.pipelines.historical_reconciliation.connection_contract',return_value={'changed':'parser'}), \
+                    patch('data.pipelines.historical_reconciliation.connect_one',side_effect=ValueError('official_source_not_cached')):
+                failed=collect_connections(raw,processed,dart=object())
+            self.assertEqual(failed['status_counts'],{'pending_source_download':1})
+            self.assertEqual(pointer.read_bytes(),previous)
+
+    def test_partial_correction_is_resolved_in_normal_connection_path(self):
+        from data.pipelines.historical_reconciliation import connect_one
+        event=next(self.inputs()['events'].itertuples(index=False))
+        record=self.inputs()['records'].iloc[0]
+        with patch('data.pipelines.historical_reconciliation.connect_event',side_effect=ValueError('price_source_predates_latest_partial_correction')), \
+                patch('data.pipelines.correction_views.connect_corrected_notice',return_value=(self.result(),{})) as corrected:
+            self.assertEqual(connect_one(object(),Path('/tmp'),event,record,True),self.result())
+            corrected.assert_called_once()

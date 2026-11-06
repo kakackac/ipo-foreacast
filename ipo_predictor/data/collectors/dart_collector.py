@@ -465,6 +465,7 @@ class DARTCollector:
         """
         result = {
             "corp_code":              corp_code,
+            "dart_final_terms_demand_parser_version": DEMAND_PARSER_VERSION,
             "institutional_demand_ratio": None,
             "demand_offering_price":  None,
             "demand_offering_price_context": None,
@@ -860,6 +861,11 @@ class DARTCollector:
             result.update(public_float_shares=None, public_float_ratio_disclosed=None,
                           public_float_parse_method="conflicting_float_ratios_review_required",
                           public_float_parse_evidence=json.dumps(sorted(unique_ratios)))
+
+        # A same-table post-offering subtotal is stronger than a historical
+        # issued-share label or an unrevised narrative elsewhere in the filing.
+        from data.collectors.float_tables import ownership_float
+        result.update(ownership_float(tables))
 
         # 대표 주관사
         underwriter_pattern = (
