@@ -36,7 +36,7 @@ class FeatureDef:
     description: str
     source:      str           # 데이터 출처
     formula:     str           # 계산 공식 or 추출 방법
-    fill_na:     str           # "mean", "median", "zero", "flag" (결측 처리)
+    fill_na:     str           # "mean", "median", "zero", "flag" (학습 분할 뒤 결측 처리)
     clip:        Optional[tuple] = None   # (min, max) 클리핑 범위
 
     def __repr__(self):
@@ -58,81 +58,21 @@ CORE_FEATURES: list[FeatureDef] = [
         importance  = Importance.CORE,
         dtype       = "float",
         description = "기관 수요예측 경쟁률",
-        source      = "DART 수요예측 결과 공시 (ipo_demand_forecast)",
+        source      = "DART 수요예측 결과 공시 또는 주관사 공식 수요예측 결과 공지",
         formula     = "기관 신청 물량 합계 / 배정 가능 물량",
         fill_na     = "median",
         clip        = (0, 3000),
     ),
 
     FeatureDef(
-        name        = "retail_subscription_ratio",
-        group       = FeatureGroup.SUBSCRIPTION,
+        name        = "lockup_commitment_ratio",
+        group       = FeatureGroup.SUPPLY,
         importance  = Importance.CORE,
         dtype       = "float",
-        description = "개인 청약 경쟁률",
-        source      = "각 증권사 청약결과 공시 / KRX IPO 페이지",
-        formula     = "개인 청약 신청 주수 합계 / 개인 배정 물량",
+        description = "기관 의무보유확약 통합 비율",
+        source      = "DART 최종 발행조건 또는 대표주관사 공식 수요예측 결과",
+        formula     = "원문 직접 공시값 우선; 없을 때만 같은 문서의 6/3/1개월·15일 비율 합계",
         fill_na     = "median",
-        clip        = (0, 5000),
-    ),
-
-    FeatureDef(
-        name        = "lockup_6m_ratio",
-        group       = FeatureGroup.SUPPLY,
-        importance  = Importance.CORE,
-        dtype       = "float",
-        description = "기관 6개월 의무보유확약 비율",
-        source      = "DART 수요예측 결과 공시",
-        formula     = "6개월 확약 신청 물량 / 전체 기관 배정 물량",
-        fill_na     = "zero",
-        clip        = (0, 1),
-    ),
-
-    FeatureDef(
-        name        = "lockup_3m_ratio",
-        group       = FeatureGroup.SUPPLY,
-        importance  = Importance.CORE,
-        dtype       = "float",
-        description = "기관 3개월 의무보유확약 비율",
-        source      = "DART 수요예측 결과 공시",
-        formula     = "3개월 확약 신청 물량 / 전체 기관 배정 물량",
-        fill_na     = "zero",
-        clip        = (0, 1),
-    ),
-
-    FeatureDef(
-        name        = "lockup_1m_ratio",
-        group       = FeatureGroup.SUPPLY,
-        importance  = Importance.CORE,
-        dtype       = "float",
-        description = "기관 1개월 의무보유확약 비율",
-        source      = "DART 수요예측 결과 공시",
-        formula     = "1개월 확약 신청 물량 / 전체 기관 배정 물량",
-        fill_na     = "zero",
-        clip        = (0, 1),
-    ),
-
-    FeatureDef(
-        name        = "lockup_15d_ratio",
-        group       = FeatureGroup.SUPPLY,
-        importance  = Importance.CORE,
-        dtype       = "float",
-        description = "기관 15일 의무보유확약 비율",
-        source      = "DART 수요예측 결과 공시",
-        formula     = "15일 확약 신청 물량 / 전체 기관 배정 물량",
-        fill_na     = "zero",
-        clip        = (0, 1),
-    ),
-
-    FeatureDef(
-        name        = "lockup_weighted_score",
-        group       = FeatureGroup.SUPPLY,
-        importance  = Importance.CORE,
-        dtype       = "float",
-        description = "확약기간 가중 점수 (파생 피처)",
-        source      = "lockup_6m/3m/1m/15d_ratio 파생",
-        formula     = "6m×1.0 + 3m×0.75 + 1m×0.5 + 15d×0.25",
-        fill_na     = "zero",
         clip        = (0, 1),
     ),
 
@@ -156,7 +96,7 @@ CORE_FEATURES: list[FeatureDef] = [
         description = "공모가가 희망밴드 상단을 초과했는지 여부",
         source      = "offering_price_band_position 파생",
         formula     = "offering_price_band_position > 1.0",
-        fill_na     = "zero",
+        fill_na     = "median",
     ),
 
     FeatureDef(
@@ -167,7 +107,7 @@ CORE_FEATURES: list[FeatureDef] = [
         description = "상장일 기준 KOSPI 5일 수익률",
         source      = "KRX 시장 데이터",
         formula     = "KOSPI[상장일-1] / KOSPI[상장일-6] - 1",
-        fill_na     = "zero",
+        fill_na     = "median",
         clip        = (-0.2, 0.2),
     ),
 
@@ -179,7 +119,7 @@ CORE_FEATURES: list[FeatureDef] = [
         description = "상장일 기준 KOSPI 20일 수익률",
         source      = "KRX 시장 데이터",
         formula     = "KOSPI[상장일-1] / KOSPI[상장일-21] - 1",
-        fill_na     = "zero",
+        fill_na     = "median",
         clip        = (-0.3, 0.3),
     ),
 
@@ -217,13 +157,35 @@ CORE_FEATURES: list[FeatureDef] = [
 SECONDARY_FEATURES: list[FeatureDef] = [
 
     FeatureDef(
+        name        = "offering_type_spac_ipo",
+        group       = FeatureGroup.IPO_STRUCTURE,
+        importance  = Importance.SECONDARY,
+        dtype       = "bool",
+        description = "공모 유형이 스팩 IPO인지 여부",
+        source      = "KRX KIND 신규상장종목 현황 분류",
+        formula     = "offering_type == 'spac_ipo'",
+        fill_na     = "flag",
+    ),
+
+    FeatureDef(
+        name        = "offering_type_foreign_common_stock",
+        group       = FeatureGroup.IPO_STRUCTURE,
+        importance  = Importance.SECONDARY,
+        dtype       = "bool",
+        description = "공모 유형이 외국기업 보통주 상장인지 여부",
+        source      = "KRX KIND 신규상장종목 현황 분류",
+        formula     = "offering_type == 'foreign_common_stock_listing'",
+        fill_na     = "flag",
+    ),
+
+    FeatureDef(
         name        = "float_share_ratio",
         group       = FeatureGroup.SUPPLY,
         importance  = Importance.SECONDARY,
         dtype       = "float",
         description = "상장 직후 유통 가능 물량 비율",
         source      = "DART 증권신고서 주식분포표",
-        formula     = "(공모 신주 + 구주매출) / 상장 후 총 발행주식수",
+        formula     = "공시된 상장 직후 유통가능주식수 / 상장 후 총 발행주식수 (또는 공시 유통가능비율)",
         fill_na     = "median",
         clip        = (0, 1),
     ),
@@ -236,7 +198,7 @@ SECONDARY_FEATURES: list[FeatureDef] = [
         description = "구주매출 비율 (기존 주주 엑싯 비중)",
         source      = "DART 증권신고서",
         formula     = "구주매출 물량 / (신주발행 + 구주매출) 합계",
-        fill_na     = "zero",
+        fill_na     = "median",
         clip        = (0, 1),
     ),
 

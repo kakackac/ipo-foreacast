@@ -1,0 +1,522 @@
+{
+  "description": "Official DART original-table references reviewed 2026-09-09 and 2026-11-06. New aggregate quantity references: Melcon 748389000/2074742000; EST 2489000/1039659000; SK14 14625000/5988330000. Numerator plus noncommitment quantity reconciles to the independently disclosed demand quantity. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
+  "samples": [
+    {
+      "sample": "vc_annual_financial_2022",
+      "receipt": "20220214000382",
+      "section_title": "III. 재무에 관한 사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20220214000382&dcmNo=8384323&eleId=36&offset=1459309&length=963182&dtd=dart3.xsd",
+      "sha256": "4e02b9437efcada322cbc6d4e89c1dbd65891c6a77109e5767772c2ab9e882ad",
+      "financial_context": {"corp_code": "01354740", "published_at": "2022-02-14", "cutoff": "2022-02-20", "expected_fs_div": "CFS"},
+      "expected": {"financial_as_of_year": 2020, "revenue": 40748436038, "operating_income": 6480024710, "total_assets": 35481901905, "total_liabilities": 17797017429, "equity": 17684884476}
+    },
+    {
+      "sample": "hansolcnp_float_2016",
+      "receipt": "20160118000101",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160118000101&dcmNo=4919044&eleId=16&offset=286005&length=198106&dtd=dart3.xsd",
+      "sha256": "d4f3750863492c455305d7d50308ec340d6ffb094c1620a356f3171b0e5b534e",
+      "expected": {"public_float_shares": 1377340, "total_post_listing_shares": 3460340, "public_float_ratio_disclosed": 0.398}
+    },
+    {
+      "sample": "sunbeauty_lockup_conflict_2021",
+      "receipt": "20210114000349",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210114000349&dcmNo=7761872&eleId=7&offset=317533&length=184475&dtd=dart3.xsd",
+      "sha256": "bdfb855bb4973bca76a06370be7c3c7014a7cb1bef71ce0a22de57f9743545aa",
+      "expected": {"institutional_demand_ratio": 1431, "lockup_commitment_ratio": null},
+      "expected_evidence": {"lockup_structured_evidence": {"aggregate_quantity_check": {"status": "conflict", "printed_percentage": "17.88", "independent_application_quantity": 1838477000}}},
+      "review_note": "The printed 17.88% is retained as evidence, but 327831000 committed / 1838477000 demand quantity does not round to it. The model value is held, not replaced by a calculated number or the earlier notice's 17.83%."
+    },
+    {
+      "sample": "atgen_annual_financial_2015",
+      "receipt": "20151013000033",
+      "section_title": "Ⅲ. 재무에 관한 사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20151013000033&dcmNo=4822902&eleId=29&offset=1110523&length=492570&dtd=dart3.xsd",
+      "sha256": "2833dbf0a24f2cda8c9d1b5f1b6b653cdaf59d89adf6d68b04836b2a3fb21c62",
+      "financial_context": {"corp_code": "00977650", "published_at": "2015-10-13", "cutoff": "2015-10-20", "expected_fs_div": "CFS"},
+      "expected": {"financial_as_of_year": 2014, "revenue": 1678157861, "operating_income": -5066415513, "net_income": -5840187194, "total_assets": 7650598889, "total_liabilities": 10046242183, "equity": -2395643294}
+    },
+    {
+      "sample": "ajnet_annual_financial_2015",
+      "receipt": "20150807000011",
+      "section_title": "Ⅲ. 재무에 관한 사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20150807000011&dcmNo=4757143&eleId=29&offset=1265211&length=577909&dtd=dart3.xsd",
+      "sha256": "74403a517a9d1059ff282239e93b8683d39dea0b9f4d51ea0a8522348ec0f2b8",
+      "financial_context": {"corp_code": "00365387", "published_at": "2015-08-07", "cutoff": "2015-08-20", "expected_fs_div": "OFS"},
+      "expected": {"financial_as_of_year": 2014, "revenue": 194184554953, "operating_income": 26285715749, "net_income": 18461483934, "total_assets": 484674125513, "total_liabilities": 323883474196, "equity": 160790651317}
+    },
+    {
+      "sample": "yas_correction_2017",
+      "receipt": "20170926000244",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170926000244&dcmNo=5797330&eleId=1&offset=738&length=171428&dtd=dart3.xsd",
+      "sha256": "8ea48d58db52c364fe0e7bf72ed580db6f437ff05d2c8b8ca3b81863bb6c7ddf",
+      "extraction_view": "explicit_after_correction_v1",
+      "expected": {"offering_price": 23500, "institutional_demand_ratio": 28.9, "price_band_low": 23500, "price_band_high": 26500}
+    },
+    {
+      "sample": "dypiston_prospectus_2017",
+      "receipt": "20171127000116",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20171127000116&dcmNo=5860150&eleId=10&offset=66771&length=209454&dtd=dart3.xsd",
+      "sha256": "48850cc2474e08aaf61cd0ca379f4c56533609f2e6ba3e60c89d54e006fbf3bf",
+      "expected": {"demand_offering_price": 5700, "institutional_demand_ratio": 62.8}
+    },
+    {
+      "sample": "maxst_prospectus_2021",
+      "receipt": "20210715000154",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210715000154&dcmNo=8144128&eleId=8&offset=95424&length=175424&dtd=dart3.xsd",
+      "sha256": "300d48aa86f838819cad9f7bbd7dff1f78941407e40f7d80f9d68b009149199c",
+      "expected": {"demand_offering_price": 15000, "institutional_demand_ratio": 1587.01, "lockup_commitment_ratio": 0.39131380869845755}
+    },
+    {
+      "sample": "maint_prospectus_2015",
+      "receipt": "20150331001027",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20150331001027&dcmNo=4548242&eleId=9&offset=204841&length=110372&dtd=dart3.xsd",
+      "sha256": "07837a5ca840f0c0dd7d98e89275c8e5b621e8b4c4fe256d55289d36855c5e87",
+      "expected": {
+        "institutional_demand_ratio": 643.7,
+        "demand_offering_price": 15000
+      }
+    },
+    {
+      "sample": "daesung_2022",
+      "receipt": "20220808000054",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20220808000054&dcmNo=8757875&eleId=1&offset=799&length=363959&dtd=dart3.xsd",
+      "sha256": "6991197cc59c9e16a0d837df34fc8a7c9b58f56f3b315bdd8c1dffbdc66c5fe1",
+      "expected": {
+        "institutional_demand_ratio": 1934.89,
+        "lockup_commitment_ratio": 0.0457,
+        "demand_offering_price": 9000,
+        "new_shares": 2600000,
+        "secondary_shares": 722560,
+        "price_band_low": 7400,
+        "price_band_high": 9000
+      }
+    },
+    {
+      "sample": "nbt_2021",
+      "receipt": "20210111000425",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210111000425&dcmNo=7754973&eleId=1&offset=796&length=338851&dtd=dart3.xsd",
+      "sha256": "b0f7fc66175e2aa98690ba8d7abf378da82859afe721d4de878a837a04a6172a",
+      "expected": {
+        "institutional_demand_ratio": 1425.3,
+        "lockup_commitment_ratio": 0.107,
+        "demand_offering_price": 19000
+      }
+    },
+    {
+      "sample": "sensorview_2023",
+      "receipt": "20230706000211",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230706000211&dcmNo=9340563&eleId=1&offset=640&length=375191&dtd=dart3.xsd",
+      "sha256": "26f0f6e85bdcd295d6852f51c39cea0e8403c88ba7d6acbcd1336d07b74becf1",
+      "expected": {
+        "institutional_demand_ratio": 1673.33,
+        "lockup_commitment_ratio": 0.0741352063756718,
+        "price_band_low": 2900,
+        "price_band_high": 3600,
+        "public_float_ratio_disclosed": null,
+        "new_shares": 3900000,
+        "secondary_shares": 0
+      }
+    },
+    {
+      "sample": "ns_shopping_2015",
+      "receipt": "20150210000401",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20150210000401&dcmNo=4471997&eleId=6&offset=107928&length=520305&dtd=dart3.xsd",
+      "sha256": "bef9e3b0297b533cbbca9a2323a4605428085a8ee5cbfadcdbe6163ebc66d798",
+      "expected": {
+        "institutional_demand_ratio": null,
+        "lockup_commitment_ratio": null,
+        "price_band_low": 205000,
+        "price_band_high": 235000,
+        "public_float_ratio_disclosed": 0.4607,
+        "new_shares": 0,
+        "secondary_shares": 878181
+      }
+    },
+    {
+      "sample": "wiseitech_2020",
+      "receipt": "20200128000055",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20200128000055&dcmNo=7044061&eleId=8&offset=217685&length=626278&dtd=dart3.xsd",
+      "sha256": "9f5947157eafc097c00c7d0da74e333779eba5218f80f625d753539d3003c28a",
+      "expected": {
+        "institutional_demand_ratio": 1105.93,
+        "lockup_commitment_ratio": null,
+        "price_band_low": 10000,
+        "price_band_high": 11200,
+        "public_float_ratio_disclosed": 0.5827,
+        "new_shares": 850000,
+        "secondary_shares": 0
+      },
+      "expected_evidence": {"lockup_structured_evidence": {"aggregate_quantity_check": {"status": "conflict", "printed_percentage": "6.95", "independent_application_quantity": 752035199}}},
+      "review_note": "The original still prints 6.95%; preserve that reported value. Its 52174000 committed shares and the demand summary's 752035199 shares yield about 6.9377%, so the common denominator basis is unresolved. Do not force the historical expected percentage into model approval."
+    },
+    {
+      "sample": "rznomics_2025",
+      "receipt": "20251205000229",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20251205000229&dcmNo=10911498&eleId=1&offset=655&length=1011777&dtd=dart4.xsd",
+      "sha256": "dcf28757d221af5bd4874c020d826d42799dec9da625841be6322d4628117b64",
+      "expected": {
+        "institutional_demand_ratio": 848.91,
+        "lockup_commitment_ratio": 0.7428653678348257,
+        "price_band_low": 17000,
+        "price_band_high": 22500,
+        "public_float_ratio_disclosed": null,
+        "new_shares": 2060000,
+        "secondary_shares": 0
+      }
+    },
+    {
+      "sample": "sensorview_prospectus_2023",
+      "receipt": "20230706000212",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230706000212&dcmNo=9340565&eleId=6&offset=433064&length=1635587&dtd=dart3.xsd",
+      "sha256": "fae2d7c994d306f0f10d89d7508b4db27904dc7f2085cea8c9474ffc907baa80",
+      "expected": {
+        "institutional_demand_ratio": 1673.33,
+        "lockup_commitment_ratio": 0.0741352063756718,
+        "price_band_low": 2900,
+        "price_band_high": 3600,
+        "public_float_ratio_disclosed": 0.3683,
+        "new_shares": 3900000,
+        "secondary_shares": 0
+      }
+    },
+    {
+      "sample": "rznomics_prospectus_2025",
+      "receipt": "20251205000237",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20251205000237&dcmNo=10911509&eleId=8&offset=1038175&length=299865&dtd=dart4.xsd",
+      "sha256": "70386b46dafdefe4cb5468dbabc47368501a533bef5056b0a3f171508c396b18",
+      "expected": {
+        "institutional_demand_ratio": 848.91,
+        "lockup_commitment_ratio": 0.7428653678348257,
+        "price_band_low": 17000,
+        "price_band_high": 22500,
+        "public_float_ratio_disclosed": null,
+        "new_shares": 2060000,
+        "secondary_shares": 0
+      }
+    },
+    {
+      "sample": "rznomics_risks_2025",
+      "receipt": "20251205000237",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20251205000237&dcmNo=10911509&eleId=15&offset=1347163&length=563834&dtd=dart4.xsd",
+      "sha256": "79d7b57dfedf9627e16851b9fb738e276d85706c6035d45176aeab373bb52840",
+      "expected": {
+        "institutional_demand_ratio": null,
+        "lockup_commitment_ratio": null,
+        "price_band_low": null,
+        "price_band_high": null,
+        "public_float_ratio_disclosed": 0.3527,
+        "new_shares": null,
+        "secondary_shares": null
+      }
+    },
+    {
+      "sample": "ns_shopping_final_2015",
+      "receipt": "20150312000834",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20150312000834&dcmNo=4507860&eleId=8&offset=212510&length=539517&dtd=dart3.xsd",
+      "sha256": "fc77a710c739550d42caf952a296d87efd04640c7e69376339547a6645831283",
+      "expected": {
+        "institutional_demand_ratio": 302.59,
+        "lockup_commitment_ratio": 0.1566,
+        "price_band_low": 205000,
+        "price_band_high": 235000,
+        "public_float_ratio_disclosed": 0.4607,
+        "new_shares": 0,
+        "secondary_shares": 878181
+      }
+    },
+    {
+      "sample": "melcon_2026",
+      "receipt": "20260929000191",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260929000191&dcmNo=11593609&eleId=1&offset=651&length=564368&dtd=dart4.xsd",
+      "sha256": "ba099a0cb015d54e7cd8f1290f0a538c9672c448a1be6d16342423c1acbaa2b7",
+      "expected": {
+        "offering_price": 12300,
+        "institutional_demand_ratio": 1136.84,
+        "lockup_commitment_ratio": 0.3607142478438283,
+        "price_band_low": 10700,
+        "price_band_high": 12300,
+        "new_shares": 2500000,
+        "secondary_shares": 0
+      }
+    },
+    {
+      "sample": "est_2026",
+      "receipt": "20261021000363",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20261021000363&dcmNo=11622290&eleId=1&offset=648&length=466521&dtd=dart4.xsd",
+      "sha256": "e185ce0a64abc02ab4f8b604b0d5cc0064a25172bf89b23f69bc2674bf3f643e",
+      "expected": {
+        "offering_price": 12400,
+        "institutional_demand_ratio": 630.1,
+        "lockup_commitment_ratio": 0.002394054204311221,
+        "price_band_low": 10600,
+        "price_band_high": 12400,
+        "new_shares": 2200000
+      }
+    },
+    {
+      "sample": "sk14_2026",
+      "receipt": "20261014000196",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20261014000196&dcmNo=11613068&eleId=1&offset=665&length=268568&dtd=dart4.xsd",
+      "sha256": "334cc3a291e6046f563d189656f5ca2e309d5ad72b470e6f6ecf9425a65cdb02",
+      "expected": {
+        "offering_price": 2000,
+        "institutional_demand_ratio": 1228.38,
+        "lockup_commitment_ratio": 0.002442250176593474,
+        "new_shares": 6500000,
+        "secondary_shares": 0
+      }
+    },
+    {
+      "sample": "est_risks_2026",
+      "receipt": "20261021000370",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20261021000370&dcmNo=11622327&eleId=14&offset=806395&length=649869&dtd=dart4.xsd",
+      "sha256": "dd1c3c7c0cccbc5343667c4fd46d64d5056daf01171d4602cf05a000fa98c42a",
+      "expected": {"public_float_ratio_disclosed": 0.376}
+    },
+    {
+      "sample": "melcon_risks_2026",
+      "receipt": "20260929000194",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260929000194&dcmNo=11593668&eleId=14&offset=935732&length=674714&dtd=dart4.xsd",
+      "sha256": "241762fbe88fac21aeff565e576bc4d29afb6ae128ea4cfb42cd30222f346efd",
+      "expected": {"public_float_ratio_disclosed": 0.345}
+    },
+    {
+      "sample": "airbusan_risks_2018",
+      "receipt": "20181217000216",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20181217000216&dcmNo=6420067&eleId=16&offset=492453&length=282212&dtd=dart3.xsd",
+      "sha256": "f888c96c0ffa0844f7c8483d643c806faa78aeaf85add7548e6f178acbd60c57",
+      "expected": {"public_float_shares": 27920600, "total_post_listing_shares": 52070000, "public_float_ratio_disclosed": 0.5362}
+    },
+    {
+      "sample": "koreacenter_risks_2019",
+      "receipt": "20191120000496",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20191120000496&dcmNo=6967054&eleId=17&offset=561146&length=307625&dtd=dart3.xsd",
+      "sha256": "18dc936d0d62ce2812c2651ea8b29dee4f15de75b2b9ec43e08ad9097a62f54d",
+      "expected": {"public_float_shares": 2396023, "total_post_listing_shares": 24031048, "public_float_ratio_disclosed": 0.0997}
+    },
+    {
+      "sample": "atgen_lockup_2015",
+      "receipt": "20151013000034",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20151013000034&dcmNo=4822903&eleId=1&offset=727&length=130062&dtd=dart3.xsd",
+      "sha256": "47165dfa6ba623651a77f9878888fd5aaae154b904234808ed2ca44d11bda629",
+      "expected": {"lockup_commitment_ratio": 0.406}
+    },
+    {
+      "sample": "curiox_lockup_2023",
+      "receipt": "20230731000302",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230731000302&dcmNo=9368109&eleId=1&offset=646&length=258669&dtd=dart3.xsd",
+      "sha256": "b0b317306ccf99783a21aee804283fd59a8540a3b125a69d4f2bf85a7026d80a",
+      "expected": {"lockup_commitment_ratio": null},
+      "expected_evidence": {"lockup_structured_evidence": {"aggregate_quantity_check": {"status": "conflict", "printed_percentage": "2.63", "independent_application_quantity": 201189000, "declared_committed_quantity": 3150000, "noncommitted_quantity": 195896000}}},
+      "review_note": "Rechecked original TD cells, including rowspan/colspan. The printed total 2.63% agrees with (201189000-195896000)/201189000, but the explicit commitment subtotal is 3150000, not 5293000. This selected original contradicts itself; preserve the percentage and all quantities as evidence, do not silently choose or repair one. Check a verified later correction for recovery."
+    },
+    {
+      "sample": "nrb_lockup_2025",
+      "receipt": "20250716000293",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20250716000293&dcmNo=10725169&eleId=1&offset=653&length=703336&dtd=dart4.xsd",
+      "sha256": "c5972b536871b193d7917ff4c0a7b6605cb3c1819e28b2e1cd844039da275146",
+      "expected": {"lockup_commitment_ratio": 0.007667461611157976}
+    },
+    {
+      "sample": "futuretech_lockup_2015",
+      "receipt": "20151118000030",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20151118000030&dcmNo=4857671&eleId=9&offset=109713&length=113293&dtd=dart3.xsd",
+      "sha256": "1c45c40ebb752a5f889dcde5355d61bdc53ebd28b1600db7d51b8857fa09930e",
+      "expected": {"lockup_commitment_ratio": 0.08346053913608315}
+    },
+    {
+      "sample": "paxnet_lockup_2016",
+      "receipt": "20160714000305",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160714000305&dcmNo=5220920&eleId=9&offset=186304&length=103459&dtd=dart3.xsd",
+      "sha256": "9d9cbc8b94131e9862e3049c5834cae6aeb7315d44b0015dd93c07f1caeb6c7b",
+      "expected": {"lockup_commitment_ratio": 0.0519, "institutional_demand_ratio": 753.07}
+    },
+    {
+      "sample": "giantstep_lockup_2021",
+      "receipt": "20210312000380",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210312000380&dcmNo=7870220&eleId=7&offset=288321&length=160101&dtd=dart3.xsd",
+      "sha256": "f0fa1f9f0cf95dfb7da1c32de57373956d2214f0a2cc17e8de8cbfba274a6ff7",
+      "expected": {"lockup_commitment_ratio": 0.2442}
+    },
+    {
+      "sample": "voronoi_lockup_zero_2022",
+      "receipt": "20220613000198",
+      "section_title": "I. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20220613000198&dcmNo=8698117&eleId=7&offset=438695&length=209318&dtd=dart3.xsd",
+      "sha256": "8fd57c85ce17b7edc27d2961531a20791bd6a951d9bc39f18e207088105594c0",
+      "expected": {"lockup_commitment_ratio": 0}
+    },
+    {
+      "sample": "sinsin_quantity_conflict_2017",
+      "receipt": "20170214000585",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170214000585&dcmNo=5445310&eleId=9&offset=234095&length=126309&dtd=dart3.xsd",
+      "sha256": "7fe25053311a45a76d462600cfe16763b80544510f8de17937bfcb4fc0c2ae89",
+      "review": "Participation summary states 100002000 shares; lockup table states 102002000. Lockup NULL means unresolved quantity conflict, not nonpublication.",
+      "expected": {"institutional_demand_ratio": 40.88, "lockup_commitment_ratio": null}
+    },
+    {
+      "sample": "me2on_terms_2016",
+      "receipt": "20160923000059",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160923000059&dcmNo=5296431&eleId=1&offset=739&length=60629&dtd=dart3.xsd",
+      "sha256": "bf286a491ea32931945e3af89f195b527ba442213328ba4a0a392c4f3bb13de0",
+      "expected": {"institutional_demand_ratio": 73.1, "offering_price": 3800},
+      "review_note": "After-correction institutional summary: 506 (주1), 418689000 shares, printed 73.1. The footnote says 29 multiple-price submissions are included; it is not a second count or a ratio. Preserve the printed rate."
+    },
+    {
+      "sample": "hims_terms_2017",
+      "receipt": "20170707000203",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170707000203&dcmNo=5709508&eleId=1&offset=736&length=167481&dtd=dart3.xsd",
+      "sha256": "a0c062aeb8497c399a1bca8174b9d0697cf2f5334fa28ff0c7e4291740a434d3",
+      "expected": {"institutional_demand_ratio": 729.64, "offering_price": 20000},
+      "review_note": "Explicit after-view domestic and foreign institutional bookbuilding summary: 829 applications, 395992915 shares, printed 729.64. The companion prospectus omits the aggregate scope heading."
+    },
+    {
+      "sample": "biodyne_terms_2021",
+      "receipt": "20210304000632",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210304000632&dcmNo=7853818&eleId=1&offset=787&length=307582&dtd=dart3.xsd",
+      "sha256": "46988bf381046797419f969e87ce078f4eba391ac28ca732ab828761d3bc2a58",
+      "expected": {"institutional_demand_ratio": 1364.85, "lockup_commitment_ratio": 0.088, "offering_price": 30000},
+      "review_note": "After-view total competition cell prints 1364.85:1. Commitment table prints quantity ratio 8.8% and count ratio 8.7%; only 8.8% is the target. 90373000/1023641000 is compatible with its displayed precision."
+    },
+    {
+      "sample": "milli_terms_2023",
+      "receipt": "20230915000280",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230915000280&dcmNo=9432729&eleId=1&offset=637&length=354791&dtd=dart3.xsd",
+      "sha256": "348deaffb728d07a5b98041174ca44a242432ee77030dd5f0c6789a60081513d",
+      "expected": {"institutional_demand_ratio": 619.24, "lockup_commitment_ratio": 0.05769509578049078, "offering_price": 23000},
+      "review_note": "Note 3 after-view, not the prior contents-none section: 1915 applications, 696645000 shares, total printed 619.24. The angle-bracket note label is a standalone correction delimiter. The mixed count/share cells give 40193000 committed plus 656452000 noncommitted shares. Read explicit share units, not the inconsistent count typography or subgroup counts."
+    },
+    {
+      "sample": "contec_terms_2023",
+      "receipt": "20231030000344",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20231030000344&dcmNo=9476286&eleId=1&offset=639&length=560032&dtd=dart3.xsd",
+      "sha256": "5fca49e7535ca64629a11b00f429eed59979ca4d3b819f6f7da68a09c9b519e3",
+      "expected": {"institutional_demand_ratio": 198.93, "lockup_commitment_ratio": 0.012477834355528803, "offering_price": 22500},
+      "review_note": "After-view total rate 198.93. Aggregate commitment quantities 3835000 plus noncommitted 303510000 equal independent total 307345000. This raw sample approval does not override a conflicting companion document in integration."
+    },
+    {
+      "sample": "pinkfong_terms_2025",
+      "receipt": "20251105000307",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20251105000307&dcmNo=10866100&eleId=1&offset=656&length=422238&dtd=dart4.xsd",
+      "sha256": "02c2b203741ef678a461e367391925dc1315209686bdc93bb1297b505b360401",
+      "expected": {"institutional_demand_ratio": 615.89, "lockup_commitment_ratio": 0.30419038588310177, "offering_price": 38000},
+      "review_note": "After-view aggregate, not foreign-only columns: total 923829000 shares, commitments 281019900 and noncommitments 642809100. Printed aggregate competition is 615.89."
+    },
+    {
+      "sample": "surplus_final_2017",
+      "receipt": "20170116000302",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170116000302&dcmNo=5416120&eleId=9&offset=270436&length=136984&dtd=dart3.xsd",
+      "sha256": "72e46a1b7651ae9f1fcd423809ff91e77193ae4d0c4c5415cc05c03b20468143",
+      "expected": {"institutional_demand_ratio": 81.31, "offering_price": 8000},
+      "review_note": "The original aggregate row label is 경쟁율, with total 81.31. Read the explicit total column, not the sum of subgroup printed ratios."
+    },
+    {
+      "sample": "straffic_final_2017",
+      "receipt": "20171122000164",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20171122000164&dcmNo=5855666&eleId=9&offset=200042&length=149195&dtd=dart3.xsd",
+      "sha256": "35e3a3d089f5000fd36c7e2eeee5987e36e261212b92c1a1c3ea58b4bc9c0940",
+      "expected": {"institutional_demand_ratio": 605.02, "offering_price": 10000},
+      "review_note": "Original heading includes a separate unit row. The total cell on the 경쟁율 row prints 605.02; 940197905 is application shares, not competition."
+    },
+    {
+      "sample": "ctk_final_2017",
+      "receipt": "20171124000037",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20171124000037&dcmNo=5858205&eleId=9&offset=233873&length=158167&dtd=dart3.xsd",
+      "sha256": "eefbd5908b341aedc76e01539875507baf228522cea7e8e3a0f1c238ab6276ce",
+      "expected": {"institutional_demand_ratio": 188.65, "offering_price": 55000},
+      "review_note": "Explicit domestic and foreign institutional total is 188.65 in the row spelled 경쟁율. Participant count is 668 and application quantity 294294114."
+    },
+    {
+      "sample": "ecomaister_final_2018",
+      "receipt": "20180302000254",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20180302000254&dcmNo=5974057&eleId=9&offset=323257&length=162403&dtd=dart3.xsd",
+      "sha256": "44b72b3161168529a4a246c46d6f3de188ca075eff98656d03d378e38f94fef0",
+      "expected": {"institutional_demand_ratio": 15.54, "offering_price": 5200},
+      "review_note": "The original subgroup 경쟁율 cells are dashes but the explicitly labelled total cell prints 15.54. Do not turn subgroup dashes into zero or derive the rate from them."
+    },
+    {
+      "sample": "gnbs_independent_lockup_2021",
+      "receipt": "20211018000277",
+      "section_title": "I. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20211018000277&dcmNo=8246899&eleId=9&offset=142987&length=180730&dtd=dart3.xsd",
+      "sha256": "6aeabeecf9bddd124310f55170163293af7c4b9d50e39922c9bada9d0a32fdcd",
+      "expected": {"institutional_demand_ratio": null,
+        "institutional_demand_rejection_reason": "institutional_aggregate_numeric_grouping_invalid",
+        "lockup_commitment_ratio": 0.043785793127892665,
+        "lockup_parser_validation_status": "structurally_verified"},
+      "review_note": "The malformed aggregate competition cell 1.134.34 stays unapproved. Independent quantity totals remain usable: 5340000+34927500+12815000=53082500 commitments, 1159239950 noncommitments and 1212322450 total applications. The commitment ratio is 53082500/1212322450; the complete total reconciliation, not a generic missing-to-zero rule, resolves the 15-day dash."
+    },
+    {
+      "sample": "design_malformed_rate_2018",
+      "receipt": "20181106000423",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20181106000423&dcmNo=6371905&eleId=9&offset=192617&length=126412&dtd=dart3.xsd",
+      "sha256": "49f844aaa7e400790237c66bb9dd98a0bf9c98ec8b588b1257a0979729200b37",
+      "expected": {"offering_price": 10100, "institutional_demand_ratio": null,
+        "institutional_demand_parser_validation_status": "candidate_rejected",
+        "institutional_demand_rejection_reason": "institutional_aggregate_numeric_grouping_invalid"},
+      "review_note": "The actual total competition cell says 771,73 : 1. It is neither valid thousands grouping nor an authorized decimal spelling. Preserve the raw cell and hold; do not remove the comma to create 77173 or guess 771.73. The final terms notice repeats the malformed cell."
+    },
+    {
+      "sample": "iljin_terms_conflict_2021",
+      "receipt": "20210823000374",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210823000374&dcmNo=8189910&eleId=1&offset=791&length=269965&dtd=dart3.xsd",
+      "sha256": "1cbc6b506f6f84cc0b2ed8190192c7a964ee0b9d16c39144251ca60d6481e2e7",
+      "expected": {"offering_price": 34300, "institutional_demand_ratio": 1471.01},
+      "review_note": "Negative integration sample: after-view total cell prints 1471.01, versus same-day companion prospectus 1471.04. Both print 1611 applications and 8813841000 shares. The precision is identical, so do not hide this actual official-source conflict as rounding or automatically authorize the post-demand stage."
+    },
+    {
+      "sample": "iljin_prospectus_conflict_2021",
+      "receipt": "20210823000386",
+      "section_title": "I. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210823000386&dcmNo=8189955&eleId=8&offset=362272&length=250790&dtd=dart3.xsd",
+      "sha256": "16290ef18ed87a77d9e658505dc89abed7ee88f8ac2f7b15718ac860c3a7a51d",
+      "expected": {"offering_price": 34300, "institutional_demand_ratio": 1471.04},
+      "review_note": "The explicitly labelled institutional total competition cell in the full prospectus is 1471.04. It conflicts with 1471.01 in the linked final terms notice; this expected extraction is not a model or event-level approval."
+    },
+    {
+      "sample": "haitai_terms_2016",
+      "receipt": "20160426000421",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160426000421&dcmNo=5098735&eleId=1&offset=742&length=127357&dtd=dart3.xsd",
+      "sha256": "2cd52f75b4d921a983a6457201e8a4263e33b6384993092457b9c8d68b815954",
+      "expected": {"offering_price": 15100, "price_band_low": 12300, "price_band_high": 15100, "institutional_demand_ratio": 342.99, "lockup_commitment_ratio": 0.2463},
+      "review_note": "The marker follows a BR after the annex heading or preceding prose, not an inline reference. After-view summary prints 527 applications, 1199788000 shares and 342.99:1. Commitment quantity total 295449000 and printed quantity ratio 24.63%, distinct from count ratio 16.51%."
+    },
+    {
+      "sample": "sunic_terms_2017",
+      "receipt": "20170907000115",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170907000115&dcmNo=5778098&eleId=1&offset=736&length=258375&dtd=dart3.xsd",
+      "sha256": "a437fbb00f56bc8645959cd76c7e32af762616091639dc7e6224a81c4db3bee6",
+      "expected": {"offering_price": 37000, "price_band_low": 37000, "price_band_high": 44000, "institutional_demand_ratio": 7.87, "lockup_commitment_ratio": 0.0},
+      "review_note": "Standalone parenthesized before/after delimiters define 13 pairs. After-view institutional total column prints 251 applications, 9086000 shares and competition 7.87. The commitment outcome explicitly prints total application quantity ratio 0%; period dashes alone do not authorize zero."
+    }
+  ]
+}

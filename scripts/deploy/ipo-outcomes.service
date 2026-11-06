@@ -1,0 +1,21 @@
+[Unit]
+Description=Official KRX listing-day outcomes (21:00 Asia/Seoul)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=7200
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+User=ipo-forecast
+WorkingDirectory=/srv/ipo-forecast
+EnvironmentFile=/etc/ipo-forecast/collector.env
+ExecStart=/srv/ipo-forecast/.venv/bin/python ipo_predictor/scripts/resolve_prospective_prices.py --database /srv/ipo-forecast/ipo_predictor/data/processed/prospective/listing_eve.sqlite --output /srv/ipo-forecast/ipo_predictor/data/processed/prospective/price_runs
+Restart=on-failure
+RestartSec=900
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/ipo-forecast/ipo_predictor/data/processed/prospective
