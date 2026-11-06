@@ -909,6 +909,10 @@ class HistoricalIPOPipeline:
             right["listing_date"] = pd.to_datetime(right["listing_date"], errors="coerce")
         right = right.rename(columns={column: f"{column}_from_price" for column in available_price_columns})
         left = calendar.copy()
+        if 'krx_standard_code' in left:
+            valid = left.krx_standard_code.astype(str).str.fullmatch(r'KR[A-Z0-9]{9}[0-9]', na=False)
+            left['legacy_krx_standard_code'] = left.krx_standard_code.where(~valid)
+            left['krx_standard_code'] = left.krx_standard_code.where(valid)
         left["listing_date"] = pd.to_datetime(left["listing_date"], errors="coerce")
         merged = left.merge(right, on=["ticker", "listing_date"], how="left")
         for column in price_columns:
@@ -921,6 +925,9 @@ class HistoricalIPOPipeline:
             source_value = merged[source_column]
             merged[column] = source_value.where(source_value.notna(), existing)
         source_isu_code = merged.get("isu_cd_from_price")
+        if source_isu_code is not None:
+            source_isu_code = source_isu_code.where(
+                source_isu_code.astype(str).str.fullmatch(r'KR[A-Z0-9]{9}[0-9]', na=False))
         if "krx_standard_code" in merged.columns and source_isu_code is not None:
             merged["krx_standard_code"] = source_isu_code.combine_first(merged["krx_standard_code"])
         elif source_isu_code is not None:
@@ -932,7 +939,7 @@ class HistoricalIPOPipeline:
             helper_columns.append("market_price")
         merged = merged.drop(columns=helper_columns)
         if "verification_status" in merged.columns:
-            enriched = merged.get("krx_standard_code", pd.Series(index=merged.index, dtype=object)).notna()
+            enriched = merged.get("krx_standard_code", pd.Series(index=merged.index, dtype=object)).astype(str).str.fullmatch(r'KR[A-Z0-9]{9}[0-9]', na=False)
             merged.loc[enriched, "verification_status"] = "official_source_krx_code_enriched"
         return merged
 

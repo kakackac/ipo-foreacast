@@ -1068,7 +1068,7 @@ class ActualDataPipelineTests(unittest.TestCase):
         }])
         prices = pd.DataFrame([{
             "ticker": "123456", "listing_date": "2024-01-10", "market": "KOSPI",
-            "isu_cd": "NEW", "open_price": 12_000, "close_price": 13_000,
+            "isu_cd": "KR7123456000", "open_price": 12_000, "close_price": 13_000,
             "high_price": 14_000, "low_price": 9_000, "volume": 1_000,
         }])
 
@@ -1076,7 +1076,7 @@ class ActualDataPipelineTests(unittest.TestCase):
 
         self.assertFalse(merged.columns.duplicated().any())
         self.assertEqual(merged.loc[0, "market"], "KOSPI")
-        self.assertEqual(merged.loc[0, "krx_standard_code"], "NEW")
+        self.assertEqual(merged.loc[0, "krx_standard_code"], "KR7123456000")
         self.assertEqual(merged.loc[0, "open_price"], 12_000)
         self.assertNotIn("market_price", merged.columns)
 

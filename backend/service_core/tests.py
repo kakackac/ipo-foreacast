@@ -1,8 +1,17 @@
 import json
 import secrets
+import io
+import sys
+import tempfile
+from pathlib import Path
+from unittest.mock import patch
+
+import pandas as pd
 
 from django.core.cache import cache
 from django.test import Client, TestCase
+from django.conf import settings
+from django.core.management import call_command
 from django.utils import timezone
 
 from .models import Notification, Offering, Post, Subscription, User, Watchlist
@@ -114,3 +123,53 @@ class ServiceTests(TestCase):
         response = self.send('auth/login/', {'username': 'unknown', 'password': 'invalid'})
         self.assertEqual(response.status_code, 429)
         self.assertEqual(response.json(), {'error': 'rate_limited'})
+
+
+class EventImportTests(TestCase):
+    def test_pending_price_event_is_listed_then_upgraded_without_prediction_release(self):
+        sys.path.insert(0,str(Path(settings.BASE_DIR).parent/'ipo_predictor'))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);rows=pd.DataFrame([{'event_id':'pending','ticker':'123450','corp_name':'Sample',
+                'market':'KOSDAQ','listing_date':'2026-01-02','event_class':'general_ipo',
+                'price_resolution_status':'pending_collection'}])
+            rows.to_parquet(root/'added_events.parquet',index=False)
+            with patch('data.pipelines.event_delivery.current_event_delivery',return_value=(root,{'version':'one'})):
+                call_command('import_event_snapshot',stdout=io.StringIO())
+            self.assertEqual(Offering.objects.get(event_id='pending').prediction_status,'awaiting_price_collection')
+            rows['price_resolution_status']='official_price_verified';rows.to_parquet(root/'added_events.parquet',index=False)
+            with patch('data.pipelines.event_delivery.current_event_delivery',return_value=(root,{'version':'two'})):
+                out=io.StringIO();call_command('import_event_snapshot',stdout=out)
+            self.assertEqual(json.loads(out.getvalue())['updated'],1)
+            self.assertEqual(Offering.objects.get(event_id='pending').prediction_status,'awaiting_disclosure_verification')
+
+    def test_only_verified_new_supported_events_are_imported_once(self):
+        sys.path.insert(0,str(Path(settings.BASE_DIR).parent/'ipo_predictor'))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            base={'ticker':'123450','corp_name':'Sample','market':'KOSDAQ','listing_date':'2026-01-02',
+                  'event_class':'general_ipo','price_resolution_status':'official_price_verified'}
+            pd.DataFrame([dict(base,event_id='one'),dict(base,event_id='spac',ticker='234560',event_class='spac_ipo'),
+                          dict(base,event_id='review',event_class='unclassified_review'),
+                          dict(base,event_id='missing',price_resolution_status='official_price_unconfirmed')]).to_parquet(root/'added_events.parquet',index=False)
+            with patch('data.pipelines.event_delivery.current_event_delivery',return_value=(root,{'version':'test-event-version'})):
+                out=io.StringIO();call_command('import_event_snapshot',stdout=out)
+                self.assertEqual(json.loads(out.getvalue())['created'],2)
+                out=io.StringIO();call_command('import_event_snapshot',stdout=out)
+                self.assertEqual(json.loads(out.getvalue())['created'],0)
+                self.assertEqual(Offering.objects.count(),2)
+                self.assertEqual(set(Offering.objects.values_list('prediction_status',flat=True)),{'awaiting_disclosure_verification'})
+                item=Offering.objects.get(event_id='one');item.prediction_status='reviewed_existing_state';item.save()
+                call_command('import_event_snapshot',stdout=io.StringIO())
+                item.refresh_from_db();self.assertEqual(item.prediction_status,'reviewed_existing_state')
+
+    def test_existing_conflicting_identity_rolls_back_import(self):
+        sys.path.insert(0,str(Path(settings.BASE_DIR).parent/'ipo_predictor'))
+        Offering.objects.create(event_id='existing',company_name='Sample',ticker='999999',market='KOSDAQ',
+                                listing_date='2026-01-02',data_version='research')
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);base={'ticker':'123450','corp_name':'Sample','market':'KOSDAQ','listing_date':'2026-01-02',
+                  'event_class':'general_ipo','price_resolution_status':'official_price_verified'}
+            pd.DataFrame([dict(base,event_id='new'),dict(base,event_id='existing')]).to_parquet(root/'added_events.parquet',index=False)
+            with patch('data.pipelines.event_delivery.current_event_delivery',return_value=(root,{'version':'test-event-version'})):
+                with self.assertRaises(ValueError):call_command('import_event_snapshot',stdout=io.StringIO())
+            self.assertEqual(Offering.objects.count(),1)

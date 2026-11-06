@@ -371,7 +371,9 @@ class KRXCollector:
             "price_markets_queried": ",".join(rows_by_market),
             "price_api_rows_returned": sum(len(rows) for rows in rows_by_market.values()),
             "price_raw_response_evidence": self._raw_price_response_evidence(rows_by_market),
-            "price_matched_ticker": row.get("ISU_SRT_CD"),
+            "price_matched_ticker": row.get("ISU_SRT_CD") or (
+                self._normalise_ticker(row.get('ISU_CD'))
+                if re.fullmatch(r'[0-9A-Z]{6}', str(row.get('ISU_CD', '')).upper()) else None),
             "price_matched_isu_cd": row.get("ISU_CD"),
             "price_matched_corp_name": row.get("ISU_NM"),
         }

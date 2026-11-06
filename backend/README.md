@@ -13,6 +13,7 @@ python -m venv --system-site-packages .venv
 .venv/bin/python -m pip install -r backend/requirements.txt
 .venv/bin/python backend/manage.py migrate
 .venv/bin/python backend/manage.py import_research
+.venv/bin/python backend/manage.py import_event_snapshot
 .venv/bin/python backend/manage.py test service_core
 .venv/bin/python backend/manage.py runserver 127.0.0.1:8010 --noreload
 ```
@@ -21,6 +22,13 @@ python -m venv --system-site-packages .venv
 역사적 이벤트만 가져온다. 같은 버전의 재실행은 행/알림을 중복 생성하지 않는다.
 예정 공모주 레지스트리나 예측값을 임의로 승인해 가져오지 않는다.
 로컬 DB와 세션 데이터는 gitignore된 `backend/var/`에만 저장한다.
+
+`import_event_snapshot`은 별도 `current_event_data.json`의 동결 이벤트 버전을 검증한 뒤
+신규 일반 IPO/스팩을 목록에 반영한다. 먼저 저장소 루트의 `integrate-event-snapshot`으로
+버전을 생성해야 한다. 가격 대기는 `awaiting_price_collection`, 가격만 확인된 건은
+`awaiting_disclosure_verification`이며 예측을 공개하지 않는다. 중복 이벤트는 재생성하지
+않고 기존 연구/검토 상태를 임의로 낮추지 않는다. 2026-11-06 확인한 로컬 DB 412건과
+연구 데이터 391행은 서로 다른 범위다.
 
 ## API
 
