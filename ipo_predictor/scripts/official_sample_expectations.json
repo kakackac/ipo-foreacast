@@ -359,6 +359,102 @@
       "sha256": "7fe25053311a45a76d462600cfe16763b80544510f8de17937bfcb4fc0c2ae89",
       "review": "Participation summary states 100002000 shares; lockup table states 102002000. Lockup NULL means unresolved quantity conflict, not nonpublication.",
       "expected": {"institutional_demand_ratio": 40.88, "lockup_commitment_ratio": null}
+    },
+    {
+      "sample": "me2on_terms_2016",
+      "receipt": "20160923000059",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160923000059&dcmNo=5296431&eleId=1&offset=739&length=60629&dtd=dart3.xsd",
+      "sha256": "bf286a491ea32931945e3af89f195b527ba442213328ba4a0a392c4f3bb13de0",
+      "expected": {"institutional_demand_ratio": 73.1, "offering_price": 3800},
+      "review_note": "After-correction institutional summary: 506 (주1), 418689000 shares, printed 73.1. The footnote says 29 multiple-price submissions are included; it is not a second count or a ratio. Preserve the printed rate."
+    },
+    {
+      "sample": "hims_terms_2017",
+      "receipt": "20170707000203",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170707000203&dcmNo=5709508&eleId=1&offset=736&length=167481&dtd=dart3.xsd",
+      "sha256": "a0c062aeb8497c399a1bca8174b9d0697cf2f5334fa28ff0c7e4291740a434d3",
+      "expected": {"institutional_demand_ratio": 729.64, "offering_price": 20000},
+      "review_note": "Explicit after-view domestic and foreign institutional bookbuilding summary: 829 applications, 395992915 shares, printed 729.64. The companion prospectus omits the aggregate scope heading."
+    },
+    {
+      "sample": "biodyne_terms_2021",
+      "receipt": "20210304000632",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210304000632&dcmNo=7853818&eleId=1&offset=787&length=307582&dtd=dart3.xsd",
+      "sha256": "46988bf381046797419f969e87ce078f4eba391ac28ca732ab828761d3bc2a58",
+      "expected": {"institutional_demand_ratio": 1364.85, "lockup_commitment_ratio": 0.088, "offering_price": 30000},
+      "review_note": "After-view total competition cell prints 1364.85:1. Commitment table prints quantity ratio 8.8% and count ratio 8.7%; only 8.8% is the target. 90373000/1023641000 is compatible with its displayed precision."
+    },
+    {
+      "sample": "milli_terms_2023",
+      "receipt": "20230915000280",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230915000280&dcmNo=9432729&eleId=1&offset=637&length=354791&dtd=dart3.xsd",
+      "sha256": "348deaffb728d07a5b98041174ca44a242432ee77030dd5f0c6789a60081513d",
+      "expected": {"institutional_demand_ratio": 619.24, "lockup_commitment_ratio": 0.05769509578049078, "offering_price": 23000},
+      "review_note": "Note 3 after-view, not the prior contents-none section: 1915 applications, 696645000 shares, total printed 619.24. The angle-bracket note label is a standalone correction delimiter. The mixed count/share cells give 40193000 committed plus 656452000 noncommitted shares. Read explicit share units, not the inconsistent count typography or subgroup counts."
+    },
+    {
+      "sample": "contec_terms_2023",
+      "receipt": "20231030000344",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20231030000344&dcmNo=9476286&eleId=1&offset=639&length=560032&dtd=dart3.xsd",
+      "sha256": "5fca49e7535ca64629a11b00f429eed59979ca4d3b819f6f7da68a09c9b519e3",
+      "expected": {"institutional_demand_ratio": 198.93, "lockup_commitment_ratio": 0.012477834355528803, "offering_price": 22500},
+      "review_note": "After-view total rate 198.93. Aggregate commitment quantities 3835000 plus noncommitted 303510000 equal independent total 307345000. This raw sample approval does not override a conflicting companion document in integration."
+    },
+    {
+      "sample": "pinkfong_terms_2025",
+      "receipt": "20251105000307",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20251105000307&dcmNo=10866100&eleId=1&offset=656&length=422238&dtd=dart4.xsd",
+      "sha256": "02c2b203741ef678a461e367391925dc1315209686bdc93bb1297b505b360401",
+      "expected": {"institutional_demand_ratio": 615.89, "lockup_commitment_ratio": 0.30419038588310177, "offering_price": 38000},
+      "review_note": "After-view aggregate, not foreign-only columns: total 923829000 shares, commitments 281019900 and noncommitments 642809100. Printed aggregate competition is 615.89."
+    },
+    {
+      "sample": "surplus_final_2017",
+      "receipt": "20170116000302",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170116000302&dcmNo=5416120&eleId=9&offset=270436&length=136984&dtd=dart3.xsd",
+      "sha256": "72e46a1b7651ae9f1fcd423809ff91e77193ae4d0c4c5415cc05c03b20468143",
+      "expected": {"institutional_demand_ratio": 81.31, "offering_price": 8000},
+      "review_note": "The original aggregate row label is 경쟁율, with total 81.31. Read the explicit total column, not the sum of subgroup printed ratios."
+    },
+    {
+      "sample": "straffic_final_2017",
+      "receipt": "20171122000164",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20171122000164&dcmNo=5855666&eleId=9&offset=200042&length=149195&dtd=dart3.xsd",
+      "sha256": "35e3a3d089f5000fd36c7e2eeee5987e36e261212b92c1a1c3ea58b4bc9c0940",
+      "expected": {"institutional_demand_ratio": 605.02, "offering_price": 10000},
+      "review_note": "Original heading includes a separate unit row. The total cell on the 경쟁율 row prints 605.02; 940197905 is application shares, not competition."
+    },
+    {
+      "sample": "ctk_final_2017",
+      "receipt": "20171124000037",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20171124000037&dcmNo=5858205&eleId=9&offset=233873&length=158167&dtd=dart3.xsd",
+      "sha256": "eefbd5908b341aedc76e01539875507baf228522cea7e8e3a0f1c238ab6276ce",
+      "expected": {"institutional_demand_ratio": 188.65, "offering_price": 55000},
+      "review_note": "Explicit domestic and foreign institutional total is 188.65 in the row spelled 경쟁율. Participant count is 668 and application quantity 294294114."
+    },
+    {
+      "sample": "ecomaister_final_2018",
+      "receipt": "20180302000254",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20180302000254&dcmNo=5974057&eleId=9&offset=323257&length=162403&dtd=dart3.xsd",
+      "sha256": "44b72b3161168529a4a246c46d6f3de188ca075eff98656d03d378e38f94fef0",
+      "expected": {"institutional_demand_ratio": 15.54, "offering_price": 5200},
+      "review_note": "The original subgroup 경쟁율 cells are dashes but the explicitly labelled total cell prints 15.54. Do not turn subgroup dashes into zero or derive the rate from them."
     }
   ]
 }

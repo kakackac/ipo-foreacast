@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 20
+DEMAND_PARSER_VERSION = 23
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -1096,9 +1096,10 @@ class DARTCollector:
             if (len(headers) == 3 and len(row) == 3
                     and re.fullmatch(r"(?:참여|참가)건수(?:\(건\))?", headers[0])
                     and re.fullmatch(r"(?:신청수량|참여수량|참가수량|참여주식수)(?:\(주\))?", headers[1])
-                    and re.fullmatch(r"단순경쟁률(?:\([:：]1\))?", headers[2])):
-                counts = [re.fullmatch(r"([0-9][0-9,]*)\s*"+unit+'?', c.strip())
-                          for c,unit in zip(row[:2],['건','주'])]
+                    and re.fullmatch(r"단순경쟁[률율](?:\([:：]1\))?", headers[2])):
+                counts = [re.fullmatch(r"([0-9][0-9,]*)\s*"+unit+'?'+suffix, c.strip())
+                          for c,unit,suffix in zip(row[:2],['건','주'],
+                              [r'(?:\s*\(\s*주\s*[1-9][0-9]*\s*\))?', ''])]
                 rate = re.fullmatch(r"([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s*[:：]\s*1)?", row[2].strip())
                 if all(counts) and rate:
                     return {
@@ -1133,7 +1134,7 @@ class DARTCollector:
         ratio_pattern = re.compile(r"([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s*(?::|：|대)\s*1)?")
         ratio_rows = [
             (index, row) for index, row in enumerate(table)
-            if re.search(r"(?:유효\s*|단순\s*)?경쟁률", " ".join(row))
+            if re.search(r"(?:유효\s*|단순\s*)?경쟁[률율]", " ".join(row))
         ]
         for row_index, row in ratio_rows:
             # 세로형 표: 합계/전체 행 자체에 경쟁률이 직접 기재된다.
@@ -1496,8 +1497,19 @@ class DARTCollector:
         if outcome_candidates:
             result["parser_validation_status"] = "candidate_rejected"
             result["rejection_reason"] = "lockup_outcome_quantity_schema_or_reconciliation_unverified"
-            result["structured_evidence"] = json.dumps({"candidate_tables": [
-                json.loads(item) for item in outcome_candidates]}, ensure_ascii=False)
+            candidates = [json.loads(item) for item in outcome_candidates]
+            empty = []
+            for candidate in candidates:
+                data = [row for row in candidate['table'] if row and re.fullmatch(
+                    r'\d+(?:개월|일|주일|주)(?:확약)?|미확약|확약없음|합계|총합계|총계|계',
+                    re.sub(r'\s+', '', row[0]))]
+                empty.append(len(data)>=2 and any(re.fullmatch(r'(?:총)?합계|총계|계',
+                    re.sub(r'\s+', '', row[0])) for row in data)
+                    and all(len(row)>1 and all(not cell.strip() for cell in row[1:]) for row in data))
+            if empty and all(empty):
+                result['parser_validation_status'] = 'value_not_found'
+                result['rejection_reason'] = 'selected_document_lockup_outcome_cells_empty'
+            result["structured_evidence"] = json.dumps({"candidate_tables": candidates}, ensure_ascii=False)
         elif re.search(r"의무\s*보유\s*확약", normalized_document):
             result["parser_validation_status"] = "candidate_rejected"
             result["rejection_reason"] = "selected_document_lockup_rules_without_identified_outcome"
@@ -1550,6 +1562,18 @@ class DARTCollector:
         columns = [c for c in range(max(map(len, headers), default=0))
                    if any(c < len(row) and re.fullmatch(r"\s*합\s*계\s*", row[c]) for row in headers)
                    and any(c < len(row) and re.fullmatch(r"\s*(?:신청\s*주식\s*수|수량)\s*", row[c]) for row in headers)]
+        composite_units = False
+        cell_quantity = re.compile(r'[0-9][0-9,.]*\s*건\s*/\s*'
+                                   r'(?P<quantity>(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+))\s*주')
+        if not columns and application_total is not None and re.search(
+                r'기관\s*투자자', ' '.join(' '.join(row) for row in headers)):
+            totals = sorted({c for row in headers for c, cell in enumerate(row)
+                             if re.fullmatch(r'합\s*계', cell.strip())})
+            if len(totals)==1 and all(totals[0]<len(row) and (
+                    row[totals[0]].strip()=='-' or cell_quantity.fullmatch(row[totals[0]].strip()))
+                    for row in table[start:]):
+                columns=totals
+                composite_units=True
         single_quantity_schema = False
         if not columns and re.search(r"의무\s*보유\s*확약\s*신청내역\s*$", heading):
             columns = sorted({c for row in headers for c, cell in enumerate(row)
@@ -1584,8 +1608,12 @@ class DARTCollector:
             label = re.sub(r"\s+", "", row[0])
             if re.fullmatch(r"총참여건수(?:및|/)(?:신청)?수량대비(?:비율|율)(?:\(%\))?", label):
                 continue
+            value = row[column].strip()
+            if composite_units and value!='-':
+                match=cell_quantity.fullmatch(value)
+                if match is None:return None
+                value=match['quantity']
             if label == '확약합계':
-                value = row[column].strip()
                 if committed_subtotal is not None or not re.fullmatch(r"[0-9][0-9,]*|-", value):
                     return None
                 committed_subtotal = int(value.replace(',', '')) if value != '-' else 0
@@ -1597,7 +1625,7 @@ class DARTCollector:
                 total_label_alias = True
             if not re.fullmatch(r"\d+(?:개월|일|주일|주)(?:확약)?|미확약|확약없음|합계", label):
                 return None
-            quantity = row[column].strip()
+            quantity = value
             if label in quantities:
                 return None
             if quantity == '-' and label != '합계' and (application_total is not None or single_quantity_schema):
@@ -1630,7 +1658,8 @@ class DARTCollector:
         return {
             "lockup_commitment_ratio": committed / total,
             "parse_method": "lockup_reconciled_aggregate_quantity",
-            "rule_id": "DART_LOCKUP_RECONCILED_TOTAL_QUANTITY_V3",
+            "rule_id": ("DART_LOCKUP_EXPLICIT_COUNT_SHARE_CELL_V4" if composite_units
+                        else "DART_LOCKUP_RECONCILED_TOTAL_QUANTITY_V3"),
             "parser_validation_status": "structurally_verified",
             "evidence": f"committed={committed}; noncommitted={none}; total={total}",
             "structured_evidence": cls._table_evidence(
@@ -1643,6 +1672,7 @@ class DARTCollector:
                 row_order_independent=True,
                 single_application_quantity_schema=single_quantity_schema,
                 independently_disclosed_committed_subtotal=committed_subtotal,
+                **({'explicit_count_and_share_cell_units':True} if composite_units else {}),
             ),
         }
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from data.pipelines.stage_snapshots import demand_schedule, stage_documents, values_from_document, amendment_view, horizontal_after_cells, original_cache_hashes, reusable_checkpoint, document_analysis, section_text, StageResponseInvalid, result_day_document, same_demand_printed_rounding, set_stage_offering_price_metadata, stage_collection_fields, stage_observation, stage_checkpoint_identity, stage_financial_missing_reason
+from data.pipelines.stage_snapshots import same_verified_lockup_table
 from features.model_profiles import get_model_profile
 from features.prediction_time_contract import validate_prediction_times
 
@@ -17,6 +18,22 @@ def schedule(start='2024년 02월 08일',end='02월 09일'):
 
 
 class StageSnapshotTests(unittest.TestCase):
+    def test_same_outcome_table_requires_exact_cells_and_no_real_quantity_conflict(self):
+        table=[['구분','합계'],['6개월','1건 / 100주'],['미확약','9건 / 900주'],['합계','10건 / 1000주']]
+        verified={'lockup_parser_validation_status':'structurally_verified',
+            'lockup_structured_evidence':json.dumps({'table':table,'independently_disclosed_application_total':1000})}
+        other={'lockup_parser_validation_status':'candidate_rejected',
+            'lockup_rejection_reason':'lockup_outcome_quantity_schema_or_reconciliation_unverified',
+            'lockup_structured_evidence':json.dumps({'candidate_tables':[{'table':table}]})}
+        self.assertTrue(same_verified_lockup_table(verified,other))
+        changed=json.loads(json.dumps(table));changed[1][1]='1건 / 101주'
+        self.assertFalse(same_verified_lockup_table(verified,{**other,
+            'lockup_structured_evidence':json.dumps({'candidate_tables':[{'table':changed}]})}))
+        self.assertFalse(same_verified_lockup_table(verified,{**other,
+            'lockup_rejection_reason':'lockup_independent_application_quantity_mismatch'}))
+        self.assertFalse(same_verified_lockup_table(verified,{**other,'lockup_structured_evidence':'invalid json'}))
+        self.assertFalse(same_verified_lockup_table({**verified,'lockup_parser_validation_status':'value_not_found'},other))
+
     def test_changed_parent_parser_cannot_supply_stale_disclosure_values(self):
         from data.pipelines.stage_snapshots import current_annual_history
         rows=pd.DataFrame([{'report_code':'IPO_FINANCIAL_DISCLOSURE','amount':999},
@@ -167,6 +184,41 @@ class StageSnapshotTests(unittest.TestCase):
         self.assertEqual(proof['pair_count'],1)
         noted=body.replace('<span>■</span><span>정정 전<br/></span>','(주1) 정정 전').replace('<b>■ </b><span>정정 후<br/></span>','(주1) 정정 후')
         self.assertIn('new',amendment_view(noted)[0])
+
+    def test_standalone_note_marker_variants_preserve_after_tables_only(self):
+        for before,after in [('주1) 정정 전','주1) 정정 후'),
+                ('주1) - 정정 전','주1) - 정정 후'),
+                ('정정전 주1)','정정후 주1)'),
+                ('&lt;주1 &gt; 정정 전','&lt;주1&gt; 정정 후'),
+                ('(주1)<br/>정정 전','정정 후')]:
+            with self.subTest(before=before):
+                body=f'<p>{before}</p><table><tr><td>old</td></tr></table><p>{after}</p><table><tr><td>new</td></tr></table>'
+                selected,proof=amendment_view(body)
+                self.assertNotIn('old',selected);self.assertIn('new',selected)
+                self.assertEqual(proof['pair_count'],1)
+        for body in ['<p>정정 전후 자료를 참고</p><table><tr><td>new</td></tr></table>',
+                '<table><tr><td>주1) 정정 전</td><td>주1) 정정 후</td></tr></table>']:
+            with self.assertRaises(ValueError):amendment_view(body)
+
+    def test_generic_threshold_warning_is_not_an_actual_result_conflict(self):
+        terms={'rcept_no':'20240101000001','rcept_dt':'2024-01-01','report_nm':'[발행조건확정]증권신고서(지분증권)'}
+        full={'rcept_no':'20240101000002','rcept_dt':'2024-01-01','report_nm':'투자설명서'}
+        price={'offering_price':4000,'offering_price_finality':'confirmed_price_language','offering_price_review_status':'verified_currency_unit'}
+        def load(m):return 'body',{'receipt':m['rcept_no'],'corp_code':'00000001',
+            'content_scope':'partial_terms_notice' if m==terms else 'full',
+            'related_receipts':[terms['rcept_no'],full['rcept_no']]}
+        def analyse(m,*args):return {'offering':price,'demand':{
+            'institutional_demand_ratio':100 if m==terms else None,
+            'institutional_demand_parser_validation_status':'structurally_verified' if m==terms else 'candidate_rejected',
+            'institutional_demand_rejection_reason':None if m==terms else 'risk_or_planned_threshold_context'}}
+        result=result_day_document(terms,[terms,full],load,analyse)
+        self.assertEqual(result[3]['demand']['institutional_demand_ratio'],100)
+        self.assertEqual(result[2]['result_field_sources']['institutional_demand_ratio']['receipt'],terms['rcept_no'])
+        def conflict(m,*args):
+            r=analyse(m,*args)
+            if m==full:r['demand']['institutional_demand_rejection_reason']='aggregate_scope_or_table_alignment_not_verified'
+            return r
+        with self.assertRaisesRegex(ValueError,'result_conflict'):result_day_document(terms,[terms,full],load,conflict)
 
     def test_planned_label_in_notice_only_crosschecks_a_later_linked_final_source(self):
         early={'rcept_no':'20240101000001','rcept_dt':'2024-01-01','report_nm':'[발행조건확정]증권신고서(지분증권)'}

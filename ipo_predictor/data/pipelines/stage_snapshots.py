@@ -164,6 +164,24 @@ def document_analysis(dart,body,receipt,corp,raw=None):
     return result
 
 
+def same_verified_lockup_table(verified, other):
+    """An identical outcome table can lack its separate denominator in a full copy."""
+    if (verified.get('lockup_parser_validation_status')!='structurally_verified'
+            or other.get('lockup_parser_validation_status')!='candidate_rejected'
+            or other.get('lockup_rejection_reason')!='lockup_outcome_quantity_schema_or_reconciliation_unverified'):
+        return False
+    try:
+        left=verified.get('lockup_structured_evidence')
+        right=other.get('lockup_structured_evidence')
+        left=json.loads(left) if isinstance(left,str) else left
+        right=json.loads(right) if isinstance(right,str) else right
+        table=left.get('table') if isinstance(left,dict) else None
+        candidates=right.get('candidate_tables') if isinstance(right,dict) else None
+        return bool(table and candidates and all(c.get('table')==table for c in candidates))
+    except (TypeError,ValueError):
+        return False
+
+
 def result_day_document(metadata, terms, load, analyse=None):
     """A same-day complete prospectus must agree with explicit terms amendments."""
     day=[(m,*load(m)) for m in terms if m['rcept_dt']==metadata['rcept_dt']]
@@ -212,14 +230,20 @@ def result_day_document(metadata, terms, load, analyse=None):
         for field,prefix in [('institutional_demand_ratio','institutional_demand'),('lockup_commitment_ratio','lockup')]:
             if demand.get(prefix+'_parser_validation_status')!='structurally_verified':continue
             if demand.get(field)==full_demand.get(field):continue
-            if (linked and full_demand.get(prefix+'_parser_validation_status')=='value_not_found'
+            full_status=full_demand.get(prefix+'_parser_validation_status')
+            full_unpopulated=(full_status=='value_not_found' or full_status=='candidate_rejected'
+                and full_demand.get(prefix+'_rejection_reason') in {
+                    'risk_or_planned_threshold_context','selected_document_lockup_rules_without_identified_outcome'})
+            same_table=field=='lockup_commitment_ratio' and same_verified_lockup_table(demand,full_demand)
+            if (linked and (full_unpopulated or same_table)
                     and price.get('offering_price_finality')=='confirmed_price_language'
                     and price.get('offering_price_review_status')=='verified_currency_unit'
                     and price.get('offering_price')==full_price.get('offering_price')):
                 for key,value in demand.items():
                     if key.startswith(prefix+'_') or key==field:full_demand[key]=value
                 field_sources[field]={**proof,'source_selection_rule':'same_day_linked_confirmed_terms_field_v1'}
-                checks[field]='verified_terms_value_full_document_unpopulated'
+                checks[field]=('verified_terms_identical_full_outcome_table' if same_table else
+                               'verified_terms_value_full_document_unpopulated')
                 continue
             if field=='institutional_demand_ratio' and same_demand_printed_rounding(demand,full_demand):
                 checks[field]='same_application_quantity_and_count_printed_rounding';continue
@@ -280,10 +304,12 @@ def amendment_view(html):
         text=paragraph.get_text()
         if re.search(r'정정\s*(?:전|후)',text):
             paragraph.clear();paragraph.append(soup.new_string(text));normalized=True
+    note=r'(?:\(\s*주(?:석)?\s*\d+\s*\)|주(?:석)?\s*\d+\s*\)|<\s*주(?:석)?\s*\d+\s*>)'
+    marker_line=re.compile(r'(?m)^\s*(?:(?P<before>'+note+r')\s*(?:-\s*)?)?'
+        r'정정\s*(?P<phase>전|후)(?:\s*(?P<after>'+note+r'))?\s*$')
     for node in list(soup.find_all(string=True)):
         if node.find_parent('table') is not None:continue
-        text=re.sub(r'(?m)^\s*(\(\s*주(?:석)?\s*\d+\s*\))\s*정정\s*(전|후)\s*$',
-                    lambda m:m[1]+'\n[정정 '+m[2]+']',str(node))
+        text=marker_line.sub(lambda m:(m['before'] or m['after'] or '')+'\n[정정 '+m['phase']+']',str(node))
         if text!=str(node):
             for piece in re.split(r'(\[정정 (?:전|후)\])',text):
                 if re.fullmatch(r'\[정정 (?:전|후)\]',piece):
@@ -302,7 +328,7 @@ def amendment_view(html):
         node.extract()
     selected,evidence=after_correction_view(str(soup) if normalized else html)
     if normalized:
-        evidence.update(normalization='explicit_angle_or_bullet_text_markers_to_brackets_v1',
+        evidence.update(normalization='explicit_standalone_note_angle_or_bullet_markers_to_brackets_v2',
             normalized_sha256=evidence['original_sha256'],original_sha256=hashlib.sha256(html.encode()).hexdigest())
     return selected,evidence
 

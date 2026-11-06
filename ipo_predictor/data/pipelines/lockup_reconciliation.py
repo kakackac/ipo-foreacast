@@ -5,6 +5,7 @@ import json
 import math
 import subprocess
 import tempfile
+import inspect
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -65,7 +66,7 @@ def original_body(raw, bundle):
     return '\n'.join(pieces)
 
 
-def documents(raw, record, proof):
+def documents(raw, record, proof, field=None):
     receipt = record['rcept_no']
     primary = next(m for m in proof['family'] if m['rcept_no'] == receipt)
     selected = []
@@ -86,12 +87,60 @@ def documents(raw, record, proof):
             selected.append((metadata, extra, original_body(raw, extra)))
     if not selected:
         raise RuntimeError('lockup_reprocessing_no_parent_approved_document')
+    # A later full prospectus may leave the newly amended result unpopulated.
+    # Admit only the same-day, confirmed-price, explicitly selected after-view.
+    if (field in {'institutional_demand_ratio','lockup_commitment_ratio'}
+            and proof.get('content_scope')=='partial_or_terms_notice'
+            and not proof.get('correction_selection')
+            and proof.get('supplementary_status')=='official_related_prospectus_verified'
+            and extra.get('corp_code')==proof.get('corp_code')
+            and all(m['rcept_dt']==primary['rcept_dt'] for m,_,_ in selected)):
+        from data.pipelines.stage_snapshots import amendment_view, same_verified_lockup_table
+        try:
+            body, view = amendment_view(original_body(raw,proof))
+        except ValueError:
+            body = None
+        if body is not None:
+            dart = DARTCollector(api_key='unused')
+            price = dart._parse_offering_html(body,receipt)
+            prefix = 'institutional_demand' if field=='institutional_demand_ratio' else 'lockup'
+            parsed = dart._parse_demand_forecast_html(body,str(record['corp_code']))
+            candidate = parsed.get(field)
+            if not (price.get('offering_price_review_status')=='verified_currency_unit'
+                    and price.get('offering_price_finality')=='confirmed_price_language'
+                    and price.get('offering_price')==record.get('offering_price')
+                    and parsed[prefix+'_parser_validation_status']=='structurally_verified'
+                    and candidate is not None):
+                return sorted(selected,key=lambda x:(x[0]['rcept_dt'],x[0]['rcept_no']),reverse=True)
+            absent_reasons = {'risk_or_planned_threshold_context',
+                              'selected_document_lockup_rules_without_identified_outcome'}
+            compatible = True
+            needs_notice = False
+            comparisons = []
+            for metadata,bundle,full in selected:
+                current = dart._parse_demand_forecast_html(full,str(record['corp_code']))
+                status = current[prefix+'_parser_validation_status']
+                reason = current.get(prefix+'_rejection_reason')
+                agrees = (status=='structurally_verified' and current.get(field)==candidate)
+                absent = (status=='value_not_found' or
+                          status=='candidate_rejected' and reason in absent_reasons)
+                same_table=(field=='lockup_commitment_ratio' and same_verified_lockup_table(parsed,current))
+                compatible = compatible and (agrees or absent or same_table)
+                needs_notice = needs_notice or absent or same_table
+                comparisons.append({'receipt':metadata['rcept_no'],'status':status,
+                    'reason':reason,'value':current.get(field),'agrees':agrees,'unpopulated':absent,
+                    'same_verified_outcome_table':same_table})
+            if compatible and needs_notice:
+                bundle={**proof,'field_notice_selection':{'field':field,'view':view,
+                    'rule':'same_day_linked_confirmed_after_notice_v1',
+                    'price':price['offering_price'],'full_document_comparisons':comparisons}}
+                return [(primary,bundle,body)]
     return sorted(selected, key=lambda x:(x[0]['rcept_dt'], x[0]['rcept_no']), reverse=True)
 
 
 def reprocess_record(raw, record, proof, dart, *, allow_reuse=False):
     cutoff = pd.Timestamp(record['listing_date']).normalize()-pd.Timedelta(hours=3)
-    selected_documents = documents(raw, record, proof)
+    selected_documents = documents(raw, record, proof, field='lockup_commitment_ratio')
     for metadata, _, _ in selected_documents:
         if pd.Timestamp(metadata['rcept_dt'])+pd.Timedelta(days=1) >= cutoff:
             raise RuntimeError('lockup_reprocessing_publication_after_cutoff')
@@ -103,6 +152,7 @@ def reprocess_record(raw, record, proof, dart, *, allow_reuse=False):
             and previous.get('parser_version') == DEMAND_PARSER_VERSION and attempts_before
             and len(attempts_before) <= len(selected_documents)
             and all(a['receipt']==m['rcept_no'] and a['published']==m['rcept_dt'] and a['sections']==b['sections']
+                    and a.get('field_notice_selection')==b.get('field_notice_selection')
                     for a,(m,b,_) in zip(attempts_before,selected_documents))
             and (record.get('lockup_commitment_ratio') is not None
                  or attempts_before[-1]['parser_status']=='candidate_rejected'
@@ -123,7 +173,8 @@ def reprocess_record(raw, record, proof, dart, *, allow_reuse=False):
         attempts.append({'receipt':metadata['rcept_no'], 'published':metadata['rcept_dt'],
             'source_url':bundle['source_url'], 'sections':bundle['sections'],
             'parser_status':parsed['parser_validation_status'], 'rule':parsed.get('rule_id'),
-            'reason':parsed.get('rejection_reason'), 'evidence':parsed.get('structured_evidence')})
+            'reason':parsed.get('rejection_reason'), 'evidence':parsed.get('structured_evidence'),
+            'field_notice_selection':bundle.get('field_notice_selection')})
         if parsed['parser_validation_status'] == 'candidate_rejected':
             break
         value = parsed['lockup_commitment_ratio']
@@ -164,14 +215,15 @@ def reprocess_record(raw, record, proof, dart, *, allow_reuse=False):
 def reprocess_institutional_record(raw, record, proof, dart):
     cutoff=pd.Timestamp(record['listing_date']).normalize()-pd.Timedelta(hours=3)
     attempts=[];chosen=None;first=None
-    for metadata,bundle,body in documents(raw,record,proof):
+    for metadata,bundle,body in documents(raw,record,proof,field='institutional_demand_ratio'):
         if pd.Timestamp(metadata['rcept_dt'])+pd.Timedelta(days=1)>=cutoff:
             raise RuntimeError('institutional_reprocessing_publication_after_cutoff')
         parsed=dart._parse_demand_forecast_html(body,str(record['corp_code']))
         first=first or (metadata,bundle,parsed)
         attempts.append({'receipt':metadata['rcept_no'],'published':metadata['rcept_dt'],
             'sections':bundle['sections'],'parser_status':parsed['institutional_demand_parser_validation_status'],
-            'rule':parsed.get('institutional_demand_rule_id'),'reason':parsed.get('institutional_demand_rejection_reason')})
+            'rule':parsed.get('institutional_demand_rule_id'),'reason':parsed.get('institutional_demand_rejection_reason'),
+            'field_notice_selection':bundle.get('field_notice_selection')})
         if parsed['institutional_demand_parser_validation_status']=='candidate_rejected':break
         value=parsed.get('institutional_demand_ratio')
         if value is not None:
@@ -205,7 +257,10 @@ def run(raw_dir, processed_dir, dart=None):
         return None
     parent, report = pin_connections(processed)
     parser = Path(__file__).parents[1]/'collectors/dart_collector.py'
-    code = {'parser':digest(parser), 'repair':digest(__file__)}
+    from data.pipelines.stage_snapshots import amendment_view, same_verified_lockup_table
+    code = {'parser':digest(parser), 'repair':digest(__file__),
+            'amendment_view':hashlib.sha256(inspect.getsource(amendment_view).encode()).hexdigest(),
+            'outcome_table_equivalence':hashlib.sha256(inspect.getsource(same_verified_lockup_table).encode()).hexdigest()}
     current_source = parser_snapshot(raw, code['parser'], parser.read_text())
     if report.get('lockup_field_reprocessing', {}).get('code') == code:
         return {**report, 'path':str(parent), 'reused':True}
@@ -276,7 +331,10 @@ def run(raw_dir, processed_dir, dart=None):
             'attempts':json.dumps(proof['lockup_reprocessing']['attempts'],ensure_ascii=False)})
         if len(audit)%100 == 0:
             print(json.dumps({'lockup_reprocessed':len(audit),'population':len(connections)}), flush=True)
-    if (code != {'parser':digest(parser), 'repair':digest(__file__)} or contract!=connection_contract()
+    if (code != {'parser':digest(parser), 'repair':digest(__file__),
+                'amendment_view':hashlib.sha256(inspect.getsource(amendment_view).encode()).hexdigest(),
+                'outcome_table_equivalence':hashlib.sha256(inspect.getsource(same_verified_lockup_table).encode()).hexdigest()}
+            or contract!=connection_contract()
             or inputs['input_sha256'] != load_inputs(raw,processed)['input_sha256']):
         raise RuntimeError('lockup_reprocessing_inputs_changed')
     identity = {'parent_manifest':str((parent/'manifest.json').relative_to(processed)),

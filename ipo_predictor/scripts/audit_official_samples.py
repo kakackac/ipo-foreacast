@@ -53,6 +53,16 @@ SAMPLES = {
     "sunbeauty_lockup_conflict_2021": "20210114000349",
     "vc_annual_financial_2022": "20220214000382",
     "hansolcnp_float_2016": "20160118000101",
+    "me2on_terms_2016": "20160923000059",
+    "hims_terms_2017": "20170707000203",
+    "biodyne_terms_2021": "20210304000632",
+    "milli_terms_2023": "20230915000280",
+    "contec_terms_2023": "20231030000344",
+    "pinkfong_terms_2025": "20251105000307",
+    "surplus_final_2017": "20170116000302",
+    "straffic_final_2017": "20171122000164",
+    "ctk_final_2017": "20171124000037",
+    "ecomaister_final_2018": "20180302000254",
 }
 
 
@@ -199,6 +209,9 @@ def main():
         if reference and reference.get('extraction_view')=='explicit_after_correction_v1':
             from data.pipelines.correction_views import after_correction_view
             body,view_evidence=after_correction_view(body)
+        elif reference and reference.get('extraction_view')=='normalized_after_correction_v2':
+            from data.pipelines.stage_snapshots import amendment_view
+            body,view_evidence=amendment_view(body)
         record = {
             "sample": name, "receipt": receipt, "source_url": url,
             "document_path": str(body_path), "selection": parameters,

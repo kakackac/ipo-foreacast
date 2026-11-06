@@ -4,6 +4,36 @@ from data.collectors.dart_collector import DARTCollector
 
 
 class InstitutionalParticipationSummaryTests(unittest.TestCase):
+    def test_official_competition_label_spelling_variant_keeps_explicit_total_cell(self):
+        for label in ['경쟁률','경쟁율']:
+            table=[['구분','국내 기관투자자','외국 기관투자자','합계'],
+                ['건수','100','20','120'],['수량','10000','2000','12000'],
+                [label,'10','2','12.34']]
+            parsed=DARTCollector._extract_aggregate_demand_ratio(table)
+            self.assertEqual(parsed['institutional_demand_ratio'],12.34)
+            self.assertEqual(json.loads(parsed['institutional_demand_structured_evidence'])['selected_column'],3)
+            table[-1][-1]='-'
+            self.assertIsNone(DARTCollector._extract_aggregate_demand_ratio(table))
+        summary=[['참여건수(건)','신청수량(주)','단순경쟁율'],['100','12000','12.34']]
+        self.assertEqual(DARTCollector._extract_aggregate_demand_ratio(summary,
+            '수요예측 결과 기관투자자 수요예측 참여내역')['institutional_demand_ratio'],12.34)
+
+    def test_participant_footnote_is_not_a_second_numeric_value(self):
+        heading='(13) 수요예측 결과 ① 기관투자자 수요예측 참여내역'
+        table=[['참여건수(건)','신청수량(주)','단순경쟁률'],
+               ['506 (주1)','418,689,000','73.1']]
+        parsed=DARTCollector._extract_aggregate_demand_ratio(table,heading)
+        self.assertEqual(parsed['institutional_demand_ratio'],73.1)
+        evidence=json.loads(parsed['institutional_demand_structured_evidence'])
+        self.assertEqual(evidence['application_count'],506)
+        self.assertEqual(evidence['application_quantity'],418689000)
+        self.assertEqual(evidence['table'][1][0],'506 (주1)')
+        for invalid in ['506 29','506 (국내 29)','506 (주1) 29','506-29','(주1) 506']:
+            table[1][0]=invalid
+            self.assertIsNone(DARTCollector._extract_aggregate_demand_ratio(table,heading))
+        table[1][0]='506 (주1)';table[1][2]='73.1 (주2)'
+        self.assertIsNone(DARTCollector._extract_aggregate_demand_ratio(table,heading))
+
     def test_actual_summary_heading_and_header_variants(self):
         cases = [
             ('(13) 수요예측 결과 통보 1) 기관투자자 수요예측 참여내역',

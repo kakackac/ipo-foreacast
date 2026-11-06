@@ -12,6 +12,107 @@ from data.pipelines.data_delivery import digest
 
 
 class LockupRepairTests(unittest.TestCase):
+    def test_aggregate_cells_with_both_count_and_shares_use_explicit_share_unit(self):
+        table=[['구분','국내기관투자자','해외기관투자자','합계'],
+            ['6개월 확약','1건 / 100주','-','1건 / 100주'],
+            ['미확약','9건 / 900주','0건 / 0주','9건 / 900주'],
+            ['합계','10건 / 1,000주','0건 / 0주','10건 / 1,000주']]
+        result=DARTCollector._extract_aggregate_lockup_shares(table,1000)
+        self.assertIsNotNone(result)
+        self.assertEqual(result['lockup_commitment_ratio'],.1)
+        proof=json.loads(result['structured_evidence'])
+        self.assertTrue(proof['explicit_count_and_share_cell_units'])
+        self.assertEqual(proof['table'][1][-1],'1건 / 100주')
+        for text in ['1건 / 100원','1주 / 100건','100','1건 / 100백만주']:
+            changed=json.loads(json.dumps(table));changed[1][-1]=text
+            self.assertIsNone(DARTCollector._extract_aggregate_lockup_shares(changed,1000))
+        self.assertIsNone(DARTCollector._extract_aggregate_lockup_shares(table,1001))
+
+    def test_empty_outcome_cells_are_not_an_unresolved_numeric_conflict_or_zero(self):
+        html='<h3>기관 수요예측 의무보유확약 신청내역</h3><table><tr><td>확약기간</td><td>신청수량(주)</td></tr>'
+        html+=''.join(f'<tr><td>{label}</td><td></td></tr>' for label in ['6개월','3개월','미확약','합계'])+'</table>'
+        parsed=DARTCollector._extract_lockup_ratios_from_tables(html)
+        self.assertIsNone(parsed['lockup_commitment_ratio'])
+        self.assertEqual(parsed['parser_validation_status'],'value_not_found')
+        self.assertEqual(parsed['rejection_reason'],'selected_document_lockup_outcome_cells_empty')
+        self.assertNotEqual(DARTCollector._extract_lockup_ratios_from_tables(html.replace('<td></td>','<td>-</td>'))[
+            'rejection_reason'],'selected_document_lockup_outcome_cells_empty')
+
+    def test_same_original_section_but_changed_after_view_does_not_reuse_old_lockup(self):
+        from data.collectors.dart_collector import DEMAND_PARSER_VERSION
+        metadata={'rcept_no':'20240201000001','rcept_dt':'2024-02-01'}
+        section=[{'url':'official','sha256':'a'*64}]
+        previous={'view':{'selected_sha256':'old'}};current={'view':{'selected_sha256':'new'}}
+        proof={'lockup_reprocessing':{'parser_version':DEMAND_PARSER_VERSION,'attempts':[
+            {'receipt':metadata['rcept_no'],'published':metadata['rcept_dt'],'sections':section,
+             'parser_status':'structurally_verified','field_notice_selection':previous}]}}
+        record={'listing_date':'2024-03-01','lockup_parser_version':DEMAND_PARSER_VERSION,'lockup_commitment_ratio':.1}
+        dart=DARTCollector(api_key='unused')
+        with patch('data.pipelines.lockup_reconciliation.documents',return_value=[(metadata,
+                {'sections':section,'source_url':'official','field_notice_selection':current},'new after view')]), \
+                patch.object(dart,'_extract_lockup_ratios_from_tables',return_value={
+                    'lockup_commitment_ratio':.2,'parser_validation_status':'structurally_verified','rule_id':'verified'}) as parse:
+            updated,evidence=reprocess_record(Path('/tmp'),record,proof,dart,allow_reuse=True)
+        parse.assert_called_once()
+        self.assertEqual(updated['lockup_commitment_ratio'],.2)
+        self.assertEqual(evidence['lockup_reprocessing']['attempts'][0]['field_notice_selection'],current)
+
+    def test_same_day_confirmed_after_notice_supplies_unpopulated_full_document(self):
+        primary={'rcept_no':'20240201000001','rcept_dt':'2024-02-01'}
+        full={'rcept_no':'20240201000002','rcept_dt':'2024-02-01'}
+        other={'source_url':'https://dart.fss.or.kr/dsaf001/main.do?rcpNo='+full['rcept_no'],
+               'family':[full],'corp_code':'00000001','sections':[{'sha256':'b'*64}]}
+        proof={'family':[primary],'content_scope':'partial_or_terms_notice','corp_code':'00000001',
+            'supplementary_status':'official_related_prospectus_verified','supplementary':other,
+            'sections':[{'sha256':'a'*64}]}
+        record={'rcept_no':primary['rcept_no'],'corp_code':'00000001','offering_price':10000}
+        table=('<h3>수요예측 결과 기관투자자 수요예측 참여내역</h3><table>'
+            '<tr><td>참여건수(건)</td><td>신청수량(주)</td><td>단순경쟁률</td></tr>'
+            '<tr><td>100</td><td>1000</td><td>30:1</td></tr></table>')
+        after='<p>확정 공모가 10,000원</p>'+table
+        notice='<p>[정정 전]</p>'+table.replace('30:1','10:1')+'<p>[정정 후]</p>'+after
+        def bodies(raw,bundle):return notice if bundle is proof else 'unpopulated official prospectus'
+        with patch('data.pipelines.lockup_reconciliation.original_body',side_effect=bodies):
+            selected=documents(Path('/tmp'),record,proof,field='institutional_demand_ratio')
+        self.assertEqual(len(selected),1)
+        self.assertEqual(selected[0][0],primary)
+        self.assertNotIn('10:1',selected[0][2])
+        self.assertEqual(DARTCollector(api_key='unused')._parse_demand_forecast_html(
+            selected[0][2],'00000001')['institutional_demand_ratio'],30)
+        self.assertEqual(selected[0][1]['field_notice_selection']['price'],10000)
+        for change in ['price','corp','later_full','full_conflict','no_after_boundary']:
+            updated=json.loads(json.dumps(proof));changed=json.loads(json.dumps(record))
+            full_body='unpopulated official prospectus';notice_body=notice
+            if change=='price':changed['offering_price']=11000
+            if change=='corp':updated['supplementary']['corp_code']='00000002'
+            if change=='later_full':updated['supplementary']['family'][0]['rcept_dt']='2024-02-02'
+            if change=='full_conflict':full_body=after.replace('30:1','20:1')
+            if change=='no_after_boundary':notice_body=after
+            with self.subTest(change=change),patch('data.pipelines.lockup_reconciliation.original_body',
+                    side_effect=lambda raw,bundle:notice_body if bundle is updated else full_body):
+                selected=documents(Path('/tmp'),changed,updated,field='institutional_demand_ratio')
+                self.assertEqual(selected[0][0]['rcept_no'],full['rcept_no'])
+                self.assertNotIn('field_notice_selection',selected[0][1])
+
+    def test_actual_lockup_conflict_in_full_document_blocks_notice_fallback(self):
+        primary={'rcept_no':'20240201000001','rcept_dt':'2024-02-01'}
+        full={'rcept_no':'20240201000002','rcept_dt':'2024-02-01'}
+        extra={'source_url':'https://dart.fss.or.kr/dsaf001/main.do?rcpNo='+full['rcept_no'],
+            'family':[full],'corp_code':'00000001','sections':[]}
+        proof={'family':[primary],'content_scope':'partial_or_terms_notice','corp_code':'00000001',
+            'supplementary_status':'official_related_prospectus_verified','supplementary':extra,'sections':[]}
+        parsed={'lockup_commitment_ratio':.1,'lockup_parser_validation_status':'structurally_verified'}
+        rejected={'lockup_commitment_ratio':None,'lockup_parser_validation_status':'candidate_rejected',
+                  'lockup_rejection_reason':'lockup_independent_application_quantity_mismatch'}
+        with patch('data.pipelines.lockup_reconciliation.original_body',return_value='official'), \
+                patch('data.pipelines.stage_snapshots.amendment_view',return_value=('after',{})), \
+                patch.object(DARTCollector,'_parse_offering_html',return_value={'offering_price':10000,
+                    'offering_price_review_status':'verified_currency_unit','offering_price_finality':'confirmed_price_language'}), \
+                patch.object(DARTCollector,'_parse_demand_forecast_html',side_effect=[parsed,rejected]):
+            selected=documents(Path('/tmp'),{'rcept_no':primary['rcept_no'],'corp_code':'00000001',
+                'offering_price':10000},proof,field='lockup_commitment_ratio')
+        self.assertEqual(selected[0][0],full)
+
     def aggregate_html(self, quantity, committed, printed, periods=''):
         return ('<p>수요예측 결과 기관투자자 수요예측 참여내역</p><table>'
                 '<tr><td>참여건수(건)</td><td>신청수량(주)</td><td>단순경쟁률</td></tr>'
