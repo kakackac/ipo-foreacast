@@ -23,16 +23,32 @@ METHODS = {'_extract_lockup_ratios_from_tables', '_extract_disclosed_aggregate_l
            '_extract_aggregate_lockup_shares', '_extract_aggregate_demand_ratio'}
 
 
-def unchanged_other_parser_logic(before, after):
+def unchanged_other_parser_logic(before, after, methods=METHODS):
     def remainder(source):
         tree = ast.parse(source)
         tree.body = [n for n in tree.body if not (isinstance(n, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == 'DEMAND_PARSER_VERSION' for t in n.targets))]
         for node in tree.body:
             if isinstance(node, ast.ClassDef) and node.name == 'DARTCollector':
-                node.body = [n for n in node.body if not (isinstance(n, ast.FunctionDef) and n.name in METHODS)]
+                node.body = [n for n in node.body if not (isinstance(n, ast.FunctionDef) and n.name in methods)]
         return ast.dump(tree, include_attributes=False)
     return remainder(before) == remainder(after)
+
+
+def parser_snapshot(raw, sha256, source=None):
+    path = raw/'parser_source_snapshots'/(sha256+'.json')
+    if path.exists():
+        snapshot = json.loads(path.read_text())
+        if (snapshot.get('source_sha256') != sha256 or
+                hashlib.sha256(snapshot['source'].encode()).hexdigest() != sha256):
+            raise RuntimeError('parser_source_snapshot_integrity_failed')
+        return snapshot['source']
+    if source is not None:
+        if hashlib.sha256(source.encode()).hexdigest() != sha256:
+            raise RuntimeError('parser_source_snapshot_hash_mismatch')
+        atomic_json(path, {'source_sha256':sha256, 'source':source,
+                          'scope':'repository_parser_source_no_runtime_credentials'})
+    return source
 
 
 def original_body(raw, bundle):
@@ -190,6 +206,7 @@ def run(raw_dir, processed_dir, dart=None):
     parent, report = pin_connections(processed)
     parser = Path(__file__).parents[1]/'collectors/dart_collector.py'
     code = {'parser':digest(parser), 'repair':digest(__file__)}
+    current_source = parser_snapshot(raw, code['parser'], parser.read_text())
     if report.get('lockup_field_reprocessing', {}).get('code') == code:
         return {**report, 'path':str(parent), 'reused':True}
     if report['inputs']['contract']['parser'] == code['parser']:
@@ -199,6 +216,9 @@ def run(raw_dir, processed_dir, dart=None):
     if {k:v for k,v in contract.items() if k!='parser'} != {
             k:v for k,v in previous_contract.items() if k!='parser'}:
         return None
+    previous_source = parser_snapshot(raw, previous_contract['parser'])
+    reuse_institutional = previous_source is not None and unchanged_other_parser_logic(
+        previous_source, current_source, METHODS-{'_extract_aggregate_demand_ratio'})
     baseline = subprocess.check_output(['git','show',BASELINE+':ipo_predictor/data/collectors/dart_collector.py'],
                                        cwd=Path(__file__).parents[3])
     if (hashlib.sha256(baseline).hexdigest() != report['inputs']['contract']['parser']
@@ -232,13 +252,17 @@ def run(raw_dir, processed_dir, dart=None):
         else:
             record, proof = reprocess_record(raw, old, json.loads(row.proof), dart,
                 allow_reuse=report.get('lockup_field_reprocessing', {}).get('code', {}).get('parser')==code['parser'])
-            record, proof = reprocess_institutional_record(raw, record, proof, dart)
+            if not reuse_institutional:
+                record, proof = reprocess_institutional_record(raw, record, proof, dart)
             payload = {'record':record, 'proof':proof}
             atomic_json(checkpoint, {'event_id':row.event_id, 'payload':payload,
                 'sha256':hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()})
         connections.at[index, 'record'] = json.dumps(record, ensure_ascii=False)
         connections.at[index, 'proof'] = json.dumps(proof, ensure_ascii=False)
         before, after = old.get('lockup_commitment_ratio'), record['lockup_commitment_ratio']
+        if reuse_institutional and {k:v for k,v in old.items() if k.startswith('institutional_')} != {
+                k:v for k,v in record.items() if k.startswith('institutional_')}:
+            raise RuntimeError('unchanged_institutional_contract_changed')
         if {k:v for k,v in old.items() if not k.startswith(('lockup_','institutional_'))}!={
                 k:v for k,v in record.items() if not k.startswith(('lockup_','institutional_'))}:
             raise RuntimeError('demand_reprocessing_unrelated_field_changed')
@@ -257,7 +281,9 @@ def run(raw_dir, processed_dir, dart=None):
         raise RuntimeError('lockup_reprocessing_inputs_changed')
     identity = {'parent_manifest':str((parent/'manifest.json').relative_to(processed)),
         'parent_sha256':digest(parent/'manifest.json'), 'code':code,
-        'scope':'institutional_and_lockup_fields_other_parser_AST_identical', 'baseline_commit':BASELINE}
+        'scope':'institutional_and_lockup_fields_other_parser_AST_identical', 'baseline_commit':BASELINE,
+        'institutional_reuse':{'reused':reuse_institutional, 'parent_parser_sha256':previous_contract['parser'],
+            'current_parser_sha256':code['parser'], 'non_lockup_parser_AST_identical':reuse_institutional}}
     version = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:20]
     destination = processed/'historical_reconciliations'/version
     if not destination.exists():
@@ -271,7 +297,9 @@ def run(raw_dir, processed_dir, dart=None):
             'source_archive_policy':'parent_manifest_archive_plus_amendment_originals',
             'replay_contract':connection_contract(), 'lockup_field_reprocessing':{
                 'code':code, 'processed':len(audit), 'dispositions':pd.DataFrame(audit).disposition.value_counts().to_dict(),
-                'reprocessed_fields':['institutional_demand_ratio','lockup_commitment_ratio'],
+                'reprocessed_fields':(['lockup_commitment_ratio'] if reuse_institutional else
+                                      ['institutional_demand_ratio','lockup_commitment_ratio']),
+                'institutional_extractions_reused':len(audit) if reuse_institutional else 0,
                 'unrelated_fields_unchanged':True, 'checkpoint_batch':batch,
                 'unchanged_extractions_reused':sum(a['extraction_reused'] for a in audit),
                 'started_at':started, 'finished_at':pd.Timestamp.now(tz='Asia/Seoul').isoformat()},

@@ -18,11 +18,14 @@ def missing_category(status, details):
         return 'not_missing'
     if 'access_failed' in status or 'not_cached' in status:
         return 'source_access_failed'
-    if details.get('selected_document_explicit_summary_absence'):
-        return 'summary_explicitly_absent_detailed_statements_not_supported'
     if 'format_unhandled' in status:
         rejected=details.get('rejected_table_or_column_counts',{})
-        return 'accounting_basis_unverified' if rejected.get('accounting_basis_unverified') else 'format_unsupported'
+        detailed=details.get('detailed_statement_rejection_counts',{})
+        if rejected.get('accounting_basis_unverified') or detailed.get('accounting_basis_unverified'):
+            return 'accounting_basis_unverified'
+        if details.get('selected_document_explicit_summary_absence'):
+            return 'summary_absent_detailed_schema_unhandled'
+        return 'format_unsupported'
     return 'annual_basis_identity_or_integrity_unverified'
 
 

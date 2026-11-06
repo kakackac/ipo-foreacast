@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 17
+DEMAND_PARSER_VERSION = 19
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -1255,6 +1255,58 @@ class DARTCollector:
                 rejection_reason='lockup_conflicting_independent_application_quantities',
                 structured_evidence=json.dumps({'independent_application_quantities':sorted(application_totals)}))
             return result
+        def disclosed_percentage_check(table, column, printed):
+            check = {'printed_percentage': printed, 'status': 'independent_quantity_unavailable'}
+            if application_total is None or application_total <= 0:
+                return check
+            check['independent_application_quantity'] = application_total
+            rows = [(re.sub(r"\s+", "", row[0]), row[column].strip())
+                    for row in table if len(row)>column]
+            def quantity(labels):
+                values = [value for label,value in rows if label in labels]
+                if len(values)==1 and re.fullmatch(r"[0-9][0-9,]*", values[0]):
+                    return int(values[0].replace(',', ''))
+                return None
+            none = quantity({'미확약', '확약없음'})
+            declared = quantity({'합계', '총합계', '총계', '확약합계'})
+            if any(label in {'미확약','확약없음'} for label,_ in rows):
+                all_total = quantity({'합계', '총합계', '총계'})
+                if all_total is not None and all_total != application_total:
+                    return {**check, 'status':'conflict', 'declared_table_total':all_total}
+                if none is None or all_total is None:
+                    return check
+                committed = application_total-none
+                subtotal = quantity({'확약합계'})
+                if subtotal is not None and subtotal != committed:
+                    return {**check, 'status':'conflict', 'declared_committed_quantity':subtotal,
+                            'noncommitted_quantity':none}
+                check['noncommitted_quantity'] = none
+            else:
+                if declared is None:
+                    return check
+                committed = declared
+            check['declared_committed_quantity'] = committed
+            if not 0 <= committed <= application_total:
+                return {**check, 'status':'conflict'}
+            periods = [value for label,value in rows
+                       if re.fullmatch(r"\d+(?:개월|일|주일|주)(?:확약)?",label)]
+            if periods and all(re.fullmatch(r"[0-9][0-9,]*|-",value) for value in periods):
+                period_sum = sum(int(value.replace(',','')) for value in periods if value!='-')
+                check['period_quantity_sum'] = period_sum
+                if period_sum != committed:
+                    check['warnings'] = ['period_breakdown_differs_from_explicit_aggregate']
+            # A printed aggregate is authoritative; incomplete duration detail is
+            # audit evidence, not a prerequisite. Check its independent basis.
+            computed = committed/application_total
+            decimals = len(printed.split('.')[1]) if '.' in printed else 0
+            quantum = 10**(-decimals)/100
+            value = float(printed)/100
+            nearest = value-quantum/2-1e-12 <= computed <= value+quantum/2+1e-12
+            truncated = value-1e-12 <= computed < value+quantum-1e-12
+            return {**check, 'status':'compatible' if nearest or truncated else 'conflict',
+                    'computed_fraction':computed, 'display_quantum_fraction':quantum,
+                    'compatible_display_modes':(['nearest'] if nearest else [])+
+                                               (['positive_truncation'] if truncated else [])}
         outcome_candidates = []
         for table, context in zip(table_parser.tables, table_parser.table_contexts):
             table_text = " ".join(" ".join(row) for row in table)
@@ -1278,6 +1330,12 @@ class DARTCollector:
                     row = totals[0]
                     match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*", row[column]) if column < len(row) else None
                     if match and 0 <= float(match[1]) <= 100:
+                        check=disclosed_percentage_check(table,column,match[1])
+                        if check['status']=='conflict':
+                            result.update(parser_validation_status='candidate_rejected',
+                                rejection_reason='lockup_disclosed_percent_quantity_conflict',
+                                structured_evidence=cls._table_evidence(table,heading=context,aggregate_quantity_check=check))
+                            return result
                         result.update({
                             "lockup_commitment_ratio": float(match[1]) / 100,
                             "parse_method": "lockup_explicit_quantity_percentage",
@@ -1287,6 +1345,7 @@ class DARTCollector:
                             "structured_evidence": cls._table_evidence(
                                 table, heading=context, selected_column=column,
                                 scope="institutional_application_quantity",
+                                aggregate_quantity_check=check,
                             ),
                         })
                         return result
@@ -1294,6 +1353,17 @@ class DARTCollector:
                 continue
             direct_aggregate = cls._extract_disclosed_aggregate_lockup_ratio(table)
             if direct_aggregate is not None:
+                selection=json.loads(direct_aggregate['structured_evidence'])
+                column=selection['selected_column'];row=selection['selected_row']
+                printed=re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)%",table[row][column].replace(' ',''))[1]
+                check=disclosed_percentage_check(table,column,printed)
+                if check['status']=='conflict':
+                    result.update(parser_validation_status='candidate_rejected',
+                        rejection_reason='lockup_disclosed_percent_quantity_conflict',
+                        structured_evidence=cls._table_evidence(table,heading=context,aggregate_quantity_check=check))
+                    return result
+                selection['aggregate_quantity_check']=check
+                direct_aggregate['structured_evidence']=json.dumps(selection,ensure_ascii=False)
                 result.update(direct_aggregate)
                 return result
             diagnostics={}
@@ -1424,8 +1494,6 @@ class DARTCollector:
     @classmethod
     def _extract_disclosed_aggregate_lockup_ratio(cls, table: list[list[str]]) -> Optional[dict]:
         """Read an explicit all-institution application-quantity percentage, not counts."""
-        if not any(row and re.fullmatch(r"\d+\s*(?:개월|일)\s*(?:확약)?", row[0]) for row in table):
-            return None
         for index, row in enumerate(table):
             if not row or not re.fullmatch(
                 r"총참여건수및(?:신청)?수량대비비율(?:\(%\))?", re.sub(r"\s+", "", row[0])
@@ -1460,10 +1528,10 @@ class DARTCollector:
         text = " ".join(" ".join(row) for row in table)
         if re.search(r"최대\s*주주|기존\s*주주|보유\s*주식|매각제한", text):
             return None
-        if not any(row and re.fullmatch(r"\d+(?:개월|일)(?:확약)?", re.sub(r"\s+", "", row[0])) for row in table):
+        if not any(row and re.fullmatch(r"\d+(?:개월|일|주일|주)(?:확약)?", re.sub(r"\s+", "", row[0])) for row in table):
             return None
         start = next((i for i, row in enumerate(table) if row and re.fullmatch(
-            r"\d+(?:개월|일)(?:확약)?|미확약|확약없음", re.sub(r"\s+", "", row[0]))), None)
+            r"\d+(?:개월|일|주일|주)(?:확약)?|미확약|확약없음", re.sub(r"\s+", "", row[0]))), None)
         if start is None:
             return None
         headers = table[:start]
@@ -1515,7 +1583,7 @@ class DARTCollector:
                     return None
                 label = '합계'
                 total_label_alias = True
-            if not re.fullmatch(r"\d+(?:개월|일)(?:확약)?|미확약|확약없음|합계", label):
+            if not re.fullmatch(r"\d+(?:개월|일|주일|주)(?:확약)?|미확약|확약없음|합계", label):
                 return None
             quantity = row[column].strip()
             if label in quantities:

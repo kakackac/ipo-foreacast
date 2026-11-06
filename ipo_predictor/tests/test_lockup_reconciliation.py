@@ -7,11 +7,72 @@ from pathlib import Path
 import pandas as pd
 
 from data.collectors.dart_collector import DARTCollector
-from data.pipelines.lockup_reconciliation import unchanged_other_parser_logic, reprocess_record, reprocess_institutional_record, run, documents
+from data.pipelines.lockup_reconciliation import unchanged_other_parser_logic, reprocess_record, reprocess_institutional_record, run, documents, parser_snapshot, METHODS
 from data.pipelines.data_delivery import digest
 
 
 class LockupRepairTests(unittest.TestCase):
+    def aggregate_html(self, quantity, committed, printed, periods=''):
+        return ('<p>수요예측 결과 기관투자자 수요예측 참여내역</p><table>'
+                '<tr><td>참여건수(건)</td><td>신청수량(주)</td><td>단순경쟁률</td></tr>'
+                f'<tr><td>100</td><td>{quantity}</td><td>10:1</td></tr></table>'
+                '<p>(다) 의무보유 확약 신청내역</p><table><tr><td>구분</td><td>신청수량(주)</td></tr>'
+                f'{periods}<tr><td>총합계</td><td>{committed}</td></tr>'
+                f'<tr><td>총 신청수량 대비 비율(%)</td><td>{printed}%</td></tr></table>')
+
+    def test_direct_total_does_not_require_duration_components(self):
+        for periods in ['', '<tr><td>1개월</td><td>50</td></tr>']:
+            result=DARTCollector._extract_lockup_ratios_from_tables(self.aggregate_html(1000,100,'10',periods))
+            self.assertEqual(result['lockup_commitment_ratio'],.1)
+            check=json.loads(result['structured_evidence'])['aggregate_quantity_check']
+            self.assertEqual(check['status'],'compatible')
+            if periods:
+                self.assertEqual(check['warnings'],['period_breakdown_differs_from_explicit_aggregate'])
+
+    def test_reported_percentage_can_be_truncated_not_only_rounded(self):
+        result=DARTCollector._extract_lockup_ratios_from_tables(self.aggregate_html(100000000,10458930,'10.45'))
+        self.assertEqual(result['lockup_commitment_ratio'],.1045)
+        check=json.loads(result['structured_evidence'])['aggregate_quantity_check']
+        self.assertEqual(check['compatible_display_modes'],['positive_truncation'])
+        self.assertAlmostEqual(check['computed_fraction'],.1045893)
+        conflict=DARTCollector._extract_lockup_ratios_from_tables(self.aggregate_html(100000000,10460000,'10.45'))
+        self.assertIsNone(conflict['lockup_commitment_ratio'])
+        self.assertEqual(conflict['rejection_reason'],'lockup_disclosed_percent_quantity_conflict')
+
+    def test_week_duration_and_noncommitted_totals_are_audit_not_required_components(self):
+        html=self.aggregate_html(1000,100,'10','<tr><td>1주일</td><td>100</td></tr>')
+        result=DARTCollector._extract_lockup_ratios_from_tables(html)
+        self.assertNotIn('warnings',json.loads(result['structured_evidence'])['aggregate_quantity_check'])
+        html=html.replace('<td>총합계</td><td>100</td>',
+                          '<td>미확약</td><td>900</td></tr><tr><td>총합계</td><td>1000</td>')
+        result=DARTCollector._extract_lockup_ratios_from_tables(html)
+        self.assertEqual(result['lockup_commitment_ratio'],.1)
+
+    def test_field_scoped_parser_reuse_requires_archived_hash_and_unchanged_other_methods(self):
+        before='DEMAND_PARSER_VERSION=18\nclass DARTCollector:\n def _extract_lockup_ratios_from_tables(self):return 1\n def _extract_aggregate_demand_ratio(self):return 10\n'
+        after=before.replace('=18','=19').replace('return 1\n','return 2\n')
+        methods=METHODS-{'_extract_aggregate_demand_ratio'}
+        self.assertTrue(unchanged_other_parser_logic(before,after,methods))
+        self.assertFalse(unchanged_other_parser_logic(before,after.replace('return 10','return 20'),methods))
+        with tempfile.TemporaryDirectory() as root:
+            raw=Path(root);sha=hashlib.sha256(before.encode()).hexdigest()
+            self.assertIsNone(parser_snapshot(raw,sha))
+            parser_snapshot(raw,sha,before)
+            self.assertEqual(parser_snapshot(raw,sha),before)
+            path=raw/'parser_source_snapshots'/(sha+'.json')
+            path.write_text(json.dumps({'source_sha256':sha,'source':after}))
+            with self.assertRaisesRegex(RuntimeError,'snapshot_integrity_failed'):
+                parser_snapshot(raw,sha)
+
+    def test_explicit_lockup_percentage_must_not_conflict_with_its_quantities(self):
+        body='<p>(12) 수요예측 결과 통보 ① 기관투자자 수요예측 참여내역</p><table><tr><td>참여건수(건)</td><td>신청수량(주)</td><td>단순경쟁률</td></tr><tr><td>1507</td><td>1,838,477,000</td><td>1,431:1</td></tr></table>'
+        body+='<p>(다) 의무보유 확약 신청내역</p><table><tr><td>구분</td><td>신청수량(주)</td></tr><tr><td>15일</td><td>120,656,000</td></tr><tr><td>1개월</td><td>131,210,000</td></tr><tr><td>3개월</td><td>75,965,000</td></tr><tr><td>총합계</td><td>327,831,000</td></tr><tr><td>총 신청수량 대비 비율(%)</td><td>17.88%</td></tr></table>'
+        result=DARTCollector._extract_lockup_ratios_from_tables(body)
+        self.assertIsNone(result['lockup_commitment_ratio'])
+        self.assertEqual(result['rejection_reason'],'lockup_disclosed_percent_quantity_conflict')
+        rounded=DARTCollector._extract_lockup_ratios_from_tables(body.replace('17.88%','17.83%'))
+        self.assertEqual(rounded['lockup_commitment_ratio'],.1783)
+
     def test_institutional_field_repair_keeps_price_and_lockup_provenance(self):
         record={'corp_code':'00000001','listing_date':'2024-03-01','offering_price':10000,
                 'institutional_demand_ratio':None,'lockup_commitment_ratio':.2,'institutional_data_contract_version':2}

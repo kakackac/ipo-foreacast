@@ -2,6 +2,51 @@
   "description": "Official DART original-table references reviewed 2026-09-09 and 2026-11-06. New aggregate quantity references: Melcon 748389000/2074742000; EST 2489000/1039659000; SK14 14625000/5988330000. Numerator plus noncommitment quantity reconciles to the independently disclosed demand quantity. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
   "samples": [
     {
+      "sample": "vc_annual_financial_2022",
+      "receipt": "20220214000382",
+      "section_title": "III. 재무에 관한 사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20220214000382&dcmNo=8384323&eleId=36&offset=1459309&length=963182&dtd=dart3.xsd",
+      "sha256": "4e02b9437efcada322cbc6d4e89c1dbd65891c6a77109e5767772c2ab9e882ad",
+      "financial_context": {"corp_code": "01354740", "published_at": "2022-02-14", "cutoff": "2022-02-20", "expected_fs_div": "CFS"},
+      "expected": {"financial_as_of_year": 2020, "revenue": 40748436038, "operating_income": 6480024710, "total_assets": 35481901905, "total_liabilities": 17797017429, "equity": 17684884476}
+    },
+    {
+      "sample": "hansolcnp_float_2016",
+      "receipt": "20160118000101",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160118000101&dcmNo=4919044&eleId=16&offset=286005&length=198106&dtd=dart3.xsd",
+      "sha256": "d4f3750863492c455305d7d50308ec340d6ffb094c1620a356f3171b0e5b534e",
+      "expected": {"public_float_shares": 1377340, "total_post_listing_shares": 3460340, "public_float_ratio_disclosed": 0.398}
+    },
+    {
+      "sample": "sunbeauty_lockup_conflict_2021",
+      "receipt": "20210114000349",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210114000349&dcmNo=7761872&eleId=7&offset=317533&length=184475&dtd=dart3.xsd",
+      "sha256": "bdfb855bb4973bca76a06370be7c3c7014a7cb1bef71ce0a22de57f9743545aa",
+      "expected": {"institutional_demand_ratio": 1431, "lockup_commitment_ratio": null},
+      "expected_evidence": {"lockup_structured_evidence": {"aggregate_quantity_check": {"status": "conflict", "printed_percentage": "17.88", "independent_application_quantity": 1838477000}}},
+      "review_note": "The printed 17.88% is retained as evidence, but 327831000 committed / 1838477000 demand quantity does not round to it. The model value is held, not replaced by a calculated number or the earlier notice's 17.83%."
+    },
+    {
+      "sample": "atgen_annual_financial_2015",
+      "receipt": "20151013000033",
+      "section_title": "Ⅲ. 재무에 관한 사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20151013000033&dcmNo=4822902&eleId=29&offset=1110523&length=492570&dtd=dart3.xsd",
+      "sha256": "2833dbf0a24f2cda8c9d1b5f1b6b653cdaf59d89adf6d68b04836b2a3fb21c62",
+      "financial_context": {"corp_code": "00977650", "published_at": "2015-10-13", "cutoff": "2015-10-20", "expected_fs_div": "CFS"},
+      "expected": {"financial_as_of_year": 2014, "revenue": 1678157861, "operating_income": -5066415513, "net_income": -5840187194, "total_assets": 7650598889, "total_liabilities": 10046242183, "equity": -2395643294}
+    },
+    {
+      "sample": "ajnet_annual_financial_2015",
+      "receipt": "20150807000011",
+      "section_title": "Ⅲ. 재무에 관한 사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20150807000011&dcmNo=4757143&eleId=29&offset=1265211&length=577909&dtd=dart3.xsd",
+      "sha256": "74403a517a9d1059ff282239e93b8683d39dea0b9f4d51ea0a8522348ec0f2b8",
+      "financial_context": {"corp_code": "00365387", "published_at": "2015-08-07", "cutoff": "2015-08-20", "expected_fs_div": "OFS"},
+      "expected": {"financial_as_of_year": 2014, "revenue": 194184554953, "operating_income": 26285715749, "net_income": 18461483934, "total_assets": 484674125513, "total_liabilities": 323883474196, "equity": 160790651317}
+    },
+    {
       "sample": "yas_correction_2017",
       "receipt": "20170926000244",
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170926000244&dcmNo=5797330&eleId=1&offset=738&length=171428&dtd=dart3.xsd",
@@ -96,13 +141,15 @@
       "sha256": "9f5947157eafc097c00c7d0da74e333779eba5218f80f625d753539d3003c28a",
       "expected": {
         "institutional_demand_ratio": 1105.93,
-        "lockup_commitment_ratio": 0.0695,
+        "lockup_commitment_ratio": null,
         "price_band_low": 10000,
         "price_band_high": 11200,
         "public_float_ratio_disclosed": 0.5827,
         "new_shares": 850000,
         "secondary_shares": 0
-      }
+      },
+      "expected_evidence": {"lockup_structured_evidence": {"aggregate_quantity_check": {"status": "conflict", "printed_percentage": "6.95", "independent_application_quantity": 752035199}}},
+      "review_note": "The original still prints 6.95%; preserve that reported value. Its 52174000 committed shares and the demand summary's 752035199 shares yield about 6.9377%, so the common denominator basis is unresolved. Do not force the historical expected percentage into model approval."
     },
     {
       "sample": "rznomics_2025",
@@ -261,7 +308,9 @@
       "receipt": "20230731000302",
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230731000302&dcmNo=9368109&eleId=1&offset=646&length=258669&dtd=dart3.xsd",
       "sha256": "b0b317306ccf99783a21aee804283fd59a8540a3b125a69d4f2bf85a7026d80a",
-      "expected": {"lockup_commitment_ratio": 0.0263}
+      "expected": {"lockup_commitment_ratio": null},
+      "expected_evidence": {"lockup_structured_evidence": {"aggregate_quantity_check": {"status": "conflict", "printed_percentage": "2.63", "independent_application_quantity": 201189000, "declared_committed_quantity": 3150000, "noncommitted_quantity": 195896000}}},
+      "review_note": "Rechecked original TD cells, including rowspan/colspan. The printed total 2.63% agrees with (201189000-195896000)/201189000, but the explicit commitment subtotal is 3150000, not 5293000. This selected original contradicts itself; preserve the percentage and all quantities as evidence, do not silently choose or repair one. Check a verified later correction for recovery."
     },
     {
       "sample": "nrb_lockup_2025",

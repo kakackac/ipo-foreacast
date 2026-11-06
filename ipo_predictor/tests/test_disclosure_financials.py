@@ -42,6 +42,62 @@ def financial_index(receipt='20230315000001',date='2023.03.15',corp='12345678',n
 
 
 class DisclosureFinancialTests(unittest.TestCase):
+    def test_explicit_annual_consolidated_reference_approves_only_its_year_and_basis(self):
+        body='1. 요약연결재무정보 (단위: 원)'+table(summary(standard=False))
+        note='이 중간연결재무제표는 2023년 9월 30일 현재의 자료입니다. 동 연결재무제표에 대한 이해를 위해서는 한국채택국제회계기준에 따라 작성된 2022년 12월 31일자로 종료하는 회계연도에 대한 연차연결재무제표를 함께 이용해야 합니다.'
+        self.assertEqual(len(parse(body+note)),6)
+        self.assertTrue(parse(body.replace('요약연결재무정보','요약별도재무정보')+note).empty)
+        self.assertTrue(parse(body+note.replace('2022년 12월 31일자로','2021년 12월 31일자로')).empty)
+
+    def test_spaced_consolidated_preparation_cannot_approve_separate_values(self):
+        note='연결 재무제표는 한국채택국제회계기준에 따라 작성되었습니다.'
+        ofs='1. 요약별도재무정보 (단위: 원)'+table(summary(standard=False))
+        self.assertTrue(parse(ofs+note).empty)
+        cfs='1. 요약연결재무정보 (단위: 원)'+table(summary(standard=False))
+        self.assertEqual(set(parse(cfs+note).fs_div),{'CFS'})
+        for wording in ['분기 연결 재무제표는','반기 재무제표는','중간 재무제표 는']:
+            self.assertTrue(parse(ofs+wording+' 한국채택국제회계기준에 따라 작성되었습니다.').empty)
+
+    def test_interim_footnote_and_non_year_end_preparation_do_not_approve_annual_columns(self):
+        body='1. 요약별도재무정보 (단위: 원)'+table(summary(standard=False))
+        for note in ['주1) 제9기 반기 재무제표는 한국채택국제회계기준에 따라 작성되었습니다.',
+                     '주1) 재무제표는 2022년 9월 30일 현재 유효한 한국채택국제회계기준에 따라 작성되었습니다.']:
+            self.assertTrue(parse(body+table([[note]])).empty)
+
+    def test_year_restricted_preparation_does_not_leak_to_another_year(self):
+        body='1. 요약별도재무정보 (단위: 원)'+table(summary(standard=False))
+        note='재무제표는 2021년 12월 31일 현재 한국채택국제회계기준에 따라 작성되었습니다.'
+        self.assertTrue(parse(body+note).empty)
+
+    def test_detailed_annual_statements_need_scope_period_and_year_bound_basis(self):
+        balance=table([['연 결 재 무 상 태 표'],['제13기 2022년 12월 31일 현재'],['회사 (단위: 원)']])
+        balance+=table([['과목','제13기말'],['자산총계','300'],['부채총계','100'],['자본총계','200']])
+        income=table([['연 결 포 괄 손 익 계 산 서'],['제14기 반기 2023년 01월 01일부터 2023년 06월 30일까지'],
+                      ['제13기 2022년 01월 01일부터 2022년 12월 31일까지'],['회사 (단위: 원)']])
+        income+=table([['과목','제14기 반기','제13기'],['매출액','400','1000'],['영업손실','10','50'],['당기순손실','12','60']])
+        notes='<p>3. 연결재무제표 주석</p><p>동 중간재무제표를 이해하려면 한국채택국제회계기준에 따라 작성된 2022년 12월 31일자로 종료하는 회계연도에 대한 연차재무제표를 함께 이용하여야 합니다.</p>'
+        html='<p>1. 요약재무정보 해당사항 없습니다.</p><p>2. 연결재무제표</p>'+balance+income+notes
+        frame=parse(html);result=summarize_asof(frame,'12345678','2023-04-01')
+        self.assertEqual(result['revenue'],1000);self.assertEqual(result['operating_income'],-50)
+        self.assertEqual(result['net_income'],-60);self.assertEqual(result['total_assets'],300)
+        self.assertEqual(set(frame.year),{2022});self.assertEqual(set(frame.fs_div),{'CFS'})
+        self.assertTrue(frame.extraction_rule_id.eq('detailed_annual_period_and_basis_v1').all())
+        self.assertTrue(parse(html.replace('2022년 12월 31일자로 종료하는 회계연도','2021년 12월 31일자로 종료하는 회계연도')).empty)
+        self.assertTrue(parse(html.replace('(단위: 원)','(단위: USD)')).empty)
+        self.assertTrue(parse(html.replace(notes,'<p>3. 연결재무제표 주석</p>분기재무제표는 한국채택국제회계기준에 따라 작성되었습니다.')).empty)
+
+    def test_detailed_ifrs_scope_cannot_leak_into_separate_statement(self):
+        body='<p>4. 재무제표</p>'+table([['재무상태표'],['제13기 2022년 12월 31일 현재'],['회사 (단위: 원)']])
+        body+=table([['과목','제13기말'],['자산총계','300'],['부채총계','100'],['자본총계','200']])
+        html='<p>2. 연결재무제표</p><p>3. 연결재무제표 주석</p><p>연결재무제표는 한국채택국제회계기준에 따라 작성되었습니다.</p>'+body
+        self.assertTrue(parse(html).empty)
+
+    def test_adjacent_explicit_ifrs_preparation_basis_variant(self):
+        html='1. 요약연결재무정보 (단위: 원)'+table(summary(standard=False))
+        html+=table([['주1) 한국채택국제회계기준 작성기준에 따라 작성되었습니다.'],
+                     ['주2) 전기 재무제표는 감사를 받았습니다.'],['주3) 비교표시는 감사를 받지 않았습니다.']])
+        self.assertEqual(len(parse(html)),6)
+
     def test_korean_unit_spacing_does_not_change_currency_or_scale(self):
         for unit in ['백만원','백 만원','백 만 원']:
             result=summarize_asof(parse('1. 요약재무정보 (단위: '+unit+')'+table(summary())), '12345678','2023-04-01')

@@ -6,9 +6,11 @@ import math
 import re
 import tempfile
 import unicodedata
+from copy import deepcopy
+from decimal import Decimal, ROUND_HALF_UP
 from html import escape
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, parse_qs
 
 import pandas as pd
 import requests
@@ -109,6 +111,8 @@ def read_document(dart, raw, metadata, corp, cached_only):
             if str(exc)=='official_source_not_cached':raise StageSourceMissing(source) from exc
             raise
     index, index_hash = obtain(url,lambda text:viewer_identity(text, receipt, corp, metadata['rcept_dt']))
+    related={parse_qs(option.get('value','')).get('rcpNo',[''])[0]
+             for option in BeautifulSoup(index,'html.parser').select('select#ref option')}
     nodes = []
     for block in re.split(r'var\s+node\d+\s*=\s*\{\s*\}\s*;', index)[1:]:
         node = dict(re.findall(r'node\d+\[\'(text|rcpNo|dcmNo|eleId|offset|length|dtd)\'\]\s*=\s*"([^\"]*)"', block))
@@ -132,12 +136,14 @@ def read_document(dart, raw, metadata, corp, cached_only):
         pieces.append(body); sections.append({'url':source, 'sha256':sha,'collected_at':stored.get('collected_at')})
     return '\n'.join(pieces), {'receipt':receipt, 'published_at':metadata['rcept_dt'],
         'available_at':available(metadata).isoformat(), 'source_url':url, 'index_sha256':index_hash,
-        'sections':sections, 'corp_code':corp,'content_scope':'full' if full_scope else 'partial_terms_notice'}
+        'sections':sections, 'corp_code':corp,'content_scope':'full' if full_scope else 'partial_terms_notice',
+        'related_receipts':sorted(number for number in related if re.fullmatch(r'\d{14}',number))}
 
 
 def document_analysis(dart,body,receipt,corp,raw=None):
     identity={'schema':1,'receipt':receipt,'corp_code':corp,'body_sha256':hashlib.sha256(body.encode()).hexdigest(),
         'parser':digest(Path(__file__).parents[1]/'collectors/dart_collector.py'),
+        'float_parser':digest(Path(__file__).parents[1]/'collectors/float_tables.py'),
         'underwriters':digest(Path(__file__).with_name('underwriter_source.py')),
         'tier_mapping':digest(Path(__file__).parents[1]/'processors/feature_engineer.py')}
     path=None if raw is None else Path(raw)/'stage_document_analyses'/(hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()+'.json')
@@ -161,22 +167,34 @@ def result_day_document(metadata, terms, load, analyse=None):
     chosen=max(complete,key=lambda item:item[0]['rcept_no'])
     dart=DARTCollector(api_key='unused')
     analyse=analyse or (lambda m,b,c:document_analysis(dart,b,m['rcept_no'],c))
-    full_analysis=analyse(chosen[0],chosen[1],chosen[2]['corp_code'])
+    full_analysis=deepcopy(analyse(chosen[0],chosen[1],chosen[2]['corp_code']))
     full_price=full_analysis['offering'];full_demand=full_analysis['demand']
-    notices=[]
+    notices=[];field_sources={};held_fields={}
     for m,body,proof in day:
         if proof.get('content_scope','full')=='full':continue
+        linked=(m['rcept_no'] in chosen[2].get('related_receipts',[])
+                and chosen[0]['rcept_no'] in proof.get('related_receipts',[])
+                and chosen[2]['corp_code']==proof['corp_code']
+                and '투자설명서' in chosen[0].get('report_nm',''))
         if re.search(r'정정\s*전',body) and re.search(r'정정\s*후',body):
             try:body,view=amendment_view(body)
             except ValueError as exc:
-                if str(exc)!='explicit_correction_pairs_missing' or chosen[0]['rcept_no']<=m['rcept_no']:raise
+                # A later, bidirectionally linked full prospectus is the source,
+                # not a guessed composition of an incomplete correction notice.
+                if (not linked or chosen[0]['rcept_no']<=m['rcept_no']
+                        or full_price.get('offering_price_finality')!='confirmed_price_language'
+                        or full_price.get('offering_price_review_status')!='verified_currency_unit'):
+                    raise
                 body,view=horizontal_after_cells(body)
+                view.update(strict_section_rejection=str(exc),
+                    replacement_rule='later_bidirectionally_linked_complete_prospectus_v1',
+                    replacement_receipt=chosen[0]['rcept_no'])
         else:view=None
         partial_analysis=analyse(m,body,proof['corp_code'])
         price=partial_analysis['offering'];demand=partial_analysis['demand']
         if view and view.get('rule')=='horizontal_after_cells_consistency_only_v1':
             explicit_prices={int(x.replace(',','')) for x in re.findall(
-                r'모집\s*\(\s*매출\s*\)\s*(?:확정)?가액\s*[:：]\s*([0-9][0-9,]*)\s*원',
+                r'모집\s*\(\s*매출\s*\)\s*(?:확정)?가액\s*(?:\(\s*예정\s*\))?\s*[:：]\s*([0-9][0-9,]*)\s*원(?!\s*[~～])',
                 DARTCollector._normalize_text(body))}
             if not explicit_prices or explicit_prices!={full_price.get('offering_price')}:
                 raise ValueError('stage_horizontal_amendment_price_not_reconciled')
@@ -184,12 +202,50 @@ def result_day_document(metadata, terms, load, analyse=None):
                 and price.get('offering_price_review_status')=='verified_currency_unit'
                 and price.get('offering_price')!=full_price.get('offering_price')):
             raise ValueError('stage_same_day_amendment_price_conflict')
+        checks={}
         for field,prefix in [('institutional_demand_ratio','institutional_demand'),('lockup_commitment_ratio','lockup')]:
-            if (demand.get(prefix+'_parser_validation_status')=='structurally_verified'
-                    and demand.get(field)!=full_demand.get(field)):
-                raise ValueError('stage_same_day_amendment_result_conflict')
-        notices.append({'origin':proof,'after_correction_view':view})
-    return chosen[0],chosen[1],{**chosen[2],'same_day_terms_checks':notices},full_analysis
+            if demand.get(prefix+'_parser_validation_status')!='structurally_verified':continue
+            if demand.get(field)==full_demand.get(field):continue
+            if (linked and full_demand.get(prefix+'_parser_validation_status')=='value_not_found'
+                    and price.get('offering_price_finality')=='confirmed_price_language'
+                    and price.get('offering_price_review_status')=='verified_currency_unit'
+                    and price.get('offering_price')==full_price.get('offering_price')):
+                for key,value in demand.items():
+                    if key.startswith(prefix+'_') or key==field:full_demand[key]=value
+                field_sources[field]={**proof,'source_selection_rule':'same_day_linked_confirmed_terms_field_v1'}
+                checks[field]='verified_terms_value_full_document_unpopulated'
+                continue
+            if field=='institutional_demand_ratio' and same_demand_printed_rounding(demand,full_demand):
+                checks[field]='same_application_quantity_and_count_printed_rounding';continue
+            if field=='lockup_commitment_ratio':
+                held_fields[field]={'partial_receipt':m['rcept_no'],'partial_value':demand.get(field),
+                    'complete_receipt':chosen[0]['rcept_no'],'complete_value':full_demand.get(field),
+                    'complete_parser_rejection':full_demand.get(prefix+'_rejection_reason')}
+                full_demand[field]=None;full_demand[prefix+'_parser_validation_status']='candidate_rejected'
+                full_demand[prefix+'_rejection_reason']='same_day_official_lockup_conflict'
+                field_sources.pop(field,None);checks[field]='held_optional_field_not_entire_stage'
+                continue
+            raise ValueError('stage_same_day_amendment_result_conflict')
+        notices.append({'origin':proof,'after_correction_view':view,'field_checks':checks})
+    return chosen[0],chosen[1],{**chosen[2],'same_day_terms_checks':notices,
+        'result_field_sources':field_sources,'held_result_fields':held_fields},full_analysis
+
+
+def same_demand_printed_rounding(left,right):
+    """A formatting difference requires the same independently printed raw demand."""
+    def facts(result):
+        evidence=result.get('institutional_demand_structured_evidence')
+        evidence=json.loads(evidence) if isinstance(evidence,str) else evidence
+        if not evidence or evidence.get('application_quantity') is None or evidence.get('application_count') is None:return None
+        cell=evidence['table'][evidence['selected_row']][evidence['selected_column']]
+        match=re.fullmatch(r'\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?::\s*1)?\s*',cell)
+        if not match:return None
+        number=Decimal(match[1].replace(',',''))
+        return evidence['application_quantity'],evidence['application_count'],number
+    a,b=facts(left),facts(right)
+    if a is None or b is None or a[:2]!=b[:2]:return False
+    quantum=Decimal(1).scaleb(max(a[2].as_tuple().exponent,b[2].as_tuple().exponent))
+    return a[2].quantize(quantum,rounding=ROUND_HALF_UP)==b[2].quantize(quantum,rounding=ROUND_HALF_UP)
 
 
 def horizontal_after_cells(html):
@@ -210,6 +266,24 @@ def amendment_view(html):
     """Normalize explicit text delimiters, never a bare before/after table header."""
     from data.pipelines.correction_views import after_correction_view
     soup=BeautifulSoup(html,'html.parser');normalized=False
+    # Inline styling may split a visible marker ("■" + "정정 후").
+    # Preserve explicit line breaks and leave all table cells untouched.
+    for paragraph in soup.find_all('p'):
+        if paragraph.find_parent('table') is not None or paragraph.find(['table','p']) is not None:continue
+        for br in paragraph.find_all('br'):br.replace_with('\n')
+        text=paragraph.get_text()
+        if re.search(r'정정\s*(?:전|후)',text):
+            paragraph.clear();paragraph.append(soup.new_string(text));normalized=True
+    for node in list(soup.find_all(string=True)):
+        if node.find_parent('table') is not None:continue
+        text=re.sub(r'(?m)^\s*(\(\s*주(?:석)?\s*\d+\s*\))\s*정정\s*(전|후)\s*$',
+                    lambda m:m[1]+'\n[정정 '+m[2]+']',str(node))
+        if text!=str(node):
+            for piece in re.split(r'(\[정정 (?:전|후)\])',text):
+                if re.fullmatch(r'\[정정 (?:전|후)\]',piece):
+                    marker=soup.new_tag('span');marker.string=piece;node.insert_before(marker)
+                else:node.insert_before(soup.new_string(piece))
+            node.extract();normalized=True
     pattern=r'(<\s*정정\s*(?:전|후)\s*>|■\s*정정\s*(?:전|후))'
     for node in list(soup.find_all(string=re.compile(pattern))):
         for piece in re.split(pattern,str(node)):
@@ -559,6 +633,10 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
                 except ValueError as exc:row['status']=str(exc);values={}
                 origins={f:{**origin,'extraction_evidence':selected.get('field_evidence',{}).get(f)}
                          for f in set(values)|set(reasons)}
+                for field,source in origin.get('result_field_sources',{}).items():
+                    if field in values:
+                        origins[field]={**source,'extraction_evidence':selected.get('field_evidence',{}).get(field),
+                            'linked_complete_receipt':origin['receipt']}
                 past=index[index.available_at<cutoff]
                 for window in [5,20]:
                     field=f'kospi_momentum_{window}d'

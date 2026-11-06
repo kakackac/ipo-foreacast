@@ -80,7 +80,7 @@ def pin_connections(processed):
     while 'amendment' in previous:
         amendment=previous['amendment'];parent=(processed/amendment['parent_manifest']).resolve()
         if (not parent.is_relative_to(processed/'historical_reconciliations') or parent in seen
-                or len(seen)>8 or digest(parent)!=amendment['parent_sha256']):
+                or digest(parent)!=amendment['parent_sha256']):
             raise RuntimeError('reconciled_connection_parent_invalid')
         seen.add(parent);previous=checked_artifact(parent.parent)
     return path.parent,report

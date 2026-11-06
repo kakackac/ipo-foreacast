@@ -59,10 +59,14 @@ class HistoricalReconciliationTests(unittest.TestCase):
     def test_missing_financial_summary_is_not_issuer_wide_nonpublication(self):
         self.assertEqual(missing_category('annual_financial_table_format_unhandled',
                          {'selected_document_explicit_summary_absence':True}),
-                         'summary_explicitly_absent_detailed_statements_not_supported')
+                         'summary_absent_detailed_schema_unhandled')
         self.assertEqual(missing_category('financial_public_source_access_failed',{}),'source_access_failed')
         self.assertEqual(missing_category('annual_financial_table_format_unhandled',
                          {'rejected_table_or_column_counts':{'accounting_basis_unverified':2}}),
+                         'accounting_basis_unverified')
+        self.assertEqual(missing_category('annual_financial_table_format_unhandled',
+                         {'selected_document_explicit_summary_absence':True,
+                          'detailed_statement_rejection_counts':{'accounting_basis_unverified':1}}),
                          'accounting_basis_unverified')
 
     def test_failed_full_batch_preserves_last_complete_pointer(self):

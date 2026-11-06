@@ -8,10 +8,25 @@ import pandas as pd
 
 from data.pipelines.data_delivery import digest
 from data.pipelines.financial_history import atomic_json
-from data.pipelines.reconciled_dataset import run,market_asof,normalise_observation_times,prior_targets_asof,validate_snapshot
+from data.pipelines.reconciled_dataset import run,market_asof,normalise_observation_times,prior_targets_asof,validate_snapshot,pin_connections
 
 
 class ReconciledDatasetTests(unittest.TestCase):
+    def test_valid_deep_source_history_is_not_rejected_after_regular_updates(self):
+        with tempfile.TemporaryDirectory() as root:
+            processed=Path(root).resolve();parent=None
+            for i in range(12):
+                path=processed/'historical_reconciliations'/str(i)/'manifest.json'
+                report={'version':str(i),'output_sha256':{}}
+                if parent is not None:report['amendment']={'parent_manifest':str(parent.relative_to(processed)),'parent_sha256':digest(parent)}
+                atomic_json(path,report);parent=path
+            atomic_json(processed/'current_historical_source_connections.json',{'manifest':str(parent.relative_to(processed)),'sha256':digest(parent)})
+            self.assertEqual(pin_connections(processed)[1]['version'],'11')
+            report['amendment']['parent_manifest']=str(parent.relative_to(processed))
+            atomic_json(parent,report)
+            atomic_json(processed/'current_historical_source_connections.json',{'manifest':str(parent.relative_to(processed)),'sha256':digest(parent)})
+            with self.assertRaisesRegex(RuntimeError,'parent_invalid'):pin_connections(processed)
+
     def test_recent_targets_are_selected_at_cutoff_not_computed_then_discarded(self):
         frame=pd.DataFrame({'event_id':['a','b','c'],'listing_date':pd.date_range('2024-01-01',periods=3),
             'event_class':['general_ipo']*3,'offering_price_review_status':['verified_currency_unit']*3,

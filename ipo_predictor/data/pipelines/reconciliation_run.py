@@ -31,6 +31,8 @@ def run(raw_dir, processed_dir, *, cached_only=False, dart=None):
             # A field-scoped migration may reuse the unchanged, verified IPO
             # identity and price graph instead of re-collecting every source.
             from data.pipelines.lockup_reconciliation import run as repair_lockup
+            from data.pipelines.float_source_resolver import refresh_cached_float
+            refresh_cached_float(raw, processed, dart=dart)
             repair_lockup(raw, processed, dart=dart)
             sources = collect_connections(raw, processed, dart=dart, cached_only=cached_only)
             if sources['status_counts'] != {'official_sources_connected':sources['population']}:

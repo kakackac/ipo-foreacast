@@ -38,6 +38,17 @@ class OfficialDocumentSampleTests(unittest.TestCase):
         html = f"<p>{context}</p><table><tr><td>확정 공모가액</td><td>9,000원</td></tr></table>"
         self.assertEqual(self.collector._parse_demand_forecast_html(html, "test")["demand_offering_price"], 9000)
 
+    def test_nested_evidence_checks_values_and_required_keys_not_dictionary_size(self):
+        reference={'receipt':'1','source_url':'official','sha256':'abc','expected':{},
+                   'expected_evidence':{'lockup_structured_evidence':{
+                       'aggregate_quantity_check':{'printed_percentage':'2.63','status':'conflict'}}}}
+        record={**reference,'demand':{'lockup_structured_evidence':{
+            'table':[], 'aggregate_quantity_check':{'printed_percentage':'2.63','status':'conflict',
+                                                  'independent_application_quantity':201189000}}}}
+        self.assertEqual(verify_record(record,reference),[])
+        del record['demand']['lockup_structured_evidence']['aggregate_quantity_check']['status']
+        self.assertIn('evidence_mismatch:lockup_structured_evidence',verify_record(record,reference))
+
     def test_daesung_explicit_total_quantity_percentage(self):
         html = """<table><tr><th>기관투자자</th><th colspan="2">합계</th></tr>
         <tr><th>구분</th><th>건수</th><th>수량</th></tr>

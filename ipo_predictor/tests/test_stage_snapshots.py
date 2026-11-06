@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 import pandas as pd
 
-from data.pipelines.stage_snapshots import demand_schedule, stage_documents, values_from_document, amendment_view, horizontal_after_cells, original_cache_hashes, reusable_checkpoint, document_analysis, section_text, StageResponseInvalid
+from data.pipelines.stage_snapshots import demand_schedule, stage_documents, values_from_document, amendment_view, horizontal_after_cells, original_cache_hashes, reusable_checkpoint, document_analysis, section_text, StageResponseInvalid, result_day_document, same_demand_printed_rounding
 from features.model_profiles import get_model_profile
 from features.prediction_time_contract import validate_prediction_times
 
@@ -16,6 +16,78 @@ def schedule(start='2024년 02월 08일',end='02월 09일'):
 
 
 class StageSnapshotTests(unittest.TestCase):
+    def test_offering_analysis_cache_tracks_the_float_parser_dependency(self):
+        from data.pipelines import stage_snapshots
+        original=stage_snapshots.digest;revision=['first']
+        def digest(path):return revision[0] if Path(path).name=='float_tables.py' else original(path)
+        class Parser:
+            calls=0
+            def _parse_offering_html(self,*args):self.calls+=1;return {}
+            def _parse_demand_forecast_html(self,*args):return {}
+        parser=Parser()
+        with tempfile.TemporaryDirectory() as root,patch.object(stage_snapshots,'digest',side_effect=digest):
+            document_analysis(parser,'<p>original</p>','20240101000001','00000001',root)
+            document_analysis(parser,'<p>original</p>','20240101000001','00000001',root)
+            self.assertEqual(parser.calls,1)
+            revision[0]='second'
+            document_analysis(parser,'<p>original</p>','20240101000001','00000001',root)
+            self.assertEqual(parser.calls,2)
+
+    def test_rounding_requires_matching_explicit_application_count_and_quantity(self):
+        def result(text,quantity=136695000):
+            return {'institutional_demand_structured_evidence':json.dumps({'table':[['count','quantity','ratio'],['239',str(quantity),text]],
+                'selected_row':1,'selected_column':2,'application_quantity':quantity,'application_count':239})}
+        self.assertTrue(same_demand_printed_rounding(result('187.7 : 1'),result('187.67 : 1')))
+        self.assertFalse(same_demand_printed_rounding(result('187.7 : 1'),result('187.64 : 1')))
+        self.assertFalse(same_demand_printed_rounding(result('187.7 : 1'),result('187.67 : 1',quantity=136695001)))
+        self.assertFalse(same_demand_printed_rounding({},result('187.7 : 1')))
+
+    def test_linked_terms_fill_only_a_truly_unpopulated_field_and_preserve_its_origin(self):
+        terms={'rcept_no':'20240101000001','rcept_dt':'2024-01-01','report_nm':'[발행조건확정]증권신고서(지분증권)'}
+        full={'rcept_no':'20240101000002','rcept_dt':'2024-01-01','report_nm':'투자설명서'}
+        price={'offering_price':4000,'offering_price_finality':'confirmed_price_language','offering_price_review_status':'verified_currency_unit'}
+        def load(m):return 'body',{'receipt':m['rcept_no'],'corp_code':'00000001','content_scope':'partial_terms_notice' if m==terms else 'full',
+                                  'related_receipts':[terms['rcept_no'],full['rcept_no']]}
+        def analyse(m,*args):
+            return {'offering':price,'demand':{'institutional_demand_ratio':100 if m==terms else None,
+                'institutional_demand_parser_validation_status':'structurally_verified' if m==terms else 'value_not_found',
+                'lockup_commitment_ratio':.1 if m==terms else .2,'lockup_parser_validation_status':'structurally_verified'}}
+        metadata,body,proof,analysis=result_day_document(terms,[terms,full],load,analyse)
+        self.assertEqual(analysis['demand']['institutional_demand_ratio'],100)
+        self.assertEqual(proof['result_field_sources']['institutional_demand_ratio']['receipt'],terms['rcept_no'])
+        self.assertIsNone(analysis['demand']['lockup_commitment_ratio'])
+        self.assertIn('lockup_commitment_ratio',proof['held_result_fields'])
+        self.assertEqual(metadata,full)
+        def rejected(m,*args):
+            value=analyse(m,*args)
+            if m==full:value['demand']['institutional_demand_parser_validation_status']='candidate_rejected'
+            return value
+        with self.assertRaisesRegex(ValueError,'result_conflict'):result_day_document(terms,[terms,full],load,rejected)
+
+    def test_inline_style_cannot_hide_a_correction_marker(self):
+        body='<p><span>■</span><span>정정 전<br/></span></p><table><tr><td>old</td></tr></table><p><b>■ </b><span>정정 후<br/></span></p><table><tr><td>new</td></tr></table>'
+        selected,proof=amendment_view(body)
+        self.assertIn('new',selected);self.assertNotIn('old',selected)
+        self.assertEqual(proof['pair_count'],1)
+        noted=body.replace('<span>■</span><span>정정 전<br/></span>','(주1) 정정 전').replace('<b>■ </b><span>정정 후<br/></span>','(주1) 정정 후')
+        self.assertIn('new',amendment_view(noted)[0])
+
+    def test_planned_label_in_notice_only_crosschecks_a_later_linked_final_source(self):
+        early={'rcept_no':'20240101000001','rcept_dt':'2024-01-01','report_nm':'[발행조건확정]증권신고서(지분증권)'}
+        full={'rcept_no':'20240101000002','rcept_dt':'2024-01-01','report_nm':'투자설명서'}
+        notice='<table><tr><td>항목</td><td>정정 전</td><td>정정 후</td></tr><tr><td>공통 정정</td><td>모집(매출)가액(예정): 3,000원 ~ 4,000원</td><td>모집(매출)가액(예정): 4,000원</td></tr></table>'
+        def load(m):return (notice if m==early else 'full'),{'corp_code':'00000001','content_scope':'partial_terms_notice' if m==early else 'full','related_receipts':[early['rcept_no'],full['rcept_no']]}
+        def analyse(m,b,c):return {'offering':{'offering_price':4000,'offering_price_finality':'confirmed_price_language','offering_price_review_status':'verified_currency_unit'} if m==full else {},'demand':{}}
+        metadata,body,proof,analysis=result_day_document(early,[early,full],load,analyse)
+        self.assertEqual(metadata,full);self.assertEqual(body,'full')
+        self.assertEqual(analysis['offering']['offering_price'],4000)
+        self.assertEqual(proof['same_day_terms_checks'][0]['after_correction_view']['replacement_receipt'],full['rcept_no'])
+        def unlinked(m):
+            body,proof=load(m);proof['related_receipts']=[];return body,proof
+        with self.assertRaises(ValueError):result_day_document(early,[early,full],unlinked,analyse)
+        def wrong(m):return load(m)[0].replace('4,000원</td>','4,500원</td>'),load(m)[1]
+        with self.assertRaisesRegex(ValueError,'price_not_reconciled'):result_day_document(early,[early,full],wrong,analyse)
+
     def test_http_200_error_html_is_not_saved_as_a_completed_original(self):
         class Response:
             text='<html>temporary service error</html>'

@@ -12,7 +12,7 @@ import time
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, parse_qs, urlparse
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -48,12 +48,24 @@ SAMPLES = {
     "giantstep_lockup_2021": "20210312000380",
     "voronoi_lockup_zero_2022": "20220613000198",
     "sinsin_quantity_conflict_2017": "20170214000585",
+    "atgen_annual_financial_2015": "20151013000033",
+    "ajnet_annual_financial_2015": "20150807000011",
+    "sunbeauty_lockup_conflict_2021": "20210114000349",
+    "vc_annual_financial_2022": "20220214000382",
+    "hansolcnp_float_2016": "20160118000101",
 }
 
 
 def reuse_verified_original(url, path):
     cache=path.parent.parent/'dart_connection_sources'/(hashlib.sha256(url.encode()).hexdigest()+'.json')
     if not cache.exists():
+        receipt=parse_qs(urlparse(url).query).get('rcpNo',[''])[0]
+        financial=path.parent.parent/'dart_ipo_financial_sections'/(receipt+'.json')
+        if re.fullmatch(r'\d{14}',receipt) and financial.exists():
+            original=json.loads(financial.read_text())
+            if original.get('source_url')==url and hashlib.sha256(original['html'].encode()).hexdigest()==original.get('sha256'):
+                path.write_text(original['html'],encoding='utf-8')
+                return True
         return False
     original=json.loads(cache.read_text())
     if original.get('url')!=url or hashlib.sha256(original['text'].encode()).hexdigest()!=original.get('sha256'):
@@ -93,7 +105,22 @@ def verify_record(record, reference):
     for key in ("receipt", "source_url", "sha256"):
         if record.get(key) != reference.get(key):
             problems.append(f"source_mismatch:{key}")
-    values = {**record.get("offering", {}), **record.get("demand", {})}
+    values = {**record.get("offering", {}), **record.get("demand", {}), **record.get("financial", {})}
+    def evidence_agrees(actual, expected):
+        if isinstance(expected,dict):
+            return isinstance(actual,dict) and all(
+                key in actual and evidence_agrees(actual[key],value) for key,value in expected.items())
+        return actual == expected
+    for field, expected in reference.get('expected_evidence',{}).items():
+        actual=values.get(field)
+        actual=json.loads(actual) if isinstance(actual,str) else actual
+        if not evidence_agrees(actual,expected):
+            problems.append('evidence_mismatch:'+field)
+    basis=reference.get('financial_context',{}).get('expected_fs_div')
+    if basis:
+        evidence=json.loads(record.get('financial',{}).get('financial_feature_provenance','{}'))
+        if not evidence or any(value.get('fs_div')!=basis for value in evidence.values()):
+            problems.append('financial_basis_mismatch')
     for key, expected in reference["expected"].items():
         if key not in values:
             problems.append(f"missing_output:{key}")
@@ -179,10 +206,21 @@ def main():
             "audited_at": datetime.now(timezone.utc).isoformat(),
             "parser_sha256": hashlib.sha256(Path(sys.modules[DARTCollector.__module__].__file__).read_bytes()).hexdigest(),
             "status": "parsed_not_independently_approved",
-            "offering": collector._parse_offering_html(body, receipt),
-            "demand": collector._parse_demand_forecast_html(body, name),
             "view_evidence": view_evidence,
         }
+        if reference and reference.get('financial_context'):
+            from data.pipelines.disclosure_financials import parse_disclosure_financials
+            from data.pipelines.financial_history import summarize_asof
+            from data.pipelines.disclosure_connections import viewer_identity
+            context=reference['financial_context']
+            record['financial_identity']=viewer_identity(index,receipt,context['corp_code'],context['published_at'])
+            frame=parse_disclosure_financials(body,context['corp_code'],receipt,context['published_at'],url)
+            record['financial']=summarize_asof(frame,context['corp_code'],context['cutoff'])
+            record['financial_accounts']=json.loads(frame.to_json(orient='records'))
+            record['parser_sha256']=hashlib.sha256(Path(sys.modules[parse_disclosure_financials.__module__].__file__).read_bytes()).hexdigest()
+        else:
+            record['offering']=collector._parse_offering_html(body,receipt)
+            record['demand']=collector._parse_demand_forecast_html(body,name)
         record["comparison_failures"] = verify_record(record, reference) if reference else ["reference_missing"]
         record["status"] = "sample_passed" if not record["comparison_failures"] else "sample_failed"
         records.append(record)
