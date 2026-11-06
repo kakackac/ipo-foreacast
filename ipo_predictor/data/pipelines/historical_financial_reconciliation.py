@@ -18,7 +18,15 @@ def missing_category(status, details):
         return 'not_missing'
     if 'access_failed' in status or 'not_cached' in status:
         return 'source_access_failed'
+    if status == 'official_financial_section_without_tables':
+        return 'official_section_without_value_tables_requires_lineage_review'
+    if status in {'official_statement_unit_conflict_requires_review','official_statement_amount_conflict_requires_review'}:
+        return status
+    if status=='summary_statement_basis_unverified':
+        return 'statement_basis_unverified'
     if 'format_unhandled' in status:
+        if details.get('official_statement_unit_conflicts'):
+            return 'official_statement_unit_conflict_requires_review'
         rejected=details.get('rejected_table_or_column_counts',{})
         detailed=details.get('detailed_statement_rejection_counts',{})
         if rejected.get('accounting_basis_unverified') or detailed.get('accounting_basis_unverified'):

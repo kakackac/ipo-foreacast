@@ -56,6 +56,21 @@ class FinancialHistoryTests(unittest.TestCase):
         self.assertEqual(summary["financial_time_validation_status"], FINANCIAL_STATUS)
         self.assertIsNone(summary["revenue_growth_3y"])
 
+    def test_growth_selects_same_basis_revenue_without_requiring_other_old_accounts(self):
+        recent=self.history();recent['amount']=[800.,80.,100.,200.,10.]
+        separate=recent.copy();separate['year']=2019;separate['response_year']='2019'
+        separate['fs_div']='OFS';separate['published_at']='2020-03-15';separate['rcept_no']='20200315000001'
+        old=separate[separate.account_name_en.eq('revenue')].copy();old['fs_div']='CFS';old['amount']=100.
+        frame=pd.concat([recent,separate,old],ignore_index=True)
+        result=summarize_asof(frame,'12345678','2023-04-01')
+        self.assertAlmostEqual(result['revenue_growth_3y'],1.)
+        proof=json.loads(result['financial_feature_provenance'])['revenue_growth_3y']
+        self.assertEqual(proof['fs_div'],'CFS');self.assertEqual(proof['business_years'],[2019,2022])
+        old['published_at']='2024-01-01'
+        self.assertIsNone(summarize_asof(pd.concat([recent,separate,old]),'12345678','2023-04-01')['revenue_growth_3y'])
+        conflict=frame.iloc[[-1]].copy();conflict['amount']=101.
+        self.assertIsNone(summarize_asof(pd.concat([frame,conflict]),'12345678','2023-04-01')['revenue_growth_3y'])
+
     def test_invalid_balance_only_year_is_rejected_without_empty_year_crash(self):
         frame = self.history().iloc[:3].copy()
         frame['account_name_en'] = ['total_assets', 'total_liabilities', 'equity']

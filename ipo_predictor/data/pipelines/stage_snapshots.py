@@ -19,8 +19,8 @@ from bs4 import BeautifulSoup
 from data.collectors.dart_collector import DARTCollector, _TableRowParser
 from data.pipelines.data_delivery import checked_artifact, digest
 from data.pipelines.disclosure_connections import public_text, viewer_identity
-from data.pipelines.financial_history import atomic_json, summarize_asof
-from data.pipelines.disclosure_financials import select_financial_node, parse_disclosure_financials
+from data.pipelines.financial_history import atomic_json, summarize_asof, FINANCIAL_STATUS
+from data.pipelines.disclosure_financials import select_financial_node, parse_disclosure_financials, validate_financial_section_response, financial_records
 from data.pipelines.reconciled_dataset import pin_connections
 from data.pipelines.underwriter_source import parse_underwriters
 from features.model_profiles import get_model_profile
@@ -41,9 +41,14 @@ class StageResponseInvalid(ValueError):
         super().__init__('stage_section_response_invalid');self.url=url
 
 
-def section_text(dart,url,cache,cached_only):
+def section_text(dart,url,cache,cached_only,*,financial=False):
     def validate(text):
-        if '<table' not in text.lower():raise StageResponseInvalid(url)
+        if financial:
+            try:validate_financial_section_response(text)
+            except ValueError as exc:raise StageResponseInvalid(url) from exc
+            return
+        if '<table' in text.lower():return
+        raise StageResponseInvalid(url)
     try:
         return public_text(dart,url,cache,validate,cached_only)
     except StageResponseInvalid:
@@ -521,7 +526,7 @@ def financials_from_selected_document(dart,raw,selected,corp,cached_only):
     if (node['dtd'] not in ('dart3.xsd','dart4.xsd')
             or any(not re.fullmatch(r'\d+',node[key]) for key in ('dcmNo','eleId','offset','length'))):
         raise ValueError('stage_financial_section_identity_invalid')
-    html,sha=section_text(dart,source,cache,cached_only)
+    html,sha=section_text(dart,source,cache,cached_only,financial=True)
     identity={'body':sha,'receipt':receipt,'corp_code':corp,'published_at':origin['published_at'],
               'parser':digest(Path(__file__).with_name('disclosure_financials.py'))}
     parsed_cache=Path(raw)/'stage_financial_analyses'/(hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()+'.json')
@@ -536,9 +541,13 @@ def financials_from_selected_document(dart,raw,selected,corp,cached_only):
         stored=json.loads((cache/(hashlib.sha256(source.encode()).hexdigest()+'.json')).read_text())
         frame['source_collected_at']=stored.get('collected_at')
         frame['source_hash_scope']='original_official_section_html_utf8'
-    evidence={'status':'annual_accounts_extracted' if len(frame) else 'annual_format_or_basis_unverified',
+    evidence={'status':'annual_accounts_extracted' if len(frame) else
+        'official_statement_unit_conflict_requires_review' if diagnostics.get('official_statement_unit_conflicts') else
+        'official_statement_amount_conflict_requires_review' if diagnostics.get('official_statement_amount_conflicts') else
+        'summary_statement_basis_unverified' if diagnostics.get('summary_primary_basis_unresolved_columns') else
+        'official_financial_section_without_tables' if '<table' not in html.lower() else 'annual_format_or_basis_unverified',
               'url':source,'sha256':sha,'details':diagnostics,'absence_confirmed':False}
-    result={'records':json.loads(frame.to_json(orient='records',date_format='iso')),'evidence':evidence}
+    result={'records':financial_records(frame),'evidence':evidence}
     atomic_json(parsed_cache,{'identity':identity,'result':result,
         'sha256':hashlib.sha256(json.dumps(result,sort_keys=True).encode()).hexdigest()})
     return frame,evidence
@@ -568,6 +577,40 @@ def reusable_checkpoint(raw,saved,cached_only):
             if not path.exists() or digest(path)!=sha:raise RuntimeError('stage_checkpoint_original_missing_or_changed')
         elif path.exists() or not cached_only:return False
     return cached_only or not any(a['status'] in {'source_access_failed','stage_section_response_invalid'} for a in saved['attempts'])
+
+
+def stage_checkpoint_identity(event, identity, index_hash, annual_history, target, reusable_annual_parser):
+    return {'record':hashlib.sha256(event.record.encode()).hexdigest(),
+        'proof':hashlib.sha256(event.proof.encode()).hexdigest(),
+        'code':identity['builder'],'dependencies':identity['dependency_sha256'],'parser':identity['parser'],
+        'index':index_hash,
+        'annual':hashlib.sha256(annual_history.to_json(orient='records',date_format='iso').encode()).hexdigest(),
+        'annual_parser_reusable':bool(reusable_annual_parser),
+        'target':target[['offering_price','open_return_pct','close_return_pct','listing_date']].to_json(date_format='iso')}
+
+
+def stage_financial_missing_reason(field, annual, collection_status):
+    if annual.get(field) is not None:return None
+    if annual.get('financial_time_validation_status') != FINANCIAL_STATUS:
+        return (annual.get('financial_time_validation_status',collection_status)
+                if collection_status in {'annual_accounts_extracted','verified_stored_annual_history'} else collection_status)
+    if field=='revenue_growth_3y':return 'positive_same_basis_revenue_endpoints_three_years_apart_unverified'
+    if field=='operating_margin':
+        if annual.get('revenue') is not None and annual['revenue']<=0:return 'nonpositive_revenue_margin_undefined'
+        return 'verified_same_period_operating_income_and_revenue_pair_unavailable'
+    if field=='debt_ratio':
+        if annual.get('equity') is not None and annual['equity']<=0:return 'nonpositive_equity_ratio_undefined'
+        return 'verified_same_period_liabilities_and_equity_pair_unavailable'
+    return collection_status
+
+
+def current_annual_history(accounts, reusable_parser):
+    if reusable_parser or accounts.empty:
+        return accounts
+    # Structured API rows are raw records; old disclosure extraction is not.
+    if 'report_code' not in accounts:
+        return accounts.iloc[0:0].copy()
+    return accounts[accounts.report_code.eq('11011')].copy()
 
 
 def run(raw_dir, processed_dir, *, cached_only=True, event_limit=None, event_ids=None, dart=None):
@@ -620,14 +663,13 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
     identity['dependency_sha256']={name:digest(path) for name,path in dependencies.items()}
     reusable_annual_parser=(finance_report['code']['parser']==identity['dependency_sha256']['financial_parser']
         and finance_report['code']['summary']==identity['dependency_sha256']['financial_summary'])
+    accounts=current_annual_history(accounts,reusable_annual_parser)
     index_hash=digest(dataset.parent/'kospi_index_snapshot.parquet')
     reused_events=0
     for event in records.itertuples(index=False):
         record=json.loads(event.record);proof=json.loads(event.proof);memo={}
-        event_identity={'record':hashlib.sha256(event.record.encode()).hexdigest(),'proof':hashlib.sha256(event.proof.encode()).hexdigest(),
-            'code':identity['builder'],'dependencies':identity['dependency_sha256'],'parser':identity['parser'],'index':index_hash,
-            'annual':hashlib.sha256(accounts[accounts.event_id.eq(event.event_id)].to_json(orient='records',date_format='iso').encode()).hexdigest(),
-            'target':targets.loc[event.event_id,['offering_price','open_return_pct','close_return_pct','listing_date']].to_json(date_format='iso')}
+        event_identity=stage_checkpoint_identity(event,identity,index_hash,
+            accounts[accounts.event_id.eq(event.event_id)],targets.loc[event.event_id],reusable_annual_parser)
         key=hashlib.sha256(json.dumps(event_identity,sort_keys=True).encode()).hexdigest()
         checkpoint=raw/'stage_event_checkpoints'/(key+'.json')
         if checkpoint.exists():
@@ -729,7 +771,7 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
                             'evidence':json.dumps({'url':getattr(exc,'url',origin['source_url']),'absence_confirmed':False})})
                 financial_proof=json.loads(annual.get('financial_feature_provenance','{}'))
                 for field in EXTRA_FEATURES[2:]:
-                    reasons[field]=financial_status
+                    reasons[field]=stage_financial_missing_reason(field,annual,financial_status)
                     origins[field]={'receipt':origin['receipt'],'source_url':origin['source_url'],
                                     'financial_collection_status':financial_status}
                     if field in financial_proof and annual.get(field) is not None:

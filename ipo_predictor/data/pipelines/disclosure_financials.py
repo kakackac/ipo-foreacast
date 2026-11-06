@@ -39,6 +39,18 @@ def select_financial_node(index, receipt):
     return next(iter(unique.values())) if len(unique) == 1 else None
 
 
+def validate_financial_section_response(html):
+    if '<table' in html.lower() and '재무' in html:
+        return
+    soup=BeautifulSoup(html,'html.parser')
+    heading=soup.select_one('p.section-1')
+    if (soup.body is not None and soup.select_one('link[href="/css/report_xml.css"]') is not None
+            and heading is not None and re.fullmatch(r'(?:[IVXLC]+|\d+)?재무에관한사항',clean(heading.get_text()).upper())
+            and soup.find('script') is None):
+        return
+    raise ValueError('financial_section_response_invalid')
+
+
 def public_financial_section(dart, receipt, corp_name, cache_dir, corp_code=None, published=None):
     """Read a bounded public section, never the first arbitrary viewer link."""
     path = Path(cache_dir) / f"{receipt}.json"
@@ -87,13 +99,13 @@ def public_financial_section(dart, receipt, corp_name, cache_dir, corp_code=None
             html=cached['html']
         else:
             html,_=public_text(dart,section_url,Path(cache_dir).parent/'dart_connection_sources',
-                lambda text: None if '<table' in text.lower() else (_ for _ in ()).throw(ValueError('financial_section_response_invalid')))
+                validate_financial_section_response)
     except requests.RequestException as exc:
         return {"status": "financial_public_source_access_failed", "error_type": type(exc).__name__}
     except ValueError as exc:
         return {'status':str(exc)}
-    if "재무" not in html or "<table" not in html.lower():
-        return {"status": "financial_section_response_invalid"}
+    try:validate_financial_section_response(html)
+    except ValueError:return {"status": "financial_section_response_invalid"}
     payload = {"receipt": receipt, "issuer": issuer, "status": "official_section_downloaded",
                "identity_schema_version":2,"index_url":url,"index_sha256":index_hash,
                "official_corp_code": official_corp, "official_publication_date": official_date,
@@ -125,13 +137,13 @@ def account_name(value):
 
 
 def financial_table_document(html, soup=None):
-    """Keep single-cell unit/heading tables in the following table's context."""
+    """Keep statement title/period grids in the following value table's context."""
     soup = soup if soup is not None else BeautifulSoup(html, "html.parser")
     for table in list(soup.find_all("table")):
         text=table.get_text(" ",strip=True)
         cells=table.find_all(["td","th"])
-        heading_only=(re.search(r"단위\s*[:：]",text)
-                      and re.search(r"재무제표|재무상태표|손익계산서|제\s*\d+\s*기",text)
+        heading_only=((re.match(r"(?:요약(?:연결|별도|개별)?재무|(?:분기|반기)?(?:연결|별도|개별)?(?:재무제표|재무상태표|(?:포괄)?손익계산서))",clean(text))
+                       or re.search(r"단위\s*[:：]",text))
                       and not any(account_name(cell.get_text(" ",strip=True)) for cell in cells)
                       and not any(re.fullmatch(r"\(?-?\d[\d,]*(?:\.\d+)?\)?",cell.get_text(strip=True)) for cell in cells))
         if table.find("table") is not None:
@@ -143,6 +155,155 @@ def financial_table_document(html, soup=None):
             paragraph.string = table.get_text(" ", strip=True)
             table.replace_with(paragraph)
     return str(soup)
+
+
+def summary_scope_heading(context, *, allow_statement_subheading=False):
+    """Read explicit prefix/infix/suffix scope without discarding the entity owner."""
+    pattern = (r"(?P<prefix>연결|별도|개별)?\s*요약\s*(?:(?P<infix>연결|별도|개별)|\(\s*(?P<paren_infix>연결|별도|개별)\s*\))?\s*"
+               r"재무\s*(?:정보|제표|현황|상태표)"
+               r"(?:\s*(?:[-:：]\s*|\(\s*)(?P<suffix>연결|별도|개별)\s*\)?)?")
+    headings = [match for match in re.finditer(pattern, context)
+                if not re.search(r"본\s*$", context[:match.start()])]
+    boundaries = list(re.finditer(r"(?<!\d)[2345][.)]\s*(?:연결|별도|개별)?\s*재무제표", context))
+    if boundaries and (not headings or boundaries[-1].start()>headings[-1].start()):
+        return None
+    subheadings = list(re.finditer(
+        r"(?<![가-힣])[가나다라마바사아자차카타파하][.)]\s*(?P<basis>연결|별도|개별)?\s*재무제표(?!\s*(?:주석|에\s*대한|는))", context))
+    if not headings and not allow_statement_subheading:
+        return None
+    choices = [(match, False) for match in headings] + [(match, True) for match in subheadings]
+    if not choices:
+        return None
+    match, child = max(choices, key=lambda value: value[0].start())
+    bases = ({match['basis']} if match['basis'] else set()) if child else {
+        value for value in match.groupdict().values() if value is not None}
+    # An unqualified summary may explicitly state its basis in the introduction.
+    introduction = context[match.end():]
+    declared = re.search(r"(?:는|은)\s*(연결|별도|개별)\s*재무제표", introduction)
+    if declared:
+        bases.add(declared[1])
+    scopes = {"CFS" if value == "연결" else "OFS" for value in bases}
+    subsidiary = bool(re.search(r"(?:종속|관계|피투자)(?:회사|기업)의\s*$", context[:match.start()])
+                      or re.search(r"요약재무(?:정보|제표|현황)는.{0,25}(?:종속|관계|피투자)(?:회사|기업)인",
+                                   clean(context[match.start():])))
+    title_prefix = re.search(r"(?:K\s*-?\s*(?:IFRS|GAAP)|한국채택국제회계기준)(?:\s*기준)?\s*$", context[:match.start()])
+    standard_context = (title_prefix[0] if title_prefix else "") + context[match.start():]
+    if child and headings and not re.search(r'KIFRS|KGAAP|한국채택국제회계기준',clean(standard_context)):
+        standard_context = context[headings[-1].start():match.start()] + standard_context
+    return {"scope": next(iter(scopes)) if len(scopes) == 1 else "OFS" if not scopes else None,
+            "entity_scope": "subsidiary" if subsidiary else "issuer",
+            "evidence": context, "heading": match[0], "start": match.start(),
+            "standard_context": standard_context, "basis_explicit": bool(bases) or child}
+
+
+def financial_records(frame):
+    return json.loads(frame.to_json(orient='records',date_format='iso',double_precision=15))
+
+
+def primary_annual_balances(parser):
+    """Read scope/year/unit fingerprints from primary statements, never note tables."""
+    balances = {"total_assets", "total_liabilities", "equity"}
+    scope, notes = None, False
+    groups, consolidated = [], False
+    for table_id, (context, table) in enumerate(zip(parser.table_contexts, parser.tables)):
+        heading = clean(context)
+        boundaries = list(re.finditer(r"(?<!\d)[2345][.)](연결)?재무제표(주석)?", re.sub(r"\s+", "", context)))
+        if boundaries:
+            scope = 'CFS' if boundaries[-1][1] else 'OFS'
+            notes = bool(boundaries[-1][2])
+        if scope is None or notes or '재무상태표' not in heading:
+            continue
+        positions = [(i,row,account_name(row[0]) or {
+            '자산':'total_assets','부채':'total_liabilities','자본':'equity'}.get(clean(row[0])))
+            for i,row in enumerate(table) if row]
+        positions = [(i,row,name) for i,row,name in positions if name in balances]
+        if len({name for _,_,name in positions})<3:
+            continue
+        consolidated |= scope == 'CFS'
+        data_start=next((i for i,row in enumerate(table[:positions[0][0]])
+            if clean(row[0]) not in {'과목','구분','기간','사업연도'} and any(
+                re.fullmatch(r'(?:-?\d[\d,]*(?:\.\d+)?|\(\d[\d,]*(?:\.\d+)?\))',cell.strip())
+                for cell in row[1:])),positions[0][0])
+        headers=table[:data_start]
+        units = {re.sub(r'\s+','',m) for m in re.findall(r"단위\s*[:：]\s*(백\s*만\s*원|천\s*원|원|KRW)", context+' '+' '.join(' '.join(row) for row in headers))}
+        if len(units)!=1:
+            continue
+        scale = {'백만원':1_000_000,'천원':1_000,'원':1,'KRW':1}[units.pop()]
+        terms=list(re.finditer(r'제\s*(\d+)\s*(?:\([^)]*\))?\s*기',context))
+        periods={}
+        for index,term in enumerate(terms):
+            text=context[term.end():terms[index+1].start() if index+1<len(terms) else len(context)]
+            dates=re.findall(r'((?:19|20)\d{2})\s*(?:년|[./-])\s*(\d{1,2})\s*(?:월|[./-])\s*(\d{1,2})',text)
+            if len(dates)==1 and tuple(map(int,dates[0][1:]))==(12,31):
+                periods.setdefault(int(term[1]),set()).add(int(dates[0][0]))
+        for column in range(1,max(map(len,table))):
+            header=' '.join(row[column] for row in headers if len(row)>column)
+            years=set(re.findall(r'(?:19|20)\d{2}',header))
+            if re.search(r'분기|반기|수정|조정|설립\s*전|분할\s*전|사업부|carve\s*out',header,re.I):
+                continue
+            if len(years)==1 and re.search(r'12\s*월',header):
+                year=int(next(iter(years)))
+            else:
+                term_ids={int(t) for t in re.findall(r'제\s*(\d+)\s*(?:\([^)]*\))?\s*기',header)}
+                mapped={year for term in term_ids for year in periods.get(term,set())}
+                if len(mapped)!=1 or years and {int(y) for y in years}!=mapped:
+                    continue
+                year=next(iter(mapped))
+            facts={}
+            for row_id,row,name in positions:
+                if len(row)<=column:continue
+                raw=row[column].strip().replace('−','-')
+                if not re.fullmatch(r'(?:-?\d[\d,]*(?:\.\d+)?|\(\d[\d,]*(?:\.\d+)?\))',raw):continue
+                value=float(raw.replace(',','').strip('()'))*(-1 if raw.startswith('(') else 1)
+                facts.setdefault(name,[]).append({'account':name,'raw_amount':raw,'amount':value*scale,
+                    'unit_multiplier':scale,'table_id':table_id,'row_id':row_id,'column_id':column,
+                    'unit_context':context})
+            if set(facts)==balances and all(len({r['amount'] for r in group})==1 for group in facts.values()):
+                groups.append({'year':year,'fs_div':scope,'facts':{name:group[0] for name,group in facts.items()}})
+    return {'groups':groups,'consolidated_primary_present':consolidated}
+
+
+def summary_column_basis(scope, explicit, positions, column, year, scale, primary):
+    if explicit or not primary['consolidated_primary_present']:
+        return scope, []
+    balances={}
+    for _,row,name in positions:
+        if name not in {'total_assets','total_liabilities','equity'} or len(row)<=column:continue
+        raw=row[column].strip().replace('−','-')
+        if re.fullmatch(r'(?:-?\d[\d,]*(?:\.\d+)?|\(\d[\d,]*(?:\.\d+)?\))',raw):
+            balances[name]=float(raw.replace(',','').strip('()'))*(-1 if raw.startswith('(') else 1)*scale
+    if len(balances)!=3:
+        return None, []
+    matches=[group for group in primary['groups'] if group['year']==year and all(
+        abs(balances[name]-fact['amount'])<=2*max(scale,fact['unit_multiplier'])
+        for name,fact in group['facts'].items())]
+    scopes={group['fs_div'] for group in matches}
+    if len(scopes)!=1:
+        return None, []
+    return next(iter(scopes)), [group for group in matches]
+
+
+def summary_unit_conflicts(primary, rows):
+    """Detect identical primary balance cells printed under contradictory KRW units."""
+    conflicts=[]
+    for group in primary['groups']:
+        year,scope=group['year'],group['fs_div'];matches={}
+        for name,fact in group['facts'].items():
+            value=fact['amount']/fact['unit_multiplier'];scale=fact['unit_multiplier']
+            for candidate in rows:
+                if (candidate['year']!=year or candidate['fs_div']!=scope or candidate['account_name_en']!=name
+                        or candidate['unit_multiplier']==scale):continue
+                raw=candidate['raw_amount'].replace(',','')
+                number=float(raw.strip('()'))*(-1 if raw.startswith('(') else 1)
+                if number==value and abs(candidate['amount']-fact['amount'])>2*max(scale,candidate['unit_multiplier']):
+                    matches.setdefault(candidate['table_id'],[]).append({
+                        'account':name,'raw_amount':fact['raw_amount'],'summary_unit_multiplier':candidate['unit_multiplier'],
+                        'primary_unit_multiplier':scale,'primary_table_id':fact['table_id'],'primary_row_id':fact['row_id'],
+                        'primary_column_id':fact['column_id'],'primary_unit_context':fact['unit_context']})
+        for summary_id,evidence in matches.items():
+            if len({r['account'] for r in evidence})>=2:
+                conflicts.append({'summary_table_id':summary_id,'year':year,'fs_div':scope,'evidence':evidence})
+    return conflicts
 
 
 def income_period(table, first_account, row_id, column, year):
@@ -265,7 +426,7 @@ def detailed_annual_accounts(parser, corp_code, receipt, published, source_url, 
         periods = {}
         for index, term in enumerate(terms):
             text = heading[term.start():terms[index+1].start() if index+1 < len(terms) else len(heading)]
-            if re.search(r"분기|반기|[36]\s*개월", text):
+            if re.search(r"분기|반기|[36]\s*개월|설립\s*전|분할\s*전|사업부|carve\s*out", text,re.I):
                 continue
             dates = [tuple(map(int, day)) for day in re.findall(
                 r"((?:19|20)\d{2})\s*(?:년|[./-])\s*(\d{1,2})\s*(?:월|[./-])\s*(\d{1,2})", text)]
@@ -277,7 +438,7 @@ def detailed_annual_accounts(parser, corp_code, receipt, published, source_url, 
                 periods.setdefault(int(term[1]), {})[dates[0][0]] = text
         for column in range(1, max(map(len, table))):
             header = " ".join(row[column] for row in headers if len(row) > column)
-            if re.search(r"분기|반기|잠정|추정|예상|[36]\s*개월|누\s*적", header):
+            if re.search(r"분기|반기|잠정|추정|예상|[36]\s*개월|누\s*적|설립\s*전|분할\s*전|사업부|carve\s*out", header,re.I):
                 continue
             numbers = {int(m) for m in re.findall(r"제\s*(\d+)\s*(?:\([^)]*\))?\s*기", header)}
             if len(numbers) != 1:
@@ -325,6 +486,9 @@ def detailed_annual_accounts(parser, corp_code, receipt, published, source_url, 
                 "source_sha256": digest, "source_kind": "ipo_disclosure", "table_id": table_id,
                 "row_id": row_id, "column_id": column, "period_name": period,
                 "accounting_standard": "K-IFRS", "accounting_standard_evidence": evidence,
+                "entity_scope":"issuer", "statement_basis_explicit":True,
+                "statement_scope_evidence":parser.table_contexts[table_id],
+                "primary_balance_scope_evidence":[],
                 "extraction_rule_id": "detailed_annual_period_and_basis_v1"})
     return rows, rejected
 
@@ -335,55 +499,49 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url,
     soup = BeautifulSoup(html, "html.parser")
     narrative = soup.get_text(" ", strip=True)
     parser.feed(financial_table_document(html, soup))
+    primary = primary_annual_balances(parser)
     scope, scale, rows = None, None, []
+    entity_scope, scope_evidence = "issuer", None
+    scope_explicit, resolved_scopes = False, {}
     standards = set()
     scope_standard = None
     term_years = {}
     rejected = Counter()
     # This is an affirmative preparation statement, not a generic IFRS mention.
     frameworks=ifrs_preparation_statements(narrative)
-    for table in parser.tables:
+    for table in [*parser.tables, [[narrative]]]:
         for row in table:
             for cell in row:
-                match = re.search(r"제\s*(\d+)\s*(?:\([^)]*\))?\s*기.*?((?:19|20)\d{2})년\s*12월\s*31일", cell)
-                if match:
+                for match in re.finditer(r"제\s*(\d+)\s*(?:\([^)]*\))?\s*기[^기]{0,65}?((?:19|20)\d{2})\s*(?:년|[.])\s*12\s*(?:월|[.])\s*31", cell):
                     term_years.setdefault(str(int(match[1])), set()).add(match[2])
     digest = hashlib.sha256(html.encode()).hexdigest()
     for table_id, (context, table) in enumerate(zip(parser.table_contexts, parser.tables)):
-        heading = clean(context)
-        scope_headings = list(re.finditer(r"(?:연결|별도)?요약(?:연결|별도)?재무(?:정보|제표)", heading))
-        if scope_headings:
-            # A preceding CFS footnote must not override the next OFS heading.
-            heading = heading[scope_headings[-1].start():]
-        boundary = bool(re.search(r"(?:연결대상|회계정책|중단영업|[2345](?:연결)?재무제표)", heading))
-        new_scope = False
-        if ("요약연결재무정보" in heading or "요약연결재무제표" in heading
-                or "연결요약재무정보" in heading or "연결요약재무제표" in heading):
-            scope = "CFS"
-            new_scope = True
-        elif ("요약별도재무정보" in heading or "별도요약재무제표" in heading
-              or "별도재무제표" in heading and not boundary):
-            scope = "OFS"
-            new_scope = True
-        elif "요약재무정보" in heading or "요약재무제표" in heading:
-            scope = "CFS" if "연결재무제표" in heading else "OFS"
-            new_scope = True
-        elif boundary:
-            scope, scale = None, None
-            standards = set()
-            scope_standard = None
-        if new_scope:
+        declared = summary_scope_heading(context, allow_statement_subheading=scope is not None and entity_scope == "issuer")
+        # Ignore older headings before the last summary, but retain its owner.
+        current_heading = clean(context[declared['start']:] if declared else context)
+        boundary = bool(re.search(r"(?:연결대상|회계정책|중단영업|[2345](?:연결|별도|개별)?재무제표)", current_heading))
+        if declared:
+            scope = declared['scope']
+            entity_scope = declared['entity_scope']
+            scope_evidence = declared['evidence']
+            scope_explicit = declared['basis_explicit']
+            resolved_scopes = {}
             standards = set()
             scale = None
-            scope_standard = ("K-IFRS" if "KIFRS" in heading or "한국채택국제회계기준" in heading
-                              else "K-GAAP" if "KGAAP" in heading else None)
+            declared_standard = re.search(r"KIFRS|KGAAP|한국채택국제회계기준",clean(declared['standard_context']))
+            scope_standard = ("K-GAAP" if declared_standard[0] == "KGAAP" else "K-IFRS") if declared_standard else None
         if boundary:
             scope, scale, scope_standard = None, None, None
+            entity_scope, scope_evidence = "issuer", None
+            scope_explicit, resolved_scopes = False, {}
             standards = set()
         unit_text = context + " " + " ".join(" ".join(r) for r in table[:2])
         unit = re.search(r"단위\s*[:：]\s*(백\s*만\s*원|천\s*원|원|KRW)", unit_text)
         if unit:
             scale = {"백만원": 1_000_000, "천원": 1_000, "원": 1, "KRW": 1}[re.sub(r'\s+','',unit.group(1))]
+        if entity_scope != "issuer":
+            rejected['non_issuer_statement_scope'] += 1
+            continue
         if scope is None or scale is None or len(table) < 4:
             if len(table) >= 4:
                 rejected['summary_scope_unresolved' if scope is None else 'krw_unit_unverified'] += 1
@@ -414,7 +572,7 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url,
             if not years:
                 term = re.search(r"제\s*(\d+)\s*기", header)
                 years = term_years.get(str(int(term[1])), set()) if term else set()
-            if len(years) != 1 or re.search(r"분기|반기|잠정|추정|예상|가결산|수정전|수정후", header):
+            if len(years) != 1 or re.search(r"분기|반기|잠정|추정|예상|가결산|수정|조정금액|차이금액", header):
                 rejected['annual_period_unresolved_or_not_annual'] += 1
                 continue
             if re.search(r"설립\s*전|분할\s*전|사업부|carve\s*out", header, re.I):
@@ -431,17 +589,27 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url,
             year = int(next(iter(years)))
             if pd.Timestamp(f"{year}-12-31") >= pd.Timestamp(published).tz_localize(None):
                 continue
+            column_scope, primary_scope_proof = resolved_scopes.get(year, (None, []))
+            if column_scope is None:
+                column_scope, primary_scope_proof = summary_column_basis(
+                    scope,scope_explicit,account_positions,column,year,scale,primary)
+            if column_scope is None:
+                rejected['summary_primary_statement_basis_unverified'] += 1
+                continue
+            resolved_scopes[year]=(column_scope,primary_scope_proof)
             if "KGAAP" in clean(header):
                 rejected['explicit_gaap_not_ifrs'] += 1
                 continue
             if scope_standard == "K-GAAP" and "KIFRS" not in clean(header):
                 rejected['explicit_gaap_not_ifrs'] += 1
                 continue
-            framework_evidence=(preparation_for_year(table_frameworks,scope,year,header,term_years)
-                                or preparation_for_year(frameworks,scope,year,header,term_years))
+            scoped_frameworks=(table_frameworks if column_scope==scope else
+                               ifrs_preparation_statements(adjacent,default_scope=column_scope,table_note=True))
+            framework_evidence=(preparation_for_year(scoped_frameworks,column_scope,year,header,term_years)
+                                or preparation_for_year(frameworks,column_scope,year,header,term_years))
             if "KIFRS" in clean(header) or scope_standard == "K-IFRS" or framework_evidence:
-                standards.add(year)
-            if year not in standards:
+                standards.add((year,column_scope))
+            if (year,column_scope) not in standards:
                 rejected['accounting_basis_unverified'] += 1
                 continue
             for row_id, row, account in account_positions:
@@ -460,16 +628,49 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url,
                 rows.append({"year": year, "account_name_en": account, "amount": amount,
                              "corp_code": str(corp_code), "rcept_no": receipt,
                              "report_code": "IPO_FINANCIAL_DISCLOSURE", "response_year": str(year),
-                             "fs_div": scope, "currency": "KRW", "raw_amount": raw,
+                             "fs_div": column_scope, "currency": "KRW", "raw_amount": raw,
                              "unit_multiplier": 1 if account == "eps" else scale,
                              "publication_verified": True, "published_at": str(published)[:10],
                              "source_url": source_url, "source_sha256": digest, "source_kind": "ipo_disclosure",
                              "table_id": table_id, "row_id": row_id, "column_id": column,
-                             "period_name": period or header, "accounting_standard": "K-IFRS"})
+                             "period_name": period or header, "accounting_standard": "K-IFRS",
+                             "entity_scope": entity_scope, "statement_scope_evidence": scope_evidence,
+                             "statement_basis_explicit":scope_explicit,
+                             "primary_balance_scope_evidence":primary_scope_proof,
+                             "extraction_rule_id": "summary_issuer_statement_scope_v2"})
                 rows[-1]["accounting_standard_evidence"] = framework_evidence or header + adjacent
     detailed_rejections = Counter()
-    if not rows:
-        rows, detailed_rejections = detailed_annual_accounts(parser, corp_code, receipt, published, source_url, digest)
+    unit_conflicts = summary_unit_conflicts(primary, rows)
+    conflicting_tables = {item['summary_table_id'] for item in unit_conflicts}
+    rows = [row for row in rows if row['table_id'] not in conflicting_tables]
+    core = {'revenue','operating_income','total_liabilities','equity'}
+    summary_groups = {}
+    for row in rows:
+        summary_groups.setdefault((row['year'],row['fs_div']),[]).append(row)
+    detailed, detailed_rejections = detailed_annual_accounts(parser, corp_code, receipt, published, source_url, digest)
+    primary_groups, amount_conflicts = {}, []
+    disputed_units={(row['year'],row['fs_div']) for row in unit_conflicts}
+    for row in detailed:
+        primary_groups.setdefault((row['year'],row['fs_div']),[]).append(row)
+    for key,group in primary_groups.items():
+        if key in disputed_units:continue
+        summary_group=summary_groups.get(key,[])
+        incompatible=[]
+        for summary_row in summary_group:
+            if summary_row['account_name_en']=='eps':continue
+            peers=[r for r in group if r['account_name_en']==summary_row['account_name_en']]
+            if peers and not any(abs(summary_row['amount']-r['amount'])<=2*max(
+                    summary_row['unit_multiplier'],r['unit_multiplier']) for r in peers):
+                incompatible.append({'summary':summary_row,'primary':peers})
+        if incompatible:
+            amount_conflicts.append({'year':key[0],'fs_div':key[1],'evidence':incompatible})
+            rows=[row for row in rows if (row['year'],row['fs_div'])!=key]
+            continue
+        if (not summary_group or not core.issubset({r['account_name_en'] for r in summary_group})
+                and core.issubset({r['account_name_en'] for r in group})):
+            # Use one coherent statement group, not a blend of rounded/restated cells.
+            rows=[row for row in rows if (row['year'],row['fs_div'])!=key]
+            rows.extend(group)
     if diagnostics is not None:
         diagnostics.update(tables=len(parser.tables), extracted_accounts=len(rows),
                            document_sha256=digest, source_url=source_url, receipt=receipt,
@@ -477,6 +678,9 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url,
                            reason="annual_accounts_extracted" if rows else "annual_summary_format_or_basis_unverified")
         diagnostics['rejected_table_or_column_counts'] = dict(rejected)
         diagnostics['detailed_statement_rejection_counts'] = dict(detailed_rejections)
+        diagnostics['official_statement_unit_conflicts'] = unit_conflicts
+        diagnostics['official_statement_amount_conflicts'] = amount_conflicts
+        diagnostics['summary_primary_basis_unresolved_columns'] = rejected['summary_primary_statement_basis_unverified']
         diagnostics['selected_document_explicit_summary_absence'] = bool(
             not rows and re.search(r'요약\s*재무정보\s*(?:당사는\s*)?(?:증권신고서\s*(?:제출일|작성\s*기준일)\s*현재\s*)?해당사항\s*없', narrative[:2000]))
     return pd.DataFrame(rows)
@@ -546,8 +750,13 @@ def collect_disclosure_financials(dart, raw_dir, event_id, corp_code, corp_name,
                    original_lineage_date=str(pd.Timestamp(chosen.rcept_dt).date()),
                    publication_date_corrected=payload.get('publication_date_corrected',False),
                    index_url=payload.get('index_url'),index_sha256=payload.get('index_sha256'))
-    status = "official_annual_financial_tables_found" if not result.empty else "annual_financial_table_format_unhandled"
-    records = json.loads(result.to_json(orient='records'))
+    status = ("official_annual_financial_tables_found" if not result.empty else
+              "official_statement_unit_conflict_requires_review" if details.get('official_statement_unit_conflicts') else
+              "official_statement_amount_conflict_requires_review" if details.get('official_statement_amount_conflicts') else
+              "summary_statement_basis_unverified" if details.get('summary_primary_basis_unresolved_columns') else
+              "official_financial_section_without_tables" if '<table' not in payload['html'].lower() else
+              "annual_financial_table_format_unhandled")
+    records = financial_records(result)
     atomic_json(cache, {'identity': identity, 'records': records, 'diagnostics': details, 'status': status,
                        'records_sha256': hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()})
     if diagnostics is not None: diagnostics.update(details)

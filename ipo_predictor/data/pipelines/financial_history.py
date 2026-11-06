@@ -205,8 +205,18 @@ def summarize_asof(financials, corp_code, cutoff):
             add_evidence(feature, [a, b])
     result["revenue_growth_3y"] = None
     income_year = next((y for y in sorted(yearly, reverse=True) if "revenue" in yearly[y]), None)
-    old = yearly.get(income_year - 3, {}).get("revenue") if income_year else None
     recent = yearly.get(income_year, {}).get("revenue")
+    old = None
+    if income_year and recent is not None:
+        # Growth needs a matching revenue endpoint, not a complete old balance sheet.
+        endpoints=frame[frame.year.eq(income_year-3) & frame.response_year.eq(str(income_year-3))
+                        & frame.account_name_en.eq('revenue') & frame.fs_div.eq(recent.fs_div)]
+        candidates=[(group.available_at.max(),str(receipt),group)
+                    for receipt,group in endpoints.groupby('rcept_no')]
+        if candidates:
+            chosen=sorted(candidates,key=lambda item:item[:2])[-1][2]
+            if chosen.amount.nunique()==1:
+                old=chosen.iloc[0]
     if (old is not None and recent is not None and old.amount > 0 and recent.amount > 0
             and old.fs_div == recent.fs_div):
         result["revenue_growth_3y"] = float((recent.amount / old.amount) ** (1 / 3) - 1)

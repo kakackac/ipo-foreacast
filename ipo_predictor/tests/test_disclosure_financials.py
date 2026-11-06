@@ -9,7 +9,7 @@ import pandas as pd
 
 from data.pipelines.disclosure_financials import (
     collect_disclosure_financials, parse_disclosure_financials, public_financial_section,
-    select_financial_node,
+    select_financial_node, financial_records,
 )
 from data.pipelines.financial_history import summarize_asof
 
@@ -43,6 +43,133 @@ def financial_index(receipt='20230315000001',date='2023.03.15',corp='12345678',n
 
 
 class DisclosureFinancialTests(unittest.TestCase):
+    def test_unqualified_summary_basis_is_corroborated_by_primary_balances(self):
+        html='1. 요약재무정보 (단위: 원)'+table(summary())
+        html+='2. 연결재무제표 연결재무상태표 (단위: 원)'+table([
+            ['과목','2022년 12월말'],['자산','300'],['부채','100'],['자본','200']])
+        html+='4. 재무제표 재무상태표 (단위: 원)'+table([
+            ['과목','2022년 12월말'],['자산','200'],['부채','50'],['자본','150']])
+        frame=parse(html)
+        self.assertEqual(set(frame.fs_div),{'CFS'})
+        self.assertTrue(frame.primary_balance_scope_evidence.map(bool).all())
+        self.assertTrue(frame.statement_basis_explicit.eq(False).all())
+        # Explicit declarations are not overwritten by a numeric resemblance.
+        self.assertEqual(set(parse(html.replace('1. 요약재무정보','1. 요약별도재무정보')).fs_div),{'OFS'})
+
+    def test_ambiguous_or_unmatched_primary_fingerprints_do_not_approve_a_basis(self):
+        body='1. 요약재무정보 (단위: 원)'+table(summary())
+        connected='2. 연결재무제표 연결재무상태표 (단위: 원)'+table([
+            ['과목','2022년 12월말'],['자산','300'],['부채','100'],['자본','200']])
+        same='4. 재무제표 재무상태표 (단위: 원)'+table([
+            ['과목','2022년 12월말'],['자산','300'],['부채','100'],['자본','200']])
+        self.assertTrue(parse(body+connected+same).empty)
+        self.assertTrue(parse(body+connected.replace('300','400')).empty)
+
+    def test_summary_basis_aliases_reset_scope_instead_of_inheriting(self):
+        for connected, separate in [
+                ('연결 요약재무현황', '별도 요약재무현황'),
+                ('요약 재무정보 - 연결', '요약 별도 재무정보 - 별도'),
+                ('요약재무정보(연결)', '요약재무정보(별도)'),
+                ('요약(연결) 재무정보', '요약(별도) 재무정보'),
+                ('요약연결재무정보', '요약개별재무정보')]:
+            with self.subTest(connected=connected, separate=separate):
+                html=connected+' (단위: 원)'+table(summary())
+                other=summary();other[-2]=['영업이익','70']
+                html+=separate+' (단위: 원)'+table(other)
+                frame=parse(html)
+                self.assertEqual(set(frame.loc[frame.table_id.eq(0),'fs_div']),{'CFS'})
+                self.assertEqual(set(frame.loc[frame.table_id.eq(1),'fs_div']),{'OFS'})
+                self.assertTrue(frame.entity_scope.eq('issuer').all())
+                self.assertEqual(summarize_asof(frame,'12345678','2023-04-01')['operating_income'],-50)
+
+    def test_subsidiary_summary_owner_is_preserved_until_next_issuer_block(self):
+        html='가. 요약연결재무정보 (단위: 원)'+table(summary())
+        html+='다. 종속회사의 요약재무정보 본 요약재무정보는 당사의 종속회사인 자회사A의 별도재무제표입니다. (단위: 원)'
+        html+=table(summary())+'(2) 자회사B (단위: 원)'+table(summary())
+        html+='라. 요약개별재무정보 (단위: 원)'+table(summary())
+        details={}
+        frame=parse_disclosure_financials(html,'12345678','20230315000001','2023-03-15','https://dart.fss.or.kr/report/viewer.do',details)
+        self.assertEqual(set(frame.table_id),{0,3})
+        self.assertEqual(set(frame.loc[frame.table_id.eq(3),'fs_div']),{'OFS'})
+        self.assertEqual(details['rejected_table_or_column_counts']['non_issuer_statement_scope'],2)
+
+    def test_multicell_title_grid_preserves_explicit_scope_and_fiscal_mapping(self):
+        title=table([['요약연결재무현황'],['제7기말 2022.12.31 현재'],['','','(단위: 원)']])
+        html='1. 요약재무정보'+title+table(summary('제7기'))
+        frame=parse(html)
+        self.assertEqual(set(frame.fs_div),{'CFS'})
+        self.assertEqual(set(frame.year),{2022})
+        self.assertEqual(frame.table_id.unique().tolist(),[0])
+
+    def test_unqualified_summary_explicit_separate_introduction_and_conflict(self):
+        html='요약재무정보 본 요약재무정보는 별도재무제표입니다. (단위: 원)'+table(summary())
+        self.assertEqual(set(parse(html).fs_div),{'OFS'})
+        self.assertTrue(parse('요약재무정보 - 연결 본 요약재무정보는 별도재무제표입니다. (단위: 원)'+table(summary())).empty)
+
+    def test_previous_ifrs_note_does_not_override_next_explicit_gaap_heading(self):
+        for title in ['요약재무정보(K-GAAP 기준)','K-GAAP 요약재무제표']:
+            with self.subTest(title=title):
+                html='1. 요약재무정보 (단위: 원)'+table(summary())
+                html+='주) 요약재무제표는 한국채택국제회계기준(K-IFRS)에 따라 작성되었습니다. 라. '+title+' (단위: 원)'
+                html+=table(summary('2021년',standard=False))
+                self.assertEqual(set(parse(html).year),{2022})
+
+    def test_adjustment_amount_columns_are_not_annual_account_values(self):
+        for label in ['수정금액','수정 금액','조정금액','차이금액']:
+            with self.subTest(label=label):
+                html='1. 요약재무정보 K-IFRS (단위: 원)'+table(summary('2022년 '+label,False))
+                self.assertTrue(parse(html).empty)
+
+    def test_summary_child_statement_headings_set_scope_without_repeating_summary(self):
+        html='1. 요약재무정보 가. 연결재무제표 (단위: 원)'+table(summary())
+        html+='나. 재무제표 (단위: 원)'+table(summary())
+        frame=parse(html)
+        self.assertEqual(set(frame.loc[frame.table_id.eq(0),'fs_div']),{'CFS'})
+        self.assertEqual(set(frame.loc[frame.table_id.eq(1),'fs_div']),{'OFS'})
+        self.assertTrue(parse('2. 연결재무제표 가. 연결재무제표 (단위: 원)'+table(summary())).empty)
+        self.assertTrue(parse('1. 요약재무정보 해당사항 없습니다. 2. 연결재무제표 가. 연결재무제표 (단위: 원)'+table(summary())).empty)
+        html='1. 요약재무정보 아래 재무제표는 한국채택국제회계기준에 따라 작성되었습니다. 가. 연결재무제표 (단위: 원)'+table(summary(standard=False))
+        self.assertEqual(set(parse(html).fs_div),{'CFS'})
+
+    def test_child_statement_heading_cannot_leave_a_subsidiary_block(self):
+        html='종속회사의 요약재무정보 (단위: 원)'+table(summary())
+        html+='가. 별도재무제표 (단위: 원)'+table(summary())
+        self.assertTrue(parse(html).empty)
+
+    def test_conflicting_summary_and_primary_balance_units_are_not_silently_corrected(self):
+        html='1. 요약재무정보 (단위: 백만원)'+table(summary())
+        html+='4. 재무제표 재무상태표 (단위: 원)'+table([
+            ['구분','2022년 12월말'],['자산총계','300'],['부채총계','100'],['자본총계','200']])
+        details={}
+        frame=parse_disclosure_financials(html,'12345678','20230315000001','2023-03-15','https://dart.fss.or.kr/report/viewer.do',details)
+        self.assertTrue(frame.empty)
+        self.assertEqual(len(details['official_statement_unit_conflicts']),1)
+        self.assertEqual(len(details['official_statement_unit_conflicts'][0]['evidence']),3)
+        from data.pipelines.historical_financial_reconciliation import missing_category
+        self.assertEqual(missing_category('annual_financial_table_format_unhandled',details),
+                         'official_statement_unit_conflict_requires_review')
+        alternate=html.replace('자산총계','자산').replace('부채총계','부채').replace('자본총계','자본')
+        # Keep explicit summary totals; only the primary statement uses short labels.
+        alternate=html[:html.index('4. 재무제표')]+alternate[alternate.index('4. 재무제표'):]
+        self.assertTrue(parse(alternate).empty)
+
+    def test_large_financial_amount_serialization_preserves_precision(self):
+        amount=float('35579597308')*1_000_000
+        self.assertEqual(financial_records(pd.DataFrame([{'amount':amount}]))[0]['amount'],amount)
+
+    def test_public_empty_financial_chapter_is_retained_without_fabricated_values(self):
+        body='<html><head><link href="/css/report_xml.css"></head><body><p class="section-1">Ⅲ. 재무에 관한 사항</p><p class="section-2">1. 요약재무정보</p></body></html>'
+        dart=Mock();index=Mock();index.text=financial_index();response=Mock();response.text=body
+        dart.session.get.side_effect=[index,response]
+        with tempfile.TemporaryDirectory() as root:
+            payload=public_financial_section(dart,'20230315000001','테스트',Path(root)/'sections',corp_code='12345678')
+            self.assertEqual(payload['status'],'official_section_downloaded')
+            self.assertEqual(payload['html'],body)
+            self.assertTrue(parse(body).empty)
+        from data.pipelines.historical_financial_reconciliation import missing_category
+        self.assertEqual(missing_category('official_financial_section_without_tables',{}),
+                         'official_section_without_value_tables_requires_lineage_review')
+
     def test_financial_chapter_not_its_other_financial_matters_subsection(self):
         index=financial_index()
         other=index[index.index('var node1'):].replace('node1','node2').replace('III. 재무에 관한 사항','8. 기타 재무에 관한 사항').replace('"3"','"300"')
@@ -111,6 +238,25 @@ class DisclosureFinancialTests(unittest.TestCase):
         body+=table([['과목','제13기말'],['자산총계','300'],['부채총계','100'],['자본총계','200']])
         html='<p>2. 연결재무제표</p><p>3. 연결재무제표 주석</p><p>연결재무제표는 한국채택국제회계기준에 따라 작성되었습니다.</p>'+body
         self.assertTrue(parse(html).empty)
+
+    def test_partial_summary_does_not_prevent_a_coherent_primary_statement_group(self):
+        balance=table([['재무상태표'],['제13기 2022년 12월 31일 현재'],['회사 (단위: 원)']])
+        balance+=table([['과목','제13기말'],['자산총계','300000001'],['부채총계','100000001'],['자본총계','200000000']])
+        income=table([['손익계산서'],['제13기 2022년 1월 1일부터 2022년 12월 31일까지'],['회사 (단위: 원)']])
+        income+=table([['과목','제13기'],['매출액','1000000000'],['영업이익','50000000'],['당기순이익','40000000']])
+        note='5. 재무제표 주석 한국채택국제회계기준에 따라 작성된 2022년 12월 31일자로 종료하는 회계연도에 대한 연차별도재무제표'
+        html='1. 요약별도재무정보 (단위: 백만원)'+table(summary()[:5])+'4. 재무제표'+balance+income+note
+        result=summarize_asof(parse(html),'12345678','2023-04-01')
+        self.assertEqual(result['revenue'],1000000000)
+        self.assertEqual(result['total_assets'],300000001)
+        self.assertAlmostEqual(result['operating_margin'],.05)
+        details={}
+        conflict=html.replace("<td>300000001</td>","<td>400000001</td>")
+        frame=parse_disclosure_financials(conflict,'12345678','20230315000001','2023-03-15','https://dart.fss.or.kr/report/viewer.do',details)
+        self.assertTrue(frame.empty)
+        self.assertEqual(len(details['official_statement_amount_conflicts']),1)
+        predecessor=parse(html.replace('제13기 2022','제13기(분할전) 2022'))
+        self.assertNotIn('revenue',predecessor.get('account_name_en',pd.Series(dtype=str)).tolist())
 
     def test_adjacent_explicit_ifrs_preparation_basis_variant(self):
         html='1. 요약연결재무정보 (단위: 원)'+table(summary(standard=False))

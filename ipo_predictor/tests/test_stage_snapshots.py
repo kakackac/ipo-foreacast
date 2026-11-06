@@ -4,9 +4,10 @@ import json
 import hashlib
 from pathlib import Path
 from unittest.mock import patch
+from types import SimpleNamespace
 import pandas as pd
 
-from data.pipelines.stage_snapshots import demand_schedule, stage_documents, values_from_document, amendment_view, horizontal_after_cells, original_cache_hashes, reusable_checkpoint, document_analysis, section_text, StageResponseInvalid, result_day_document, same_demand_printed_rounding, set_stage_offering_price_metadata, stage_collection_fields, stage_observation
+from data.pipelines.stage_snapshots import demand_schedule, stage_documents, values_from_document, amendment_view, horizontal_after_cells, original_cache_hashes, reusable_checkpoint, document_analysis, section_text, StageResponseInvalid, result_day_document, same_demand_printed_rounding, set_stage_offering_price_metadata, stage_collection_fields, stage_observation, stage_checkpoint_identity, stage_financial_missing_reason
 from features.model_profiles import get_model_profile
 from features.prediction_time_contract import validate_prediction_times
 
@@ -16,6 +17,42 @@ def schedule(start='2024년 02월 08일',end='02월 09일'):
 
 
 class StageSnapshotTests(unittest.TestCase):
+    def test_changed_parent_parser_cannot_supply_stale_disclosure_values(self):
+        from data.pipelines.stage_snapshots import current_annual_history
+        rows=pd.DataFrame([{'report_code':'IPO_FINANCIAL_DISCLOSURE','amount':999},
+                           {'report_code':'11011','amount':100}])
+        self.assertIs(current_annual_history(rows,True),rows)
+        self.assertEqual(current_annual_history(rows,False).amount.tolist(),[100])
+        self.assertTrue(current_annual_history(rows.iloc[:1],False).empty)
+        self.assertTrue(current_annual_history(rows.drop(columns='report_code'),False).empty)
+
+    def test_financial_missing_reason_is_not_a_successful_collection_label(self):
+        verified={'financial_time_validation_status':'verified_dart_annual_financial_asof_v1','equity':0,'revenue':0}
+        self.assertEqual(stage_financial_missing_reason('revenue_growth_3y',verified,'annual_accounts_extracted'),
+                         'positive_same_basis_revenue_endpoints_three_years_apart_unverified')
+        self.assertEqual(stage_financial_missing_reason('operating_margin',verified,'annual_accounts_extracted'),
+                         'nonpositive_revenue_margin_undefined')
+        self.assertEqual(stage_financial_missing_reason('debt_ratio',verified,'annual_accounts_extracted'),
+                         'nonpositive_equity_ratio_undefined')
+        self.assertEqual(stage_financial_missing_reason('debt_ratio',{'financial_time_validation_status':'no_verified_pre_cutoff_krw_annual_values'},'annual_accounts_extracted'),
+                         'no_verified_pre_cutoff_krw_annual_values')
+        self.assertEqual(stage_financial_missing_reason('debt_ratio',{},'official_financial_section_without_tables'),
+                         'official_financial_section_without_tables')
+        self.assertIsNone(stage_financial_missing_reason('debt_ratio',{**verified,'debt_ratio':.5},'annual_accounts_extracted'))
+
+    def test_checkpoint_identity_pins_stored_annual_parser_reuse_decision(self):
+        event=SimpleNamespace(record='{}',proof='{}')
+        identity={'builder':'builder','dependency_sha256':{'financial_parser':'current'},'parser':'demand'}
+        annual=pd.DataFrame([{'year':2023,'revenue':100}])
+        target=pd.Series({'offering_price':1000,'open_return_pct':10,'close_return_pct':20,
+                          'listing_date':pd.Timestamp('2024-03-01')})
+        reusable=stage_checkpoint_identity(event,identity,'index',annual,target,True)
+        reparsed=stage_checkpoint_identity(event,identity,'index',annual,target,False)
+        self.assertNotEqual(reusable,reparsed)
+        self.assertEqual({k:v for k,v in reusable.items() if k!='annual_parser_reusable'},
+                         {k:v for k,v in reparsed.items() if k!='annual_parser_reusable'})
+        self.assertEqual(reusable,stage_checkpoint_identity(event,identity,'index',annual,target,True))
+
     def test_collection_is_a_superset_not_a_mutation_of_model_profiles(self):
         before=get_model_profile('post_demand').feature_names
         fields=stage_collection_fields()
@@ -176,6 +213,38 @@ class StageSnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, patch('data.pipelines.disclosure_connections.time.sleep'):
             with self.assertRaises(StageResponseInvalid):section_text(Transport(),'https://dart.fss.or.kr/report/viewer.do?rcpNo=20240101000001',Path(root),False)
             self.assertEqual(list(Path(root).glob('*.json')),[])
+
+    def test_authentic_empty_financial_chapter_is_not_a_transport_failure(self):
+        body="""<html><head><link rel="stylesheet" href="/css/report_xml.css"></head>
+        <body><p class="section-1">Ⅲ. 재무에 관한 사항</p>
+        <p class="section-2">1. 요약재무정보</p><p><br></p></body></html>"""
+        class Response:
+            text=body
+            def raise_for_status(self):pass
+        class Session:
+            def get(self,*args,**kwargs):return Response()
+        class Transport:session=Session()
+        with tempfile.TemporaryDirectory() as root,patch('data.pipelines.disclosure_connections.time.sleep'):
+            text,sha=section_text(Transport(),'https://dart.fss.or.kr/report/viewer.do?rcpNo=20150306000022',Path(root),False,financial=True)
+            self.assertEqual(text,body);self.assertEqual(sha,hashlib.sha256(body.encode()).hexdigest())
+            self.assertEqual(len(list(Path(root).glob('*.json'))),1)
+        with tempfile.TemporaryDirectory() as root,patch('data.pipelines.disclosure_connections.time.sleep'):
+            with self.assertRaises(StageResponseInvalid):
+                section_text(Transport(),'https://dart.fss.or.kr/report/viewer.do?rcpNo=20150306000022',Path(root),False)
+
+    def test_empty_financial_exception_does_not_accept_generic_or_scripted_error_pages(self):
+        for body in ['<html><body>temporary service error</body></html>',
+                     '<html><head><link href="/css/report_xml.css"></head><body><p class="section-1">Ⅲ. 재무에 관한 사항</p><script>alert("error")</script></body></html>']:
+            class Response:
+                text=body
+                def raise_for_status(self):pass
+            class Session:
+                def get(self,*args,**kwargs):return Response()
+            class Transport:session=Session()
+            with tempfile.TemporaryDirectory() as root,patch('data.pipelines.disclosure_connections.time.sleep'):
+                with self.assertRaises(StageResponseInvalid):
+                    section_text(Transport(),'https://dart.fss.or.kr/report/viewer.do?rcpNo=20150306000022',Path(root),False,financial=True)
+                self.assertEqual(list(Path(root).glob('*.json')),[])
     def test_document_numbers_parse_once_and_a_bad_cache_is_not_trusted(self):
         class Parser:
             calls=0
