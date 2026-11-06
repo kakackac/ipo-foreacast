@@ -26,6 +26,35 @@ def missing_category(status, details):
     return 'annual_basis_identity_or_integrity_unverified'
 
 
+def unresolved_event_ids(processed, fallback):
+    """Use the latest verified cohort, not the original 632-row repair's hold list."""
+    pointer=Path(processed)/'current_reconciliation_run.json'
+    if not pointer.exists():return set(fallback.loc[fallback.missing_category.ne('not_missing'),'event_id']),set(fallback.event_id),fallback
+    reference=json.loads(pointer.read_text());manifest=(Path(processed)/reference['manifest']).resolve()
+    if not manifest.is_relative_to(Path(processed).resolve()/'reconciliation_runs') or digest(manifest)!=reference['sha256']:
+        raise RuntimeError('financial_previous_run_pointer_invalid')
+    run=json.loads(manifest.read_text());financial=Path(run['financial']).resolve()
+    if (not financial.is_relative_to(Path(processed).resolve()/'historical_financial_reconciliations')
+            or digest(financial/'manifest.json')!=run['input_sha256']['financial']):
+        raise RuntimeError('financial_previous_resolution_pointer_invalid')
+    checked_artifact(financial)
+    resolutions=pd.read_parquet(financial/'resolutions.parquet')
+    if resolutions.event_id.duplicated().any():raise RuntimeError('financial_previous_resolution_duplicate_event')
+    return set(resolutions.loc[resolutions.missing_category.ne('not_missing'),'event_id']),set(resolutions.event_id),resolutions
+
+
+def connected_lineage(connections):
+    rows=[]
+    for row in connections.itertuples(index=False):
+        if row.status!='official_sources_connected':raise RuntimeError('financial_connection_unverified')
+        proof=json.loads(row.proof);record=json.loads(row.record)
+        if str(proof['corp_code'])!=str(record['corp_code']):raise RuntimeError('financial_connection_corp_code_conflict')
+        for bundle in [proof,proof.get('supplementary',{})]:
+            rows.extend({'event_id':row.event_id,'corp_code':proof['corp_code'],**entry,
+                'filing_report_nm':entry['report_nm']} for entry in bundle.get('family',[]))
+    return pd.DataFrame(rows).drop_duplicates(['event_id','corp_code','rcept_no'])
+
+
 def run(raw_dir, processed_dir, *, unresolved_only=False, dart=None):
     raw,processed=Path(raw_dir).resolve(),Path(processed_dir).resolve()
     inputs=load_inputs(raw,processed)
@@ -33,33 +62,23 @@ def run(raw_dir, processed_dir, *, unresolved_only=False, dart=None):
     records=inputs['records'].set_index('event_id')
     events=inputs['events']
     targets=events[events.event_class.eq('general_ipo') & events.event_id.isin(records.index)].copy()
-    lineage=pd.read_parquet(raw/'dart_disclosure_lineage.parquet')
-    connection_hash=None
+    pointer=json.loads((processed/'current_historical_source_connections.json').read_text())
+    manifest=(processed/pointer['manifest']).resolve()
+    if not manifest.is_relative_to(processed/'historical_reconciliations') or digest(manifest)!=pointer['sha256']:
+        raise RuntimeError('financial_connection_pointer_invalid')
+    report=checked_artifact(manifest.parent)
+    if report['inputs']['inputs']!=inputs['input_sha256']:
+        raise RuntimeError('financial_connection_inputs_changed')
+    connections=pd.read_parquet(manifest.parent/'connection_results.parquet')
+    if set(connections.event_id)!=set(targets.event_id) or connections.event_id.duplicated().any():
+        raise RuntimeError('financial_connection_population_incomplete')
+    lineage=connected_lineage(connections)
+    connection_hash=digest(manifest)
+    scope='all_connected_general_ipo_financial_sections'
     if unresolved_only:
-        targets=targets[targets.event_id.isin(resolutions.loc[resolutions.missing_category.ne('not_missing'),'event_id'])]
-        scope='previous_financial_unresolved_only_not_full_version'
-    else:
-        pointer=json.loads((processed/'current_historical_source_connections.json').read_text())
-        manifest=(processed/pointer['manifest']).resolve()
-        if not manifest.is_relative_to(processed/'historical_reconciliations') or digest(manifest)!=pointer['sha256']:
-            raise RuntimeError('financial_connection_pointer_invalid')
-        report=checked_artifact(manifest.parent)
-        if report['inputs']['inputs']!=inputs['input_sha256']:
-            raise RuntimeError('financial_connection_inputs_changed')
-        connections=pd.read_parquet(manifest.parent/'connection_results.parquet')
-        if set(connections.event_id)!=set(targets.event_id):
-            raise RuntimeError('financial_connection_population_incomplete')
-        verified_lineage=[]
-        for row in connections.itertuples(index=False):
-            if row.status!='official_sources_connected':
-                continue
-            proof=json.loads(row.proof)
-            for bundle in [proof,proof.get('supplementary',{})]:
-                verified_lineage.extend({'event_id':row.event_id,'corp_code':proof['corp_code'],
-                    **entry,'filing_report_nm':entry['report_nm']} for entry in bundle.get('family',[]))
-        lineage=pd.DataFrame(verified_lineage).drop_duplicates(['event_id','corp_code','rcept_no'])
-        connection_hash=digest(manifest)
-        scope='all_connected_general_ipo_financial_sections'
+        held,previous,resolutions=unresolved_event_ids(processed,resolutions)
+        targets=targets[targets.event_id.isin(held) | ~targets.event_id.isin(previous)]
+        scope='latest_financial_unresolved_only_not_full_version'
     dart=dart or DARTCollector()
     parser=Path(__file__).with_name('disclosure_financials.py')
     code={'parser':digest(parser),'summary':digest(Path(__file__).with_name('financial_history.py')),'runner':digest(Path(__file__))}

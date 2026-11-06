@@ -43,6 +43,11 @@ SAMPLES = {
     "atgen_lockup_2015": "20151013000034",
     "curiox_lockup_2023": "20230731000302",
     "nrb_lockup_2025": "20250716000293",
+    "futuretech_lockup_2015": "20151118000030",
+    "paxnet_lockup_2016": "20160714000305",
+    "giantstep_lockup_2021": "20210312000380",
+    "voronoi_lockup_zero_2022": "20220613000198",
+    "sinsin_quantity_conflict_2017": "20170214000585",
 }
 
 
@@ -142,6 +147,7 @@ def main():
                    "maxst_prospectus_2021": "Ⅰ. 모집 또는 매출에 관한 일반사항"}.get(name)
         if name in {'airbusan_risks_2018','koreacenter_risks_2019'}:
             section='Ⅲ. 투자위험요소'
+        section=references.get(name,{}).get('section_title') or section
         parameters = select_document(index, receipt, section)
         if not parameters:
             records.append({"sample": name, "receipt": receipt, "status": "viewer_link_not_found"})

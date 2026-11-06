@@ -269,6 +269,47 @@
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20250716000293&dcmNo=10725169&eleId=1&offset=653&length=703336&dtd=dart4.xsd",
       "sha256": "c5972b536871b193d7917ff4c0a7b6605cb3c1819e28b2e1cd844039da275146",
       "expected": {"lockup_commitment_ratio": 0.007667461611157976}
+    },
+    {
+      "sample": "futuretech_lockup_2015",
+      "receipt": "20151118000030",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20151118000030&dcmNo=4857671&eleId=9&offset=109713&length=113293&dtd=dart3.xsd",
+      "sha256": "1c45c40ebb752a5f889dcde5355d61bdc53ebd28b1600db7d51b8857fa09930e",
+      "expected": {"lockup_commitment_ratio": 0.08346053913608315}
+    },
+    {
+      "sample": "paxnet_lockup_2016",
+      "receipt": "20160714000305",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160714000305&dcmNo=5220920&eleId=9&offset=186304&length=103459&dtd=dart3.xsd",
+      "sha256": "9d9cbc8b94131e9862e3049c5834cae6aeb7315d44b0015dd93c07f1caeb6c7b",
+      "expected": {"lockup_commitment_ratio": 0.0519, "institutional_demand_ratio": 753.07}
+    },
+    {
+      "sample": "giantstep_lockup_2021",
+      "receipt": "20210312000380",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210312000380&dcmNo=7870220&eleId=7&offset=288321&length=160101&dtd=dart3.xsd",
+      "sha256": "f0fa1f9f0cf95dfb7da1c32de57373956d2214f0a2cc17e8de8cbfba274a6ff7",
+      "expected": {"lockup_commitment_ratio": 0.2442}
+    },
+    {
+      "sample": "voronoi_lockup_zero_2022",
+      "receipt": "20220613000198",
+      "section_title": "I. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20220613000198&dcmNo=8698117&eleId=7&offset=438695&length=209318&dtd=dart3.xsd",
+      "sha256": "8fd57c85ce17b7edc27d2961531a20791bd6a951d9bc39f18e207088105594c0",
+      "expected": {"lockup_commitment_ratio": 0}
+    },
+    {
+      "sample": "sinsin_quantity_conflict_2017",
+      "receipt": "20170214000585",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170214000585&dcmNo=5445310&eleId=9&offset=234095&length=126309&dtd=dart3.xsd",
+      "sha256": "7fe25053311a45a76d462600cfe16763b80544510f8de17937bfcb4fc0c2ae89",
+      "review": "Participation summary states 100002000 shares; lockup table states 102002000. Lockup NULL means unresolved quantity conflict, not nonpublication.",
+      "expected": {"institutional_demand_ratio": 40.88, "lockup_commitment_ratio": null}
     }
   ]
 }

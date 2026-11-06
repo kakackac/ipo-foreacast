@@ -20,7 +20,7 @@ from features.source_contracts import DART_STRUCTURAL_AGGREGATE_STATUS
 
 BASELINE = '9b4237a'
 METHODS = {'_extract_lockup_ratios_from_tables', '_extract_disclosed_aggregate_lockup_ratio',
-           '_extract_aggregate_lockup_shares'}
+           '_extract_aggregate_lockup_shares', '_extract_aggregate_demand_ratio'}
 
 
 def unchanged_other_parser_logic(before, after):
@@ -145,6 +145,44 @@ def reprocess_record(raw, record, proof, dart, *, allow_reuse=False):
     return updated, proof
 
 
+def reprocess_institutional_record(raw, record, proof, dart):
+    cutoff=pd.Timestamp(record['listing_date']).normalize()-pd.Timedelta(hours=3)
+    attempts=[];chosen=None;first=None
+    for metadata,bundle,body in documents(raw,record,proof):
+        if pd.Timestamp(metadata['rcept_dt'])+pd.Timedelta(days=1)>=cutoff:
+            raise RuntimeError('institutional_reprocessing_publication_after_cutoff')
+        parsed=dart._parse_demand_forecast_html(body,str(record['corp_code']))
+        first=first or (metadata,bundle,parsed)
+        attempts.append({'receipt':metadata['rcept_no'],'published':metadata['rcept_dt'],
+            'sections':bundle['sections'],'parser_status':parsed['institutional_demand_parser_validation_status'],
+            'rule':parsed.get('institutional_demand_rule_id'),'reason':parsed.get('institutional_demand_rejection_reason')})
+        if parsed['institutional_demand_parser_validation_status']=='candidate_rejected':break
+        value=parsed.get('institutional_demand_ratio')
+        if value is not None:
+            if (parsed['institutional_demand_parser_validation_status']!='structurally_verified'
+                    or not parsed.get('institutional_demand_rule_id') or not math.isfinite(value) or value<0):
+                raise RuntimeError('institutional_reprocessing_invalid_candidate')
+            chosen=(metadata,bundle,parsed);break
+    metadata,bundle,parsed=chosen or first
+    updated={k:v for k,v in record.items() if not k.startswith('institutional_') or k=='institutional_data_contract_version'}
+    updated.update({k:v for k,v in parsed.items() if k.startswith('institutional_demand_')})
+    updated.update(institutional_demand_ratio=parsed['institutional_demand_ratio'] if chosen else None,
+        institutional_validation_status=DART_STRUCTURAL_AGGREGATE_STATUS if chosen else 'dart_aggregate_value_not_verified',
+        institutional_rcept_no=metadata['rcept_no'],institutional_rcept_dt=metadata['rcept_dt'],
+        institutional_available_at=metadata['rcept_dt'],institutional_source_url=bundle['source_url'],
+        institutional_source_sha256='|'.join(sorted(s['sha256'] for s in bundle['sections'])),
+        institutional_source_scope='dart_lineage_aggregate_institutional',institutional_parser_version=DEMAND_PARSER_VERSION)
+    if {k:v for k,v in updated.items() if not k.startswith('institutional_')}!={
+            k:v for k,v in record.items() if not k.startswith('institutional_')}:
+        raise RuntimeError('institutional_reprocessing_outside_field_changed')
+    proof=json.loads(json.dumps(proof));proof.setdefault('field_sources',{}).pop('institutional_demand_ratio',None)
+    if chosen:
+        proof['field_sources']['institutional_demand_ratio']={'receipt':metadata['rcept_no'],
+            'source_url':bundle['source_url'],'available_at':(pd.Timestamp(metadata['rcept_dt']).tz_localize('Asia/Seoul')+pd.Timedelta(days=1)).isoformat()}
+    proof['institutional_reprocessing']={'parser_version':DEMAND_PARSER_VERSION,'attempts':attempts}
+    return updated,proof
+
+
 def run(raw_dir, processed_dir, dart=None):
     raw, processed = Path(raw_dir).resolve(), Path(processed_dir).resolve()
     if not (processed/'current_historical_source_connections.json').exists():
@@ -194,16 +232,22 @@ def run(raw_dir, processed_dir, dart=None):
         else:
             record, proof = reprocess_record(raw, old, json.loads(row.proof), dart,
                 allow_reuse=report.get('lockup_field_reprocessing', {}).get('code', {}).get('parser')==code['parser'])
+            record, proof = reprocess_institutional_record(raw, record, proof, dart)
             payload = {'record':record, 'proof':proof}
             atomic_json(checkpoint, {'event_id':row.event_id, 'payload':payload,
                 'sha256':hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()})
         connections.at[index, 'record'] = json.dumps(record, ensure_ascii=False)
         connections.at[index, 'proof'] = json.dumps(proof, ensure_ascii=False)
         before, after = old.get('lockup_commitment_ratio'), record['lockup_commitment_ratio']
+        if {k:v for k,v in old.items() if not k.startswith(('lockup_','institutional_'))}!={
+                k:v for k,v in record.items() if not k.startswith(('lockup_','institutional_'))}:
+            raise RuntimeError('demand_reprocessing_unrelated_field_changed')
         audit.append({'event_id':row.event_id, 'corp_name':row.corp_name, 'before':before, 'after':after,
             'disposition':'recovered' if before is None and after is not None else
                           'held' if after is None else 'retained_or_revalidated',
-            'other_fields_unchanged':True, 'receipt':record['lockup_rcept_no'],
+            'institutional_before':old.get('institutional_demand_ratio'),
+            'institutional_after':record.get('institutional_demand_ratio'),
+            'unrelated_fields_unchanged':True, 'receipt':record['lockup_rcept_no'],
             'rule':record['lockup_rule_id'], 'extraction_reused':proof['lockup_reprocessing'].get('extraction_reused',False),
             'attempts':json.dumps(proof['lockup_reprocessing']['attempts'],ensure_ascii=False)})
         if len(audit)%100 == 0:
@@ -213,7 +257,7 @@ def run(raw_dir, processed_dir, dart=None):
         raise RuntimeError('lockup_reprocessing_inputs_changed')
     identity = {'parent_manifest':str((parent/'manifest.json').relative_to(processed)),
         'parent_sha256':digest(parent/'manifest.json'), 'code':code,
-        'scope':'lockup_only_other_parser_AST_identical', 'baseline_commit':BASELINE}
+        'scope':'institutional_and_lockup_fields_other_parser_AST_identical', 'baseline_commit':BASELINE}
     version = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:20]
     destination = processed/'historical_reconciliations'/version
     if not destination.exists():
@@ -227,7 +271,8 @@ def run(raw_dir, processed_dir, dart=None):
             'source_archive_policy':'parent_manifest_archive_plus_amendment_originals',
             'replay_contract':connection_contract(), 'lockup_field_reprocessing':{
                 'code':code, 'processed':len(audit), 'dispositions':pd.DataFrame(audit).disposition.value_counts().to_dict(),
-                'other_fields_unchanged':True, 'checkpoint_batch':batch,
+                'reprocessed_fields':['institutional_demand_ratio','lockup_commitment_ratio'],
+                'unrelated_fields_unchanged':True, 'checkpoint_batch':batch,
                 'unchanged_extractions_reused':sum(a['extraction_reused'] for a in audit),
                 'started_at':started, 'finished_at':pd.Timestamp.now(tz='Asia/Seoul').isoformat()},
             'output_sha256':{f.name:digest(f) for f in staging.iterdir()}}

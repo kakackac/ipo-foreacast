@@ -599,7 +599,7 @@ if __name__ == "__main__":
             "train", "backtest", "analyze", "demo", "collect", "collect-events",
             "audit-dart-failures", "prepare-underwriter-institutional-review-queue",
             "audit-underwriter-source-readiness", "build-research-dataset", "collect-and-build",
-            "plan-financials", "collect-financials", "collect-snapshot-prices", "integrate-event-snapshot", "collect-event-disclosures", "collect-event-context", "recover-historical-events", "reconcile-historical-sources", "reconcile-historical-financials", "build-reconciled-dataset", "collect-reconciled-context", "reconcile-data",
+            "plan-financials", "collect-financials", "collect-snapshot-prices", "integrate-event-snapshot", "collect-event-disclosures", "collect-event-context", "recover-historical-events", "reconcile-historical-sources", "reconcile-historical-financials", "build-reconciled-dataset", "collect-reconciled-context", "reconcile-data", "build-stage-snapshots",
         ],
         default="demo",
         help="실행 모드",
@@ -631,6 +631,8 @@ if __name__ == "__main__":
     parser.add_argument("--financial-limit", type=int, help="재무 수집 공식 API 검증용 연도 분산 표본 개수")
     parser.add_argument("--recovery-limit", type=int, help="과거 누락 이벤트 복구 표본 개수; 전체 복구 버전 포인터는 갱신하지 않음")
     parser.add_argument("--reconcile-limit", type=int, help="기존 공식 원천 연결 검증의 연도 분산 표본 개수")
+    parser.add_argument("--stage-limit",type=int,help="단계 스냅샷의 제한 표본 수; 전체 단계 포인터는 바꾸지 않음")
+    parser.add_argument('--stage-event-id',action='append',help='필요한 공식 이벤트 ID만 단계 원문 수집/재처리; 전체 단계 포인터는 바꾸지 않음')
     parser.add_argument("--financial-unresolved-only", action="store_true",
                         help="기존 재무 미해결 범위만 별도 재처리; 전체 통합 버전 포인터는 변경하지 않음")
     parser.add_argument("--financial-reconciliation", type=Path,help="통합 저장에 연결할 전체 대상 재무 재검증 버전")
@@ -680,6 +682,13 @@ if __name__ == "__main__":
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.research_dataset import run
         print(json.dumps(run(RAW_DIR, PROC_DIR, financial_repair=args.financial_repair), ensure_ascii=False))
+    elif args.mode == 'build-stage-snapshots':
+        from config import RAW_DIR, PROC_DIR
+        from data.pipelines.stage_snapshots import run
+        if not args.connection_cached_only and args.stage_limit is None and not args.stage_event_id:
+            parser.error('단계 원문 수집은 --stage-event-id 또는 --stage-limit로 필요한 대상만 지정하세요. 저장 원문 전체 재처리는 --connection-cached-only를 사용하세요.')
+        print(json.dumps(run(RAW_DIR,PROC_DIR,cached_only=args.connection_cached_only,
+                             event_limit=args.stage_limit,event_ids=args.stage_event_id),ensure_ascii=False))
     elif args.mode == 'reconcile-data':
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.reconciliation_run import run
