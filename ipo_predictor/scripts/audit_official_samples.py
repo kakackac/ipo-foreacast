@@ -40,6 +40,9 @@ SAMPLES = {
     "yas_correction_2017": "20170926000244",
     "airbusan_risks_2018": "20181217000216",
     "koreacenter_risks_2019": "20191120000496",
+    "atgen_lockup_2015": "20151013000034",
+    "curiox_lockup_2023": "20230731000302",
+    "nrb_lockup_2025": "20250716000293",
 }
 
 

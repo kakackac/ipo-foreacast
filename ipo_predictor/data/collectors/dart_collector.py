@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 13
+DEMAND_PARSER_VERSION = 14
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -1246,7 +1246,7 @@ class DARTCollector:
                 quantity_columns = [i for i, cell in enumerate(header)
                                     if re.fullmatch(r"\s*(?:참여|신청)\s*수량\s*\((?:단위\s*:\s*)?주\)\s*", cell)]
                 totals = [row for row in table if row and
-                          re.fullmatch(r"\s*총\s*(?:참여건수\s*(?:및|또는)\s*신청)?수량\s*대비\s*비율\s*(?:\(%\))?\s*", row[0])]
+                          re.fullmatch(r"\s*총\s*(?:참여건수\s*(?:및|또는|/)\s*신청)?수량\s*대비\s*(?:비율|율)\s*(?:\(%\))?\s*", row[0])]
                 if len(quantity_columns) == 1 and len(totals) == 1:
                     column = quantity_columns[0]
                     row = totals[0]
@@ -1390,7 +1390,9 @@ class DARTCollector:
         if not any(row and re.fullmatch(r"\d+\s*(?:개월|일)\s*확약", row[0]) for row in table):
             return None
         for index, row in enumerate(table):
-            if not row or re.sub(r"\s+", "", row[0]) != "총참여건수및신청수량대비비율":
+            if not row or not re.fullmatch(
+                r"총참여건수및(?:신청)?수량대비비율(?:\(%\))?", re.sub(r"\s+", "", row[0])
+            ):
                 continue
             headers = table[:index]
             columns = [c for c in range(len(row))
@@ -1404,7 +1406,7 @@ class DARTCollector:
                 return {
                     "lockup_commitment_ratio": float(match[1]) / 100,
                     "parse_method": "lockup_explicit_aggregate_quantity_percentage",
-                    "rule_id": "DART_LOCKUP_AGGREGATE_QUANTITY_PERCENT_V1",
+                    "rule_id": "DART_LOCKUP_AGGREGATE_QUANTITY_PERCENT_V2",
                     "parser_validation_status": "structurally_verified",
                     "evidence": " | ".join(row),
                     "structured_evidence": cls._table_evidence(
@@ -1420,8 +1422,10 @@ class DARTCollector:
         text = " ".join(" ".join(row) for row in table)
         if re.search(r"최대\s*주주|기존\s*주주|보유\s*주식|매각제한", text):
             return None
-        start = next((i for i, row in enumerate(table) if row and
-                      re.fullmatch(r"\s*\d+\s*(?:개월|일)\s*확약\s*", row[0])), None)
+        if not any(row and re.fullmatch(r"\d+(?:개월|일)확약", re.sub(r"\s+", "", row[0])) for row in table):
+            return None
+        start = next((i for i, row in enumerate(table) if row and re.fullmatch(
+            r"\d+(?:개월|일)확약|미확약|확약없음", re.sub(r"\s+", "", row[0]))), None)
         if start is None:
             return None
         headers = table[:start]
@@ -1453,7 +1457,7 @@ class DARTCollector:
             if not row or column >= len(row):
                 return None
             label = re.sub(r"\s+", "", row[0])
-            if label == '계':
+            if label in {'계', '총합계', '총계'}:
                 if application_total is None:
                     return None
                 label = '합계'
@@ -1490,7 +1494,7 @@ class DARTCollector:
         return {
             "lockup_commitment_ratio": committed / total,
             "parse_method": "lockup_reconciled_aggregate_quantity",
-            "rule_id": "DART_LOCKUP_RECONCILED_TOTAL_QUANTITY_V1",
+            "rule_id": "DART_LOCKUP_RECONCILED_TOTAL_QUANTITY_V2",
             "parser_validation_status": "structurally_verified",
             "evidence": f"committed={committed}; noncommitted={none}; total={total}",
             "structured_evidence": cls._table_evidence(
@@ -1500,6 +1504,7 @@ class DARTCollector:
                 independently_disclosed_application_total=application_total,
                 dash_rows_reconciled_as_zero=dash_rows,
                 total_label_alias_reconciled=total_label_alias,
+                row_order_independent=True,
             ),
         }
 

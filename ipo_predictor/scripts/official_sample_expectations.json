@@ -248,6 +248,27 @@
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20191120000496&dcmNo=6967054&eleId=17&offset=561146&length=307625&dtd=dart3.xsd",
       "sha256": "18dc936d0d62ce2812c2651ea8b29dee4f15de75b2b9ec43e08ad9097a62f54d",
       "expected": {"public_float_shares": 2396023, "total_post_listing_shares": 24031048, "public_float_ratio_disclosed": 0.0997}
+    },
+    {
+      "sample": "atgen_lockup_2015",
+      "receipt": "20151013000034",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20151013000034&dcmNo=4822903&eleId=1&offset=727&length=130062&dtd=dart3.xsd",
+      "sha256": "47165dfa6ba623651a77f9878888fd5aaae154b904234808ed2ca44d11bda629",
+      "expected": {"lockup_commitment_ratio": 0.406}
+    },
+    {
+      "sample": "curiox_lockup_2023",
+      "receipt": "20230731000302",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230731000302&dcmNo=9368109&eleId=1&offset=646&length=258669&dtd=dart3.xsd",
+      "sha256": "b0b317306ccf99783a21aee804283fd59a8540a3b125a69d4f2bf85a7026d80a",
+      "expected": {"lockup_commitment_ratio": 0.0263}
+    },
+    {
+      "sample": "nrb_lockup_2025",
+      "receipt": "20250716000293",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20250716000293&dcmNo=10725169&eleId=1&offset=653&length=703336&dtd=dart4.xsd",
+      "sha256": "c5972b536871b193d7917ff4c0a7b6605cb3c1819e28b2e1cd844039da275146",
+      "expected": {"lockup_commitment_ratio": 0.007667461611157976}
     }
   ]
 }

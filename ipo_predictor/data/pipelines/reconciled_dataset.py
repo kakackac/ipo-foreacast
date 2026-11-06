@@ -201,7 +201,7 @@ def run(raw_dir,processed_dir,financial_version):
             identity=originals.loc[row.event_id]
             records.append({key:identity[key] for key in ('event_id','corp_code','corp_name','listing_date','rcept_no')})
     untouched=inputs['records'][~inputs['records'].event_id.isin(general)]
-    candidates=pd.concat([untouched,pd.DataFrame(records)],ignore_index=True)
+    candidates=pd.concat([untouched,pd.DataFrame(records)],ignore_index=True).copy()
     for field in FINANCIAL_VALUES:
         candidates[field]=float('nan')
     for field in ['financial_feature_provenance','financial_time_validation_status','financial_available_at']:
