@@ -63,6 +63,12 @@ SAMPLES = {
     "straffic_final_2017": "20171122000164",
     "ctk_final_2017": "20171124000037",
     "ecomaister_final_2018": "20180302000254",
+    "haitai_terms_2016": "20160426000421",
+    "sunic_terms_2017": "20170907000115",
+    "iljin_terms_conflict_2021": "20210823000374",
+    "iljin_prospectus_conflict_2021": "20210823000386",
+    "design_malformed_rate_2018": "20181106000423",
+    "gnbs_independent_lockup_2021": "20211018000277",
 }
 
 
@@ -136,7 +142,7 @@ def verify_record(record, reference):
             problems.append(f"missing_output:{key}")
             continue
         actual = values[key]
-        agrees = actual is None if expected is None else (
+        agrees = actual is None if expected is None else actual == expected if isinstance(expected,str) else (
             isinstance(actual, (int, float)) and not isinstance(actual, bool)
             and math.isclose(actual, expected, rel_tol=1e-9, abs_tol=1e-9)
         )

@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 23
+DEMAND_PARSER_VERSION = 24
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -509,10 +509,12 @@ class DARTCollector:
                 result.update(parsed_table)
                 break
 
-        if result["institutional_demand_ratio"] is None and re.search(
+        if (result["institutional_demand_ratio"] is None
+                and result['institutional_demand_rejection_reason']!='institutional_aggregate_numeric_grouping_invalid'
+                and re.search(
             r"(?:기관\s*(?:투자자)?|수요\s*예측).*?[0-9][0-9,]*(?:\.[0-9]+)?\s*(?::|：|대)\s*1\b",
             text,
-        ):
+        )):
             result["institutional_demand_parser_validation_status"] = "candidate_rejected"
             result["institutional_demand_rejection_reason"] = (
                 "risk_or_planned_threshold_context"
@@ -522,7 +524,8 @@ class DARTCollector:
 
         # 표가 아닌 문장에서는 기관 수요예측 라벨과 비율이 직접 연결된 경우만 허용한다.
         demand_blocks = self._extract_table_rows(html) + self._split_sentences(text)
-        for block in demand_blocks if result["institutional_demand_ratio"] is None else []:
+        for block in demand_blocks if (result["institutional_demand_ratio"] is None
+                and result['institutional_demand_rejection_reason']!='institutional_aggregate_numeric_grouping_invalid') else []:
             normalized = re.sub(r"\s+", " ", block).strip()
             if re.search(r"비례\s*배정|일반\s*청약|개인\s*청약|재심의|예정|이하|리스크", normalized):
                 continue
@@ -532,7 +535,7 @@ class DARTCollector:
                 continue
             match = re.search(
                 r"기관\s*(?:투자자)?\s*(?:수요\s*예측\s*)?(?:유효\s*)?경쟁률"
-                r"\s*(?:은|는|:|：)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b",
+                r"\s*(?:은|는|:|：)?\s*((?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b",
                 normalized,
             )
             if match:
@@ -1073,6 +1076,15 @@ class DARTCollector:
         """기관 수요예측 표에서 명시적인 전체/합계 셀의 경쟁률만 승인한다."""
         if not table:
             return None
+        integer = r"(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)"
+        number = integer + r"(?:\.[0-9]+)?"
+        def rejected_number(row, column):
+            return {'institutional_demand_ratio':None,
+                'institutional_demand_parser_validation_status':'candidate_rejected',
+                'institutional_demand_rejection_reason':'institutional_aggregate_numeric_grouping_invalid',
+                'institutional_demand_structured_evidence':cls._table_evidence(
+                    table,heading=heading,selected_row=row,selected_column=column,
+                    scope='aggregate_cell_numeric_format_requires_review')}
         table_text = " ".join(" ".join(row) for row in table)
         # Only the immediate result heading establishes scope. Earlier bidding
         # instructions may mention retail subscriptions and are not this table.
@@ -1097,10 +1109,10 @@ class DARTCollector:
                     and re.fullmatch(r"(?:참여|참가)건수(?:\(건\))?", headers[0])
                     and re.fullmatch(r"(?:신청수량|참여수량|참가수량|참여주식수)(?:\(주\))?", headers[1])
                     and re.fullmatch(r"단순경쟁[률율](?:\([:：]1\))?", headers[2])):
-                counts = [re.fullmatch(r"([0-9][0-9,]*)\s*"+unit+'?'+suffix, c.strip())
+                counts = [re.fullmatch('('+integer+r")\s*"+unit+'?'+suffix, c.strip())
                           for c,unit,suffix in zip(row[:2],['건','주'],
                               [r'(?:\s*\(\s*주\s*[1-9][0-9]*\s*\))?', ''])]
-                rate = re.fullmatch(r"([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s*[:：]\s*1)?", row[2].strip())
+                rate = re.fullmatch('('+number+r")(?:\s*[:：]\s*1)?", row[2].strip())
                 if all(counts) and rate:
                     return {
                         "institutional_demand_ratio": float(rate.group(1).replace(",", "")),
@@ -1131,7 +1143,7 @@ class DARTCollector:
             return None
 
         # The competition-rate row supplies the unit even when cells omit ':1'.
-        ratio_pattern = re.compile(r"([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s*(?::|：|대)\s*1)?")
+        ratio_pattern = re.compile('('+number+r")(?:\s*(?::|：|대)\s*1)?")
         ratio_rows = [
             (index, row) for index, row in enumerate(table)
             if re.search(r"(?:유효\s*|단순\s*)?경쟁[률율]", " ".join(row))
@@ -1142,6 +1154,10 @@ class DARTCollector:
             if re.search(r"합\s*계|총\s*계|전체", row_text):
                 matches = [(index, ratio_pattern.fullmatch(cell.strip())) for index, cell in enumerate(row)]
                 values = [(index, match) for index, match in matches if match]
+                numeric_like=[index for index,cell in enumerate(row) if re.fullmatch(
+                    r'[0-9][0-9,.]*(?:\s*(?::|：|대)\s*1)?',cell.strip())]
+                if not values and len(numeric_like)==1:
+                    return rejected_number(row_index,numeric_like[0])
                 if len(values) == 1:
                     column_index, match = values[0]
                     return {
@@ -1171,6 +1187,9 @@ class DARTCollector:
                 match = ratio_pattern.fullmatch(row[column_index].strip())
                 if match:
                     valid.append((column_index, match))
+                elif len(aggregate_columns)==1 and re.fullmatch(
+                        r'[0-9][0-9,.]*(?:\s*(?::|：|대)\s*1)?',row[column_index].strip()):
+                    return rejected_number(row_index,column_index)
             if len(valid) != 1:
                 continue
             column_index, match = valid[0]

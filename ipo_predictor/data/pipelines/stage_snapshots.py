@@ -306,16 +306,21 @@ def amendment_view(html):
             paragraph.clear();paragraph.append(soup.new_string(text));normalized=True
     note=r'(?:\(\s*주(?:석)?\s*\d+\s*\)|주(?:석)?\s*\d+\s*\)|<\s*주(?:석)?\s*\d+\s*>)'
     marker_line=re.compile(r'(?m)^\s*(?:(?P<before>'+note+r')\s*(?:-\s*)?)?'
-        r'정정\s*(?P<phase>전|후)(?:\s*(?P<after>'+note+r'))?\s*$')
+        r'(?:정정\s*(?P<plain>전|후)\)?|\[\s*정정\s*(?P<bracket>전|후)\s*\]'
+        r'|\(\s*정정\s*(?P<parenthesis>전|후)(?:\s*주(?:석)?\s*\d+)?\s*\))'
+        r'(?:\s*(?P<after>'+note+r'))?\s*$')
     for node in list(soup.find_all(string=True)):
         if node.find_parent('table') is not None:continue
-        text=marker_line.sub(lambda m:(m['before'] or m['after'] or '')+'\n[정정 '+m['phase']+']',str(node))
-        if text!=str(node):
-            for piece in re.split(r'(\[정정 (?:전|후)\])',text):
-                if re.fullmatch(r'\[정정 (?:전|후)\]',piece):
-                    marker=soup.new_tag('span');marker.string=piece;node.insert_before(marker)
-                else:node.insert_before(soup.new_string(piece))
-            node.extract();normalized=True
+        text=str(node);matches=list(marker_line.finditer(text))
+        if matches:
+            end=0
+            for match in matches:
+                node.insert_before(soup.new_string(text[end:match.start()]))
+                node.insert_before(soup.new_string((match['before'] or match['after'] or '')+'\n'))
+                marker=soup.new_tag('span')
+                marker.string='[정정 '+(match['plain'] or match['bracket'] or match['parenthesis'])+']'
+                node.insert_before(marker);end=match.end()
+            node.insert_before(soup.new_string(text[end:]));node.extract();normalized=True
     pattern=r'(<\s*정정\s*(?:전|후)\s*>|■\s*정정\s*(?:전|후))'
     for node in list(soup.find_all(string=re.compile(pattern))):
         for piece in re.split(pattern,str(node)):
@@ -328,7 +333,7 @@ def amendment_view(html):
         node.extract()
     selected,evidence=after_correction_view(str(soup) if normalized else html)
     if normalized:
-        evidence.update(normalization='explicit_standalone_note_angle_or_bullet_markers_to_brackets_v2',
+        evidence.update(normalization='explicit_line_note_parenthesis_angle_or_bullet_markers_to_brackets_v3',
             normalized_sha256=evidence['original_sha256'],original_sha256=hashlib.sha256(html.encode()).hexdigest())
     return selected,evidence
 
@@ -684,6 +689,8 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
         'underwriters':Path(__file__).with_name('underwriter_source.py'),
         'tier_mapping':Path(__file__).parents[1]/'processors/feature_engineer.py',
         'financial_summary':Path(__file__).with_name('financial_history.py'),
+        'correction_views':Path(__file__).with_name('correction_views.py'),
+        'source_document_selection':Path(__file__).with_name('lockup_reconciliation.py'),
         'financial_parser':Path(__file__).with_name('disclosure_financials.py'),
         'float_tables':Path(__file__).parents[1]/'collectors/float_tables.py'}
     identity['dependency_sha256']={name:digest(path) for name,path in dependencies.items()}

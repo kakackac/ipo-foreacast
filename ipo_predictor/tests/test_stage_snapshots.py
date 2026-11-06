@@ -153,6 +153,7 @@ class StageSnapshotTests(unittest.TestCase):
         self.assertTrue(same_demand_printed_rounding(result('187.7 : 1'),result('187.67 : 1')))
         self.assertFalse(same_demand_printed_rounding(result('187.7 : 1'),result('187.64 : 1')))
         self.assertFalse(same_demand_printed_rounding(result('187.7 : 1'),result('187.67 : 1',quantity=136695001)))
+        self.assertFalse(same_demand_printed_rounding(result('1471.01 : 1'),result('1471.04 : 1')))
         self.assertFalse(same_demand_printed_rounding({},result('187.7 : 1')))
 
     def test_linked_terms_fill_only_a_truly_unpopulated_field_and_preserve_its_origin(self):
@@ -199,6 +200,28 @@ class StageSnapshotTests(unittest.TestCase):
         for body in ['<p>정정 전후 자료를 참고</p><table><tr><td>new</td></tr></table>',
                 '<table><tr><td>주1) 정정 전</td><td>주1) 정정 후</td></tr></table>']:
             with self.assertRaises(ValueError):amendment_view(body)
+
+    def test_explicit_line_boundaries_survive_paragraph_style_flattening(self):
+        for before,after in [('[정정 전]','[정정 후]'),
+                ('(정정 전)','(정정 후)'),
+                ('정정 전)','정정 후)'),
+                ('(정정 전 주1)','(정정 후 주1)')]:
+            with self.subTest(before=before):
+                body=('<p>별첨 1)<br/><b>'+before+'</b><br/>old prose</p>'
+                    '<table><tr><td>old table</td></tr></table>'
+                    '<p>old tail<br/><b>'+after+'</b><br/>new prose</p>'
+                    '<table><tr><td>new table</td></tr></table>')
+                selected,proof=amendment_view(body)
+                self.assertNotIn('old',selected)
+                self.assertIn('new prose',selected);self.assertIn('new table',selected)
+                self.assertEqual(proof['pair_count'],1)
+        for body in [
+                '<p>[정정 전]old text</p><p>[정정 후]<br/>new</p>',
+                '<p>(정정 전)이라는 문구</p><p>(정정 후)<br/>new</p>',
+                '<table><tr><td>(정정 전)</td><td>(정정 후)</td></tr></table>',
+                '<p>[정정 전]<br/>old [정정 후] inline bad [정정 전]<br/>[정정 후]<br/>new</p>',
+                '<p>[정정 후]<br/>추가된 내용</p>']:
+            with self.subTest(body=body),self.assertRaises(ValueError):amendment_view(body)
 
     def test_generic_threshold_warning_is_not_an_actual_result_conflict(self):
         terms={'rcept_no':'20240101000001','rcept_dt':'2024-01-01','report_nm':'[발행조건확정]증권신고서(지분증권)'}

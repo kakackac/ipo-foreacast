@@ -4,6 +4,40 @@ from data.collectors.dart_collector import DARTCollector
 
 
 class InstitutionalParticipationSummaryTests(unittest.TestCase):
+    def test_malformed_competition_does_not_discard_independently_valid_commitment_quantities(self):
+        table=[['구분','국내 기관투자자','해외 기관투자자','합계'],
+            ['수량','800','200','1000'],['경쟁률','8','2','771,73:1']]
+        html='<p>기관 수요예측 결과</p><table>'+''.join('<tr>'+''.join(
+            '<td>'+c+'</td>' for c in row)+'</tr>' for row in table)+'</table>'
+        html+='<p>의무보유 확약 신청내역</p><table><tr><td>구분</td><td>신청수량(주)</td></tr>'
+        html+='<tr><td>3개월 확약</td><td>100</td></tr><tr><td>미확약</td><td>900</td></tr>'
+        html+='<tr><td>합계</td><td>1000</td></tr></table>'
+        result=DARTCollector(api_key='unused')._parse_demand_forecast_html(html,'00000001')
+        self.assertIsNone(result['institutional_demand_ratio'])
+        self.assertEqual(result['lockup_commitment_ratio'],.1)
+        self.assertEqual(result['lockup_parser_validation_status'],'structurally_verified')
+
+    def test_malformed_comma_is_not_removed_or_guessed_as_a_decimal(self):
+        for cell in ['771,73 : 1','1.134.34:1','1,152.850,023:1']:
+            table=[['구분','국내 기관투자자','해외 기관투자자','합계'],
+                ['경쟁률','10','20',cell]]
+            parsed=DARTCollector._extract_aggregate_demand_ratio(table)
+            self.assertIsNone(parsed['institutional_demand_ratio'])
+            self.assertEqual(parsed['institutional_demand_rejection_reason'],
+                'institutional_aggregate_numeric_grouping_invalid')
+            body='<p>기관 수요예측 결과</p><table>'+''.join('<tr>'+''.join(
+                '<td>'+c+'</td>' for c in row)+'</tr>' for row in table)+'</table>'
+            result=DARTCollector(api_key='unused')._parse_demand_forecast_html(body,'00000001')
+            self.assertEqual(result['institutional_demand_rejection_reason'],
+                'institutional_aggregate_numeric_grouping_invalid')
+            self.assertIsNone(result['institutional_demand_ratio'])
+        for cell,expected in [('771.73',771.73),('1,471.04:1',1471.04),('1471.04:1',1471.04)]:
+            table=[['구분','국내 기관투자자','해외 기관투자자','합계'],['경쟁률','10','20',cell]]
+            self.assertEqual(DARTCollector._extract_aggregate_demand_ratio(table)['institutional_demand_ratio'],expected)
+        result=DARTCollector(api_key='unused')._parse_demand_forecast_html(
+            '<p>기관 수요예측 경쟁률 771,73 : 1</p>','00000001')
+        self.assertIsNone(result['institutional_demand_ratio'])
+
     def test_official_competition_label_spelling_variant_keeps_explicit_total_cell(self):
         for label in ['경쟁률','경쟁율']:
             table=[['구분','국내 기관투자자','외국 기관투자자','합계'],

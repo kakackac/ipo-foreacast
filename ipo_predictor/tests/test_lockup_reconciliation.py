@@ -7,11 +7,23 @@ from pathlib import Path
 import pandas as pd
 
 from data.collectors.dart_collector import DARTCollector
-from data.pipelines.lockup_reconciliation import unchanged_other_parser_logic, reprocess_record, reprocess_institutional_record, run, documents, parser_snapshot, METHODS
+from data.pipelines.lockup_reconciliation import unchanged_other_parser_logic, reprocess_record, reprocess_institutional_record, run, documents, parser_snapshot, METHODS, institutional_extraction_reusable
 from data.pipelines.data_delivery import digest
 
 
 class LockupRepairTests(unittest.TestCase):
+    def test_institutional_reuse_includes_selection_and_direct_label_logic(self):
+        before='DEMAND_PARSER_VERSION=23\nclass DARTCollector:\n def _extract_lockup_ratios_from_tables(self):return 1\n def _extract_aggregate_demand_ratio(self):return 10\n def _parse_demand_forecast_html(self):return 20\n'
+        after=before.replace('=23','=24').replace('return 1\n','return 2\n')
+        old={'repair':'a','amendment_view':'b','outcome_table_equivalence':'c','demand_rounding':'d','parser':'old'}
+        current={**old,'parser':'new'}
+        self.assertTrue(institutional_extraction_reusable(before,after,old,current))
+        for key in ['repair','amendment_view','outcome_table_equivalence','demand_rounding']:
+            with self.subTest(key=key):
+                self.assertFalse(institutional_extraction_reusable(before,after,old,{**current,key:'changed'}))
+        self.assertFalse(institutional_extraction_reusable(before,after.replace('return 20','return 21'),old,current))
+        self.assertFalse(institutional_extraction_reusable(before,after.replace('return 10','return 11'),old,current))
+        self.assertFalse(institutional_extraction_reusable(None,after,old,current))
     def test_aggregate_cells_with_both_count_and_shares_use_explicit_share_unit(self):
         table=[['구분','국내기관투자자','해외기관투자자','합계'],
             ['6개월 확약','1건 / 100주','-','1건 / 100주'],
@@ -112,6 +124,37 @@ class LockupRepairTests(unittest.TestCase):
             selected=documents(Path('/tmp'),{'rcept_no':primary['rcept_no'],'corp_code':'00000001',
                 'offering_price':10000},proof,field='lockup_commitment_ratio')
         self.assertEqual(selected[0][0],full)
+
+    def test_official_notice_conflict_is_held_not_silently_reapproved_from_full_copy(self):
+        from data.collectors.dart_collector import DEMAND_PARSER_VERSION
+        metadata={'rcept_no':'20240201000002','rcept_dt':'2024-02-01'}
+        conflict={'field':'institutional_demand_ratio','notice_value':1471.01,
+            'full_document_conflicts':[{'value':1471.04}]}
+        bundle={'source_url':'official','sections':[],'field_notice_conflict':conflict}
+        record={'corp_code':'00000001','listing_date':'2024-03-01',
+            'institutional_demand_ratio':1471.04,'lockup_commitment_ratio':.2}
+        dart=DARTCollector(api_key='unused')
+        with patch('data.pipelines.lockup_reconciliation.documents',return_value=[(metadata,bundle,'body')]), \
+                patch.object(dart,'_parse_demand_forecast_html',return_value={
+                    'institutional_demand_ratio':1471.04,'institutional_demand_parser_validation_status':'structurally_verified',
+                    'institutional_demand_rule_id':'original_total_cell'}):
+            updated,proof=reprocess_institutional_record(Path('/tmp'),record,{},dart)
+        self.assertIsNone(updated['institutional_demand_ratio'])
+        self.assertEqual(updated['institutional_demand_rejection_reason'],'same_day_official_institutional_conflict')
+        self.assertEqual(updated['lockup_commitment_ratio'],.2)
+        self.assertEqual(proof['institutional_reprocessing']['attempts'][0]['field_notice_conflict'],conflict)
+        bundle['field_notice_conflict']={'field':'lockup_commitment_ratio','notice_value':.1}
+        record.update(lockup_parser_version=DEMAND_PARSER_VERSION)
+        old={'lockup_reprocessing':{'parser_version':DEMAND_PARSER_VERSION,'attempts':[
+            {'receipt':metadata['rcept_no'],'published':metadata['rcept_dt'],'sections':[],
+             'parser_status':'structurally_verified'}]}}
+        with patch('data.pipelines.lockup_reconciliation.documents',return_value=[(metadata,bundle,'body')]), \
+                patch.object(dart,'_extract_lockup_ratios_from_tables',return_value={
+                    'lockup_commitment_ratio':.2,'parser_validation_status':'structurally_verified','rule_id':'original_total'}) as parse:
+            updated,proof=reprocess_record(Path('/tmp'),record,old,dart,allow_reuse=True)
+        parse.assert_called_once()
+        self.assertIsNone(updated['lockup_commitment_ratio'])
+        self.assertEqual(updated['lockup_rejection_reason'],'same_day_official_lockup_conflict')
 
     def aggregate_html(self, quantity, committed, printed, periods=''):
         return ('<p>수요예측 결과 기관투자자 수요예측 참여내역</p><table>'

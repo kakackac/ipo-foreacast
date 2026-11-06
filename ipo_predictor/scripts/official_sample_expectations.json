@@ -455,6 +455,68 @@
       "sha256": "44b72b3161168529a4a246c46d6f3de188ca075eff98656d03d378e38f94fef0",
       "expected": {"institutional_demand_ratio": 15.54, "offering_price": 5200},
       "review_note": "The original subgroup 경쟁율 cells are dashes but the explicitly labelled total cell prints 15.54. Do not turn subgroup dashes into zero or derive the rate from them."
+    },
+    {
+      "sample": "gnbs_independent_lockup_2021",
+      "receipt": "20211018000277",
+      "section_title": "I. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20211018000277&dcmNo=8246899&eleId=9&offset=142987&length=180730&dtd=dart3.xsd",
+      "sha256": "6aeabeecf9bddd124310f55170163293af7c4b9d50e39922c9bada9d0a32fdcd",
+      "expected": {"institutional_demand_ratio": null,
+        "institutional_demand_rejection_reason": "institutional_aggregate_numeric_grouping_invalid",
+        "lockup_commitment_ratio": 0.043785793127892665,
+        "lockup_parser_validation_status": "structurally_verified"},
+      "review_note": "The malformed aggregate competition cell 1.134.34 stays unapproved. Independent quantity totals remain usable: 5340000+34927500+12815000=53082500 commitments, 1159239950 noncommitments and 1212322450 total applications. The commitment ratio is 53082500/1212322450; the complete total reconciliation, not a generic missing-to-zero rule, resolves the 15-day dash."
+    },
+    {
+      "sample": "design_malformed_rate_2018",
+      "receipt": "20181106000423",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20181106000423&dcmNo=6371905&eleId=9&offset=192617&length=126412&dtd=dart3.xsd",
+      "sha256": "49f844aaa7e400790237c66bb9dd98a0bf9c98ec8b588b1257a0979729200b37",
+      "expected": {"offering_price": 10100, "institutional_demand_ratio": null,
+        "institutional_demand_parser_validation_status": "candidate_rejected",
+        "institutional_demand_rejection_reason": "institutional_aggregate_numeric_grouping_invalid"},
+      "review_note": "The actual total competition cell says 771,73 : 1. It is neither valid thousands grouping nor an authorized decimal spelling. Preserve the raw cell and hold; do not remove the comma to create 77173 or guess 771.73. The final terms notice repeats the malformed cell."
+    },
+    {
+      "sample": "iljin_terms_conflict_2021",
+      "receipt": "20210823000374",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210823000374&dcmNo=8189910&eleId=1&offset=791&length=269965&dtd=dart3.xsd",
+      "sha256": "1cbc6b506f6f84cc0b2ed8190192c7a964ee0b9d16c39144251ca60d6481e2e7",
+      "expected": {"offering_price": 34300, "institutional_demand_ratio": 1471.01},
+      "review_note": "Negative integration sample: after-view total cell prints 1471.01, versus same-day companion prospectus 1471.04. Both print 1611 applications and 8813841000 shares. The precision is identical, so do not hide this actual official-source conflict as rounding or automatically authorize the post-demand stage."
+    },
+    {
+      "sample": "iljin_prospectus_conflict_2021",
+      "receipt": "20210823000386",
+      "section_title": "I. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210823000386&dcmNo=8189955&eleId=8&offset=362272&length=250790&dtd=dart3.xsd",
+      "sha256": "16290ef18ed87a77d9e658505dc89abed7ee88f8ac2f7b15718ac860c3a7a51d",
+      "expected": {"offering_price": 34300, "institutional_demand_ratio": 1471.04},
+      "review_note": "The explicitly labelled institutional total competition cell in the full prospectus is 1471.04. It conflicts with 1471.01 in the linked final terms notice; this expected extraction is not a model or event-level approval."
+    },
+    {
+      "sample": "haitai_terms_2016",
+      "receipt": "20160426000421",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160426000421&dcmNo=5098735&eleId=1&offset=742&length=127357&dtd=dart3.xsd",
+      "sha256": "2cd52f75b4d921a983a6457201e8a4263e33b6384993092457b9c8d68b815954",
+      "expected": {"offering_price": 15100, "price_band_low": 12300, "price_band_high": 15100, "institutional_demand_ratio": 342.99, "lockup_commitment_ratio": 0.2463},
+      "review_note": "The marker follows a BR after the annex heading or preceding prose, not an inline reference. After-view summary prints 527 applications, 1199788000 shares and 342.99:1. Commitment quantity total 295449000 and printed quantity ratio 24.63%, distinct from count ratio 16.51%."
+    },
+    {
+      "sample": "sunic_terms_2017",
+      "receipt": "20170907000115",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170907000115&dcmNo=5778098&eleId=1&offset=736&length=258375&dtd=dart3.xsd",
+      "sha256": "a437fbb00f56bc8645959cd76c7e32af762616091639dc7e6224a81c4db3bee6",
+      "expected": {"offering_price": 37000, "price_band_low": 37000, "price_band_high": 44000, "institutional_demand_ratio": 7.87, "lockup_commitment_ratio": 0.0},
+      "review_note": "Standalone parenthesized before/after delimiters define 13 pairs. After-view institutional total column prints 251 applications, 9086000 shares and competition 7.87. The commitment outcome explicitly prints total application quantity ratio 0%; period dashes alone do not authorize zero."
     }
   ]
 }

@@ -38,6 +38,16 @@ class OfficialDocumentSampleTests(unittest.TestCase):
         html = f"<p>{context}</p><table><tr><td>확정 공모가액</td><td>9,000원</td></tr></table>"
         self.assertEqual(self.collector._parse_demand_forecast_html(html, "test")["demand_offering_price"], 9000)
 
+    def test_reference_audit_compares_rejection_states_as_exact_text(self):
+        reference={'receipt':'1','source_url':'official','sha256':'abc',
+            'expected':{'institutional_demand_ratio':None,
+                        'institutional_demand_parser_validation_status':'candidate_rejected'}}
+        record={**reference,'demand':{'institutional_demand_ratio':None,
+            'institutional_demand_parser_validation_status':'candidate_rejected'}}
+        self.assertEqual(verify_record(record,reference),[])
+        record['demand']['institutional_demand_parser_validation_status']='structurally_verified'
+        self.assertIn('value_mismatch:institutional_demand_parser_validation_status',verify_record(record,reference))
+
     def test_nested_evidence_checks_values_and_required_keys_not_dictionary_size(self):
         reference={'receipt':'1','source_url':'official','sha256':'abc','expected':{},
                    'expected_evidence':{'lockup_structured_evidence':{
