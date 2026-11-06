@@ -13,13 +13,57 @@ from bs4 import BeautifulSoup
 from data.collectors.dart_collector import DARTCollector
 from data.collectors.krx_collector import KRXCollector
 from data.pipelines.data_delivery import current_financial_repair, digest
-from data.pipelines.disclosure_connections import public_text, official_family_document
+from data.pipelines.disclosure_connections import public_text, official_family_document, viewer_identity
 from data.pipelines.event_disclosures import connect_event
 from data.pipelines.financial_history import atomic_json
 from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline, MAX_FILING_TO_LISTING_DAYS
 from data.processors.feature_engineer import FeatureEngineer
 from features.source_contracts import DART_STRUCTURAL_AGGREGATE_STATUS
 
+CLASSIFICATION_SOURCES = Path(__file__).parents[1]/'manual/official_event_classification_sources.json'
+
+
+def verify_classification_table(body, rule):
+    normalize = lambda value: re.sub(r'\s+', '', value)
+    matches = [table for table in DARTCollector._extract_table_cells(body)
+               if all(any(normalize(expected) == normalize(cell) for row in table for cell in row)
+                      for expected in rule['required_table_values'])]
+    if len(matches) != 1:
+        raise ValueError('official_event_classification_table_not_unique_or_incomplete')
+    return matches[0]
+
+
+def resolve_registered_classification(dart, raw, event, corp_code, rule, cached_only):
+    if (rule['event_id'] != event.event_id or rule['ticker'] != str(event.ticker).zfill(6)
+            or rule['corp_code'] != corp_code
+            or pd.Timestamp(rule['listing_date']) != pd.Timestamp(event.listing_date)
+            or pd.notna(event.offering_price)):
+        raise ValueError('official_event_classification_identity_conflict')
+    cache = Path(raw)/'dart_connection_sources'
+    url = 'https://dart.fss.or.kr/dsaf001/main.do?'+urlencode({'rcpNo':rule['receipt']})
+    text, index_hash = public_text(dart,url,cache,
+        lambda s:viewer_identity(s,rule['receipt'],corp_code,rule['published_at']),cached_only)
+    nodes = []
+    for block in re.split(r'var\s+node\d+\s*=\s*\{\s*\}\s*;',text)[1:]:
+        fields = dict(re.findall(r"node\d+\['(text|rcpNo|dcmNo|eleId|offset|length|dtd)'\]\s*=\s*\"([^\"]*)\"",block))
+        if fields.get('text') == rule['section_title']:
+            if (fields.get('rcpNo') != rule['receipt'] or fields.get('dtd') not in ('dart3.xsd','dart4.xsd')
+                    or any(not re.fullmatch(r'\d+',fields.get(key,'')) for key in ('dcmNo','eleId','offset','length'))):
+                raise ValueError('official_classification_section_identity_conflict')
+            nodes.append({key:value for key,value in fields.items() if key!='text'})
+    if len(nodes) != 1:
+        raise ValueError('official_classification_section_not_unique')
+    section_url = 'https://dart.fss.or.kr/report/viewer.do?'+urlencode(nodes[0])
+    body, section_hash = public_text(dart,section_url,cache,
+        lambda s:verify_classification_table(s,rule),cached_only)
+    if section_hash != rule['section_sha256']:
+        raise ValueError('official_classification_reviewed_source_changed')
+    proof = {'event_id':event.event_id,'before':'general_ipo','after':rule['event_class'],
+        'offering_type':rule['offering_type'],'receipt':rule['receipt'],'source_url':section_url,
+        'published_at':rule['published_at'],'classification_only_not_model_feature':True,
+        'evidence_table':verify_classification_table(body,rule),
+        'sources':[{'url':url,'sha256':index_hash},{'url':section_url,'sha256':section_hash}]}
+    return proof
 
 def parse_company_search(text, ticker):
     soup = BeautifulSoup(text, 'html.parser')
@@ -123,12 +167,26 @@ def source_record(event, values, meta, proof, document):
         receipt = parse_qs(urlparse(supplement['source_url']).query)['rcpNo'][0]
         supplemental_meta = next(r for r in supplement['family'] if r['rcept_no'] == receipt)
         documents.append((supplemental_meta, document['supplementary_document']))
-    demand, demand_meta = HistoricalIPOPipeline._select_dart_lineage_demand(documents, values['offering_price'], event.listing_date)
-    record.update(demand, **demand_meta)
+    origins = proof.get('field_sources', {})
+    price_receipt = origins.get('offering_price', {}).get('receipt', meta['rcept_no'])
+    price_meta, price_doc = next((m,d) for m,d in documents if m['rcept_no'] == price_receipt)
+    record.update({key:value for key,value in price_doc.items() if key.startswith('offering_price')})
+    record.update(offering_price=values['offering_price'],offering_price_rcept_no=price_receipt,
+                  offering_price_rcept_dt=pd.Timestamp(price_meta['rcept_dt']))
     for prefix, field in [('institutional', 'institutional_demand_ratio'), ('lockup', 'lockup_commitment_ratio')]:
         if values[field] is not None:
+            receipt = origins.get(field, {}).get('receipt', meta['rcept_no'])
+            selected_meta, selected_doc = next((m,d) for m,d in documents if m['rcept_no'] == receipt)
+            parser_prefix = 'institutional_demand_' if prefix == 'institutional' else 'lockup_'
+            record.update({key:value for key,value in selected_doc.items()
+                           if key.startswith(parser_prefix) and pd.api.types.is_scalar(value)})
+            record[field] = values[field]
+            record[prefix+'_rcept_no'] = receipt
+            record[prefix+'_rcept_dt'] = pd.Timestamp(selected_meta['rcept_dt'])
             record[prefix+'_validation_status'] = DART_STRUCTURAL_AGGREGATE_STATUS
-            record[prefix+'_available_at'] = demand_meta[prefix+'_rcept_dt']
+            record[prefix+'_available_at'] = pd.Timestamp(selected_meta['rcept_dt'])
+            record[prefix+'_source_url'] = origins.get(field, {}).get('source_url',proof.get('source_url'))
+            record[prefix+'_source_scope'] = 'dart_lineage_aggregate_institutional'
     for group, field in [('price_band', 'price_band_low')]:
         if values[field] is None:
             continue
@@ -187,7 +245,7 @@ def run(raw_dir, processed_dir, dart=None, cached_only=False, event_limit=None):
         'float_resolver':Path(__file__).with_name('float_source_resolver.py'),
         'features':Path(__file__).parents[1]/'processors/feature_engineer.py',
         'definitions':Path(__file__).parents[2]/'features/definitions.py',
-        'config':Path(__file__).parents[2]/'config.py'}
+        'config':Path(__file__).parents[2]/'config.py', 'classification_sources':CLASSIFICATION_SOURCES}
     pinned = {key:digest(path) for key,path in paths.items()}
     source_hash = digest(base/'features_all.parquet')
     original = pd.read_parquet(base/'features_all.parquet')
@@ -198,6 +256,10 @@ def run(raw_dir, processed_dir, dart=None, cached_only=False, event_limit=None):
     if event_limit is not None:
         targets = targets.head(event_limit)
     results, records, lineage, sources, classifications = [], [], [], {}, []
+    rules = json.loads(CLASSIFICATION_SOURCES.read_text())
+    if rules['schema_version'] != 1 or len({r['event_id'] for r in rules['entries']}) != len(rules['entries']):
+        raise ValueError('official_classification_registry_invalid')
+    registered = {row['event_id']:row for row in rules['entries']}
     for event in targets.itertuples(index=False):
         row = {'event_id': event.event_id, 'corp_name': event.corp_name,
                'listing_date': event.listing_date, 'status': 'pending', 'absence_confirmed': False}
@@ -208,6 +270,13 @@ def run(raw_dir, processed_dir, dart=None, cached_only=False, event_limit=None):
                        company_name_changed=HistoricalIPOPipeline._clean_name(identity['corp_name']) != HistoricalIPOPipeline._clean_name(event.corp_name),
                        discovery_evidence=json.dumps(identity, ensure_ascii=False))
             capture_sources(raw,identity['sources'],sources)
+            if event.event_id in registered:
+                proof = resolve_registered_classification(dart,raw,event,identity['corp_code'],registered[event.event_id],cached_only)
+                capture_sources(raw,proof['sources'],sources)
+                classifications.append({key:value for key,value in proof.items() if key not in {'evidence_table','sources'}})
+                row.update(status='classified_non_public_listing_excluded',receipt=proof['receipt'],
+                           evidence=json.dumps(proof,ensure_ascii=False))
+                continue
             if not candidates:
                 raise ValueError('no_registration_in_bounded_official_search_requires_event_review')
             # Earlier withdrawn IPO attempts and duplicate same-day registrations
@@ -277,7 +346,9 @@ def run(raw_dir, processed_dir, dart=None, cached_only=False, event_limit=None):
         report = {'version':version, 'input':identity, 'base_path':str(base), 'target_events':total,
             'processed_events':len(targets), 'recovered_events':len(extra), 'features_before':len(original),
             'features_after':len(combined), 'status_counts':pd.Series([r['status'] for r in results],dtype=object).value_counts().to_dict(),
-            'classified_spac_events':len(classifications),
+            'classified_spac_events':sum(row['after']=='spac_ipo' for row in classifications),
+            'classified_non_public_events':sum(row['after']=='non_public_listing' for row in classifications),
+            'unresolved_general_candidates':total-len(extra)-len(classifications),
             'remaining_without_feature_row':total-len(extra), 'training_executed':False,
             'production_files_replaced':False, 'deployment_authorized':False,
             'scope':'historical_missing_event_recovery_not_full_cohort_recalculation_or_stage_release',

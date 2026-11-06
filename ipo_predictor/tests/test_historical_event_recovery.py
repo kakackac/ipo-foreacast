@@ -5,7 +5,8 @@ from unittest.mock import Mock, patch
 
 import pandas as pd
 
-from data.pipelines.historical_event_recovery import parse_company_search, parse_filing_search, select_body_seed, capture_sources, source_record, run
+from data.pipelines.historical_event_recovery import (parse_company_search, parse_filing_search, select_body_seed,
+    capture_sources, source_record, run, verify_classification_table, resolve_registered_classification)
 from data.collectors.dart_collector import DARTCollector
 from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline
 from data.pipelines.disclosure_connections import company_identity
@@ -14,6 +15,24 @@ from tests.test_actual_data_pipeline import _FakeDART, _FakeKRX
 
 
 class HistoricalEventRecoveryTests(unittest.TestCase):
+    def test_non_public_classification_requires_one_complete_official_table(self):
+        rule={'required_table_values':['설립방법','포괄적 주식이전','2019년 02월 13일']}
+        table='<TABLE><TR><TD>설립방법</TD><TD>포괄적 주식이전</TD></TR><TR><TD>2019년 02월 13일</TD></TR></TABLE>'
+        self.assertEqual(len(verify_classification_table(table,rule)),2)
+        for body in [table+table,table.replace('2019년 02월 13일','2019년 02월 14일'),
+                     '<table><tr><td>설립방법</td><td>포괄적 주식이전</td></tr></table><table><tr><td>2019년 02월 13일</td></tr></table>']:
+            with self.assertRaises(ValueError):verify_classification_table(body,rule)
+
+    def test_classification_registry_cannot_exclude_a_different_or_priced_ipo(self):
+        from types import SimpleNamespace
+        rule={'event_id':'one','ticker':'123456','corp_code':'12345678','listing_date':'2019-02-13'}
+        for event in [SimpleNamespace(event_id='other',ticker='123456',listing_date='2019-02-13',offering_price=None),
+                      SimpleNamespace(event_id='one',ticker='123456',listing_date='2019-02-13',offering_price=1000)]:
+            dart=Mock()
+            with self.assertRaisesRegex(ValueError,'identity_conflict'):
+                resolve_registered_classification(dart,'unused',event,'12345678',rule,True)
+            dart.session.get.assert_not_called()
+
     def test_recovered_record_uses_approved_bundles_not_raw_primary_values(self):
         from types import SimpleNamespace
         from data.pipelines.event_disclosures import FIELDS

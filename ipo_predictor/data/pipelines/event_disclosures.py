@@ -196,12 +196,19 @@ def connect_event(dart, raw_dir, event, candidates, cached_only=False, *, verify
     document = dart._parse_offering_html(body,metadata['rcept_no'])
     demand = dart._parse_demand_forecast_html(body,corp)
     document.update({k:v for k,v in demand.items() if k not in {'corp_code','parse_success'}})
-    values = accepted_values(document,event.offering_price)
+    primary_price_missing = False
+    try:
+        values = accepted_values(document,event.offering_price)
+    except ValueError as exc:
+        if str(exc) != 'latest_official_price_not_explicitly_confirmed':
+            raise
+        primary_price_missing = True
+        values = dict.fromkeys(FIELDS)
     cutoff = pd.Timestamp(event.listing_date).tz_localize('Asia/Seoul')-pd.Timedelta(hours=3)
     available = pd.Timestamp(metadata['rcept_dt']).tz_localize('Asia/Seoul')+pd.Timedelta(days=1)
     if available >= cutoff: raise ValueError('publication_not_before_listing_eve_cutoff')
     proof['field_sources'] = {}
-    documents = [({**metadata, 'source_url': proof['source_url']}, document, values.copy())]
+    documents = [] if primary_price_missing else [({**metadata, 'source_url': proof['source_url']}, document, values.copy())]
     try:
         extra_meta, extra_body, extra_proof = official_related_prospectus(
             dart,raw_dir,proof,event.listing_date,cached_only)
@@ -211,6 +218,16 @@ def connect_event(dart, raw_dir, event, candidates, cached_only=False, *, verify
         approved = accepted_values(extra,event.offering_price)
         extra_available = pd.Timestamp(extra_meta['rcept_dt']).tz_localize('Asia/Seoul')+pd.Timedelta(days=1)
         if extra_available>=cutoff: raise ValueError('supplementary_publication_after_cutoff')
+        if primary_price_missing:
+            # A partial correction is not a complete price statement. Only the
+            # latest bidirectionally linked prospectus, at least as recent as the
+            # correction, may supply its own explicitly confirmed currency price.
+            if pd.Timestamp(extra_meta['rcept_dt']) < pd.Timestamp(metadata['rcept_dt']):
+                raise ValueError('price_source_predates_latest_partial_correction')
+            values['offering_price'] = approved['offering_price']
+            proof['field_sources']['offering_price'] = {'source_url':extra_proof['source_url'],
+                'receipt':extra_meta['rcept_no'],'available_at':extra_available.isoformat()}
+            proof['price_resolution_status'] = 'latest_related_prospectus_price_verified'
         for field,value in approved.items():
             if field in {'offering_price', 'new_shares', 'secondary_shares', 'public_float_ratio_disclosed'}:
                 continue
@@ -226,6 +243,8 @@ def connect_event(dart, raw_dir, event, candidates, cached_only=False, *, verify
         proof['supplementary_status'] = 'supplementary_source_access_failed'
     except ValueError as exc:
         proof['supplementary_status'] = str(exc)
+    if values['offering_price'] is None:
+        raise ValueError(proof.get('supplementary_status','latest_official_price_not_explicitly_confirmed'))
     _resolve_supply_bundles(values, proof, documents, event.offering_price, event.listing_date)
     proof.update(company_url=url,company_sha256=company_hash,company_identity=company)
     proof['candidate_calendars'] = sorted({s['path']:s for c in candidates for s in c.get('calendar_sources',[])}.values(),

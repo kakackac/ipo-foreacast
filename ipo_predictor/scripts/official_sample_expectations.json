@@ -2,6 +2,20 @@
   "description": "Official DART original-table references reviewed 2026-09-09 and 2026-11-06. New aggregate quantity references: Melcon 748389000/2074742000; EST 2489000/1039659000; SK14 14625000/5988330000. Numerator plus noncommitment quantity reconciles to the independently disclosed demand quantity. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
   "samples": [
     {
+      "sample": "dypiston_prospectus_2017",
+      "receipt": "20171127000116",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20171127000116&dcmNo=5860150&eleId=10&offset=66771&length=209454&dtd=dart3.xsd",
+      "sha256": "48850cc2474e08aaf61cd0ca379f4c56533609f2e6ba3e60c89d54e006fbf3bf",
+      "expected": {"demand_offering_price": 5700, "institutional_demand_ratio": 62.8}
+    },
+    {
+      "sample": "maxst_prospectus_2021",
+      "receipt": "20210715000154",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210715000154&dcmNo=8144128&eleId=8&offset=95424&length=175424&dtd=dart3.xsd",
+      "sha256": "300d48aa86f838819cad9f7bbd7dff1f78941407e40f7d80f9d68b009149199c",
+      "expected": {"demand_offering_price": 15000, "institutional_demand_ratio": 1587.01}
+    },
+    {
       "sample": "maint_prospectus_2015",
       "receipt": "20150331001027",
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20150331001027&dcmNo=4548242&eleId=9&offset=204841&length=110372&dtd=dart3.xsd",

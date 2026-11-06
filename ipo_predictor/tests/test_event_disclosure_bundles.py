@@ -78,6 +78,41 @@ class EventDisclosureBundleTests(unittest.TestCase):
         self.assertEqual(proof['field_sources']['new_shares'], proof['field_sources']['secondary_shares'])
         self.assertEqual(raw['new_shares'], 100)
 
+    def test_partial_correction_uses_same_day_latest_related_prospectus_price(self):
+        from data.pipelines.historical_event_recovery import source_record
+        primary={'offering_price':None,'offering_price_review_status':'missing',
+                 'offering_price_finality':'unknown','lockup_commitment_ratio':.9}
+        extra=self.document(institutional_demand_ratio=600,institutional_demand_parser_validation_status='structurally_verified',
+                            institutional_demand_rule_id='aggregate')
+        values,meta,proof,raw,_,_=self.connect(primary,extra)
+        self.assertEqual(values['offering_price'],1000)
+        self.assertEqual(proof['price_resolution_status'],'latest_related_prospectus_price_verified')
+        self.assertEqual(proof['field_sources']['offering_price']['receipt'],self.extra_meta['rcept_no'])
+        self.assertIsNone(values['lockup_commitment_ratio'])
+        event=SimpleNamespace(event_id='one',ticker='123456',corp_name='Historical',listing_date='2020-02-01')
+        record=source_record(event,values,meta,proof,raw)
+        self.assertEqual(record['offering_price_rcept_no'],self.extra_meta['rcept_no'])
+        self.assertEqual(record['institutional_rcept_no'],self.extra_meta['rcept_no'])
+        self.assertEqual(record['offering_price_review_status'],'verified_currency_unit')
+
+    def test_partial_correction_does_not_use_older_or_unconfirmed_price(self):
+        primary={'offering_price':None,'offering_price_review_status':'missing','offering_price_finality':'unknown'}
+        for extra,metadata in [(self.document(),{**self.extra_meta,'rcept_dt':'2019-12-31'}),
+                               ({**self.document(),'offering_price_finality':'preliminary_price_language'},self.extra_meta)]:
+            with self.assertRaises(ValueError):self.connect(primary,extra,metadata)
+        with self.assertRaisesRegex(ValueError,'krx_mismatch'):
+            self.connect(self.document(offering_price=999),self.document())
+
+    def test_record_never_reselects_a_different_institutional_source(self):
+        from data.pipelines.historical_event_recovery import source_record
+        primary=self.document(lockup_commitment_ratio=.1,lockup_parser_validation_status='structurally_verified',lockup_rule_id='aggregate')
+        extra=self.document(lockup_commitment_ratio=.3,lockup_parser_validation_status='structurally_verified',lockup_rule_id='aggregate')
+        values,meta,proof,raw,_,_=self.connect(primary,extra)
+        event=SimpleNamespace(event_id='one',ticker='123456',corp_name='Historical',listing_date='2020-02-01')
+        record=source_record(event,values,meta,proof,raw)
+        self.assertEqual(record['lockup_commitment_ratio'],values['lockup_commitment_ratio'])
+        self.assertEqual(record['lockup_rcept_no'],self.primary_meta['rcept_no'])
+
     def test_incomplete_documents_never_form_cross_source_pair(self):
         values, _, proof, _, _, _ = self.connect(
             self.document(**self.structure(new=100)), self.document(**self.structure(secondary=50)))
