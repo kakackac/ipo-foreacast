@@ -13,6 +13,9 @@ from service_core.models import Offering
 class Command(BaseCommand):
     help = 'Import newly price-linked IPO events, without releasing predictions.'
 
+    def add_arguments(self, parser):
+        parser.add_argument('--include-disclosures',action='store_true')
+
     def handle(self, *args, **options):
         sys.path.insert(0, str(Path(settings.BASE_DIR).parent/'ipo_predictor'))
         from data.pipelines.event_delivery import current_event_delivery
@@ -23,7 +26,21 @@ class Command(BaseCommand):
         if rows.event_id.duplicated().any(): raise ValueError('event_import_duplicate_identity')
         if current_event_delivery(settings.IPO_PROCESSED_DIR)[0] != root:
             raise ValueError('event_version_changed_during_import')
+        disclosures, disclosure_version = pd.DataFrame(), None
+        if options.get('include_disclosures'):
+            from data.pipelines.event_disclosures import current_disclosures
+            disclosure_root, evidence = current_disclosures(settings.IPO_PROCESSED_DIR)
+            if evidence['event_version'] != manifest['version']:
+                raise ValueError('disclosures_bound_to_different_event_version')
+            disclosures = pd.read_parquet(disclosure_root/'events.parquet')
+            if disclosures.event_id.duplicated().any() or not set(disclosures.event_id).issubset(set(rows.event_id)):
+                raise ValueError('disclosure_import_population_invalid')
+            disclosures = disclosures[disclosures.status.eq('official_identity_family_and_price_verified')]
+            disclosure_version = evidence['version']
+            if current_disclosures(settings.IPO_PROCESSED_DIR) != (disclosure_root,evidence):
+                raise ValueError('disclosure_version_changed_during_import')
         created = updated = skipped = 0
+        disclosure_updated = 0
         with transaction.atomic():
             for row in rows.itertuples(index=False):
                 fields = dict(company_name=row.corp_name,ticker=row.ticker,market=row.market,
@@ -45,5 +62,16 @@ class Command(BaseCommand):
                     continue
                 Offering.objects.create(event_id=row.event_id, **fields)
                 created += 1
+            for row in disclosures.itertuples(index=False):
+                existing = Offering.objects.get(event_id=row.event_id)
+                if existing.ticker != row.ticker or existing.listing_date != pd.Timestamp(row.listing_date).date():
+                    raise ValueError('disclosure_import_trading_identity_conflict')
+                if (existing.prediction_status in {'awaiting_disclosure_verification','awaiting_feature_verification'}
+                        and (existing.data_version != disclosure_version or existing.prediction_status != 'awaiting_feature_verification')):
+                    existing.prediction_status = 'awaiting_feature_verification'
+                    existing.data_version = disclosure_version
+                    existing.save(update_fields=['prediction_status','data_version','updated_at'])
+                    disclosure_updated += 1
         self.stdout.write(json.dumps({'created':created,'updated':updated,'skipped_existing':skipped,'eligible_events':len(rows),
-                                     'data_version':manifest['version'],'predictions_released':False}))
+                                     'data_version':manifest['version'],'disclosure_updated':disclosure_updated,
+                                     'disclosure_version':disclosure_version,'predictions_released':False}))

@@ -126,6 +126,31 @@ class ServiceTests(TestCase):
 
 
 class EventImportTests(TestCase):
+    def test_disclosure_import_updates_only_pending_states_and_never_releases(self):
+        sys.path.insert(0,str(Path(settings.BASE_DIR).parent/'ipo_predictor'))
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'source';proof=root/'proof';source.mkdir();proof.mkdir()
+            rows=pd.DataFrame([{'event_id':'new','ticker':'123450','corp_name':'Sample','market':'KOSDAQ',
+                'listing_date':'2026-01-02','event_class':'general_ipo','price_resolution_status':'official_price_verified'}])
+            rows.to_parquet(source/'added_events.parquet',index=False)
+            pd.DataFrame([{'event_id':'new','ticker':'123450','listing_date':'2026-01-02',
+                           'status':'official_identity_family_and_price_verified'}]).to_parquet(proof/'events.parquet',index=False)
+            with patch('data.pipelines.event_delivery.current_event_delivery',return_value=(source,{'version':'event'})), \
+                 patch('data.pipelines.event_disclosures.current_disclosures',return_value=(proof,{'version':'proof','event_version':'event'})):
+                out=io.StringIO();call_command('import_event_snapshot',include_disclosures=True,stdout=out)
+                self.assertEqual(json.loads(out.getvalue())['disclosure_updated'],1)
+                item=Offering.objects.get(event_id='new')
+                self.assertEqual(item.prediction_status,'awaiting_feature_verification')
+                self.assertEqual(item.data_version,'proof')
+                out=io.StringIO();call_command('import_event_snapshot',include_disclosures=True,stdout=out)
+                self.assertEqual(json.loads(out.getvalue())['disclosure_updated'],0)
+                call_command('import_event_snapshot',stdout=io.StringIO())
+                item.refresh_from_db();self.assertEqual(item.prediction_status,'awaiting_feature_verification')
+            with patch('data.pipelines.event_delivery.current_event_delivery',return_value=(source,{'version':'wrong'})), \
+                 patch('data.pipelines.event_disclosures.current_disclosures',return_value=(proof,{'version':'proof','event_version':'event'})):
+                with self.assertRaisesRegex(ValueError,'different_event_version'):
+                    call_command('import_event_snapshot',include_disclosures=True,stdout=io.StringIO())
+
     def test_pending_price_event_is_listed_then_upgraded_without_prediction_release(self):
         sys.path.insert(0,str(Path(settings.BASE_DIR).parent/'ipo_predictor'))
         with tempfile.TemporaryDirectory() as directory:

@@ -599,7 +599,7 @@ if __name__ == "__main__":
             "train", "backtest", "analyze", "demo", "collect", "collect-events",
             "audit-dart-failures", "prepare-underwriter-institutional-review-queue",
             "audit-underwriter-source-readiness", "build-research-dataset", "collect-and-build",
-            "plan-financials", "collect-financials", "collect-snapshot-prices", "integrate-event-snapshot",
+            "plan-financials", "collect-financials", "collect-snapshot-prices", "integrate-event-snapshot", "collect-event-disclosures",
         ],
         default="demo",
         help="실행 모드",
@@ -635,6 +635,7 @@ if __name__ == "__main__":
     parser.add_argument('--event-snapshot', type=Path, help='가격을 보완할 별도 공식 이벤트 스냅샷')
     parser.add_argument('--snapshot-output', type=Path, help='기존 원본과 분리된 가격 캐시/실행 결과 폴더')
     parser.add_argument('--schedule-registry', type=Path, help='공식 DART 일정 레지스트리 (회사명은 후보 탐색용으로만 사용)')
+    parser.add_argument('--discover-event-disclosures', action='store_true', help='신규 이벤트의 누락 공시 후보만 DART 목록 API에서 탐색')
     parser.add_argument("--repair-disclosure-connections", action="store_true",
                         help="공모가 보류 일반 IPO만 공개 DART 정정 계보로 복구해 재무/연구 버전에 함께 저장")
     parser.add_argument('--connection-cached-only', action='store_true',
@@ -674,6 +675,11 @@ if __name__ == "__main__":
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.research_dataset import run
         print(json.dumps(run(RAW_DIR, PROC_DIR, financial_repair=args.financial_repair), ensure_ascii=False))
+    elif args.mode == 'collect-event-disclosures':
+        from config import RAW_DIR, PROC_DIR
+        from data.pipelines.event_disclosures import run
+        print(json.dumps(run(RAW_DIR, PROC_DIR, cached_only=args.connection_cached_only,
+                             discover=args.discover_event_disclosures), ensure_ascii=False))
     elif args.mode == 'integrate-event-snapshot':
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.event_delivery import run

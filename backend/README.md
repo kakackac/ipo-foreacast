@@ -34,6 +34,17 @@ python -m venv --system-site-packages .venv
 신규 21건 모두 `awaiting_disclosure_verification`이며 가격 대기는 0건이다.
 가격 확인은 DART 공시 정합이나 예측 출시 승인을 대신하지 않는다.
 
+11월 6일 후속 DART 연결 버전 `5c399840c01829e22340`은 신규 21건 모두 기업코드·종목코드,
+정정 계보와 확정 공모가/기관 경쟁률을 검증했다. 다음 명령은 이 버전까지 검증한 뒤
+상태를 `awaiting_feature_verification`으로만 전환하며 숫자 예측을 공개하지 않는다:
+
+```bash
+.venv/bin/python backend/manage.py import_event_snapshot --include-disclosures
+```
+
+현재 DB는 이 상태 21건/기존 미출시 391건이다. 버전 불일치·기업 거래 식별 충돌은
+수입을 차단하고, 다시 실행해도 동일 상태를 중복 생성하거나 연구 상태를 낮추지 않는다.
+
 ## API
 
 | 경로(`/api/v1/` 아래) | 동작 |

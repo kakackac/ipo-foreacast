@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 10
+DEMAND_PARSER_VERSION = 11
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -1085,7 +1085,11 @@ class DARTCollector:
                             scope="institutional_demand_participation_summary",
                         ),
                     }
-        if not re.search(r"기관\s*(?:투자자)?|수요\s*예측", table_text):
+        institutional_header = bool(re.search(r'수요\s*예측\s*참여\s*(?:내역|결과)\s*$',heading)
+            and not re.search(r'일반\s*청약|개인\s*청약|비례\s*배정',heading)
+            and table and all(any(label in re.sub(r'\s+', '',cell) for cell in table[0])
+                              for label in ('운용사(집합)','운용사(고유)','투자일임사')))
+        if not institutional_header and not re.search(r"기관\s*(?:투자자)?|수요\s*예측", table_text):
             return None
         if re.search(
             r"신규\s*상장\s*기업|기업\s*수|평균\s*공모|공모\s*규모|재심의|예정|"
@@ -1145,7 +1149,7 @@ class DARTCollector:
                 "institutional_demand_rule_id": "DART_DEMAND_TOTAL_COLUMN_V1",
                 "institutional_demand_parser_validation_status": "structurally_verified",
                 "institutional_demand_structured_evidence": cls._table_evidence(
-                    table, selected_row=row_index, selected_column=column_index,
+                    table, heading=heading, selected_row=row_index, selected_column=column_index,
                     scope="aggregate_total_column",
                 ),
             }
@@ -1210,8 +1214,8 @@ class DARTCollector:
         table_parser.feed(raw_html)
         table_parser.close()
         application_totals = set()
-        for summary in table_parser.tables:
-            if cls._extract_aggregate_demand_ratio(summary) is None:
+        for summary, heading in zip(table_parser.tables, table_parser.table_contexts):
+            if cls._extract_aggregate_demand_ratio(summary, heading) is None:
                 continue
             for i, row in enumerate(summary):
                 if not row or re.sub(r"\s+", "", row[0]) not in ("수량", "신청수량"):
@@ -1279,7 +1283,11 @@ class DARTCollector:
                     "structured_evidence": cls._table_evidence(table, scope="aggregate_direct_ratio"),
                 })
                 return result
-            period_rows = [row for row in table if any(re.search(pattern, " ".join(row)) for pattern, _ in label_map)]
+            # Regulatory footnotes can mention 15-day lockups and allocation
+            # percentages. They are not outcome rows and must not end the scan.
+            period_rows = [row for row in table if row and re.fullmatch(
+                r'(?:의무보유확약)?\d+(?:개월|일)(?:확약)?|미확약|확약없음',
+                re.sub(r'\s+', '', row[0]))]
             if len(period_rows) < 2 or not re.search(r"의무\s*보유|보유\s*확약|확약\s*기간", table_text):
                 continue
 
@@ -1309,7 +1317,9 @@ class DARTCollector:
                     result["parse_method"] = "lockup_same_table_row_percent_audit_only"
                 result["evidence"] = table_text[:500]
                 result["structured_evidence"] = cls._table_evidence(table, scope="period_percent_rows")
-                return result
+                if result['parser_validation_status'] == 'structurally_verified':
+                    return result
+                continue
 
             header_index = next((
                 index for index, row in enumerate(table)
@@ -1356,7 +1366,8 @@ class DARTCollector:
                     result["parse_method"] = "lockup_table_share_column_audit_only"
                 result["evidence"] = table_text[:500]
                 result["structured_evidence"] = cls._table_evidence(table, scope="period_share_rows")
-                return result
+                if result['parser_validation_status'] == 'structurally_verified':
+                    return result
         if re.search(r"의무\s*보유\s*확약.*?[0-9][0-9,]*(?:\.[0-9]+)?\s*%", normalized_document):
             result["parser_validation_status"] = "candidate_rejected"
             result["rejection_reason"] = "institutional_demand_scope_or_denominator_not_verified"
@@ -1425,20 +1436,30 @@ class DARTCollector:
             return None
         column = columns[0]
         quantities = {}
+        dash_rows = []
         for i, row in enumerate(table[start:], start):
             if not row or column >= len(row):
                 return None
             label = re.sub(r"\s+", "", row[0])
             if not re.fullmatch(r"\d+(?:개월|일)확약|미확약|확약없음|합계", label):
                 return None
-            if label in quantities or not re.fullmatch(r"[0-9][0-9,]*", row[column].strip()):
+            quantity = row[column].strip()
+            if label in quantities:
                 return None
-            quantities[label] = int(row[column].replace(",", ""))
+            if quantity == '-' and application_total is not None and label != '합계':
+                dash_rows.append(label)
+                quantities[label] = 0
+            elif re.fullmatch(r"[0-9][0-9,]*", quantity):
+                quantities[label] = int(quantity.replace(",", ""))
+            else:
+                return None
         total = quantities.pop("합계", None)
         # A continued table can contain foreign groups plus the domestic+foreign
         # total. Anchor the merged unit to the separate demand summary, not just
         # the adjacent subgroup values (which do not cover domestic investors).
         if inferred_header and (application_total is None or total != application_total):
+            return None
+        if application_total is not None and total != application_total:
             return None
         none_labels = [label for label in ("미확약", "확약없음") if label in quantities]
         if len(none_labels) != 1:
@@ -1460,6 +1481,7 @@ class DARTCollector:
                 noncommitted=none, total=total, scope="aggregate_quantity",
                 inferred_total_unit_from_repeated_schema=inferred_header,
                 independently_disclosed_application_total=application_total,
+                dash_rows_reconciled_as_zero=dash_rows,
             ),
         }
 

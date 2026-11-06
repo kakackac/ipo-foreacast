@@ -1,5 +1,5 @@
 {
-  "description": "Official DART original-table reference values reviewed 2026-09-09. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
+  "description": "Official DART original-table references reviewed 2026-09-09 and 2026-11-06. New aggregate quantity references: Melcon 748389000/2074742000; EST 2489000/1039659000; SK14 14625000/5988330000. Numerator plus noncommitment quantity reconciles to the independently disclosed demand quantity. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
   "samples": [
     {
       "sample": "daesung_2022",
@@ -145,6 +145,48 @@
         "public_float_ratio_disclosed": 0.4607,
         "new_shares": 0,
         "secondary_shares": 878181
+      }
+    },
+    {
+      "sample": "melcon_2026",
+      "receipt": "20260929000191",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260929000191&dcmNo=11593609&eleId=1&offset=651&length=564368&dtd=dart4.xsd",
+      "sha256": "ba099a0cb015d54e7cd8f1290f0a538c9672c448a1be6d16342423c1acbaa2b7",
+      "expected": {
+        "offering_price": 12300,
+        "institutional_demand_ratio": 1136.84,
+        "lockup_commitment_ratio": 0.3607142478438283,
+        "price_band_low": 10700,
+        "price_band_high": 12300,
+        "new_shares": 2500000,
+        "secondary_shares": 0
+      }
+    },
+    {
+      "sample": "est_2026",
+      "receipt": "20261021000363",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20261021000363&dcmNo=11622290&eleId=1&offset=648&length=466521&dtd=dart4.xsd",
+      "sha256": "e185ce0a64abc02ab4f8b604b0d5cc0064a25172bf89b23f69bc2674bf3f643e",
+      "expected": {
+        "offering_price": 12400,
+        "institutional_demand_ratio": 630.1,
+        "lockup_commitment_ratio": 0.002394054204311221,
+        "price_band_low": 10600,
+        "price_band_high": 12400,
+        "new_shares": 2200000
+      }
+    },
+    {
+      "sample": "sk14_2026",
+      "receipt": "20261014000196",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20261014000196&dcmNo=11613068&eleId=1&offset=665&length=268568&dtd=dart4.xsd",
+      "sha256": "334cc3a291e6046f563d189656f5ca2e309d5ad72b470e6f6ecf9425a65cdb02",
+      "expected": {
+        "offering_price": 2000,
+        "institutional_demand_ratio": 1228.38,
+        "lockup_commitment_ratio": 0.002442250176593474,
+        "new_shares": 6500000,
+        "secondary_shares": 0
       }
     }
   ]

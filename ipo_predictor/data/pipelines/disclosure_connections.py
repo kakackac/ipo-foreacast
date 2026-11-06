@@ -72,10 +72,32 @@ def viewer_identity(content, receipt, corp_code, published=None):
     return {'corp_code': str(corp_code), 'publication_date': day, 'title': title, 'family': family}
 
 
-def public_text(dart, url, cache_dir, validator=None, cached_only=False):
+def company_identity(content, corp_code, ticker, market):
+    """A name discovers a candidate; the official company popup binds its stock code."""
+    soup = BeautifulSoup(content, 'html.parser')
+    ids = set(re.findall(r"searchPopReport\(['\"](\d{8})['\"]", content))
+    if ids != {str(corp_code)}:
+        raise ValueError('official_company_corp_code_mismatch')
+    fields = {}
+    for row in soup.select('table tr'):
+        label, value = row.find('th'), row.find('td')
+        if label is None or value is None: continue
+        key = re.sub(r'\s+', '', label.get_text())
+        if key in fields: raise ValueError('official_company_field_ambiguous')
+        fields[key] = value.get_text(' ', strip=True)
+    code = fields.get('종목코드', '').strip().upper()
+    if not re.fullmatch(r'[A-Z0-9]{6}', code) or code != str(ticker).upper().zfill(6):
+        raise ValueError('official_company_trading_code_mismatch')
+    if fields.get('법인구분') != {'KOSPI':'유가증권시장', 'KOSDAQ':'코스닥시장'}.get(market):
+        raise ValueError('official_company_market_mismatch')
+    return {'corp_code':str(corp_code), 'ticker':code, 'market':market,
+            'company_name':fields.get('공시회사명')}
+
+
+def public_text(dart, url, cache_dir, validator=None, cached_only=False, refresh=False):
     """Completed downloads survive parser changes; failures are never negative-cached."""
     path = Path(cache_dir) / (hashlib.sha256(url.encode()).hexdigest() + '.json')
-    if path.exists():
+    if path.exists() and not (refresh and not cached_only):
         payload = json.loads(path.read_text())
         if payload['url'] != url or hashlib.sha256(payload['text'].encode()).hexdigest() != payload['sha256']:
             raise ValueError('official_connection_cache_integrity_failed')
@@ -102,11 +124,11 @@ def public_text(dart, url, cache_dir, validator=None, cached_only=False):
     return content, digest
 
 
-def official_family_document(dart, raw_dir, receipt, corp_code, listing_date, cached_only=False):
+def official_family_document(dart, raw_dir, receipt, corp_code, listing_date, cached_only=False, refresh_index=False):
     cache = Path(raw_dir) / 'dart_connection_sources'
     index_url = 'https://dart.fss.or.kr/dsaf001/main.do?' + urlencode({'rcpNo': receipt})
     content, initial_hash = public_text(dart, index_url, cache,
-                                       lambda text: viewer_identity(text, receipt, corp_code), cached_only)
+                                       lambda text: viewer_identity(text, receipt, corp_code), cached_only, refresh_index)
     initial = viewer_identity(content, receipt, corp_code)
     cutoff = pd.Timestamp(listing_date).normalize() - pd.Timedelta(hours=3)
     eligible = [r for r in initial['family']
@@ -120,8 +142,12 @@ def official_family_document(dart, raw_dir, receipt, corp_code, listing_date, ca
     if any(re.search(r'철회|취소', r['report_nm']) and r['rcept_dt'] >= latest['rcept_dt'] for r in eligible):
         raise ValueError('official_family_withdrawn_or_cancelled')
     final_url = 'https://dart.fss.or.kr/dsaf001/main.do?' + urlencode({'rcpNo': latest['rcept_no']})
-    content, final_hash = public_text(dart, final_url, cache,
-                                     lambda text: viewer_identity(text, latest['rcept_no'], corp_code, latest['rcept_dt']), cached_only)
+    if refresh_index and final_url == index_url:
+        final_hash = initial_hash
+    else:
+        content, final_hash = public_text(dart, final_url, cache,
+                                         lambda text: viewer_identity(text, latest['rcept_no'], corp_code, latest['rcept_dt']),
+                                         cached_only, refresh_index)
     final = viewer_identity(content, latest['rcept_no'], corp_code, latest['rcept_dt'])
     if receipt not in {r['rcept_no'] for r in final['family']}:
         raise ValueError('official_family_reverse_link_missing')
