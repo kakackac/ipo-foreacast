@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import requests
 
-from data.pipelines.disclosure_connections import public_text, viewer_identity, official_family_document
+from data.pipelines.disclosure_connections import public_text, viewer_identity, official_family_document, official_related_prospectus
 
 
 def index(receipt='20150602000312', date='2015.06.02', corp='00659161', withdrawn=False):
@@ -22,6 +22,28 @@ def index(receipt='20150602000312', date='2015.06.02', corp='00659161', withdraw
 
 
 class ConnectionTests(unittest.TestCase):
+    def test_related_prospectus_requires_reverse_link_corp_date_and_unique_sections(self):
+        terms=index()+'<select id="ref"><option title="투자설명서" value="rcpNo=20150602000400">2015.06.02 투자설명서</option></select>'
+        prospectus=("<title>변경상호/투자설명서/2015.06.02</title>openCorpInfoNew('00659161');"
+            '<select id="family"><option selected value="rcpNo=20150602000400">2015.06.02 투자설명서</option></select>'
+            '<select id="ref"><option value="rcpNo=20150602000312">2015.06.02 증권신고서(지분증권)</option></select>')
+        for number,title in [(1,'I. 모집 또는 매출에 관한 일반사항'),(2,'III. 투자위험요소')]:
+            prospectus += f"var node{number} = {{}};"+''.join(f"node{number}['{k}'] = \"{v}\";" for k,v in
+                dict(text=title,rcpNo='20150602000400',dcmNo='2',eleId=str(number),offset='1',length='20',dtd='dart3.xsd').items())
+        proof={'source_url':'https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20150602000312',
+               'corp_code':'00659161','final_index_sha256':hashlib.sha256(terms.encode()).hexdigest()}
+        for body,valid in [(prospectus,True),(prospectus.replace('00659161','99999999'),False),
+                           (prospectus.replace('value="rcpNo=20150602000312"','value="rcpNo=20150602000999"'),False)]:
+            dart=Mock();dart.session.get.side_effect=[Mock(text=terms),Mock(text=body),Mock(text='<table>data</table>'),Mock(text='<table>risk</table>')]
+            with tempfile.TemporaryDirectory() as root:
+                if valid:
+                    meta,html,evidence=official_related_prospectus(dart,root,proof,'2015-06-17')
+                    self.assertEqual(meta['rcept_no'],'20150602000400')
+                    self.assertEqual(len(evidence['sections']),2)
+                    self.assertIn('risk',html)
+                else:
+                    with self.assertRaises(ValueError):official_related_prospectus(dart,root,proof,'2015-06-17')
+
     def test_cached_only_never_calls_transport(self):
         dart = Mock()
         with tempfile.TemporaryDirectory() as root:

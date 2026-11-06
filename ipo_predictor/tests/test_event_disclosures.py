@@ -19,6 +19,28 @@ def company(corp='01378005', ticker='495910', market='코스닥시장'):
 
 
 class EventDisclosureTests(unittest.TestCase):
+    def test_receipt_specific_iso_time_and_timestamp_write_one_parquet_type(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder);event=root/'source';event.mkdir()
+            (event/'manifest.json').write_text('{}')
+            pd.DataFrame([{'event_id':'one','ticker':'495910','corp_name':'EST','listing_date':pd.Timestamp('2026-11-04'),
+                'event_class':'general_ipo','offering_price':12400}]).to_parquet(event/'added_events.parquet')
+            pd.DataFrame([{'event_id':'one','candidate_corp_codes':'["01378005"]',
+                'candidate_receipts':'["20261021000363"]'}]).to_parquet(event/'disclosure_links.parquet')
+            from data.pipelines.event_disclosures import FIELDS
+            values=dict.fromkeys(FIELDS);values.update(offering_price=12400,public_float_ratio_disclosed=.376)
+            metadata={'rcept_no':'20261021000363'}
+            proof={'corp_code':'01378005','family':[],'sources':[],
+                'field_sources':{'public_float_ratio_disclosed':{'receipt':'20261021000370',
+                    'available_at':'2026-10-22T00:00:00+09:00','source_url':'https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20261021000370'}}}
+            result=(values,metadata,proof,{},pd.Timestamp('2026-10-22',tz='Asia/Seoul'),pd.Timestamp('2026-11-03T21:00:00+09:00'))
+            with patch('data.pipelines.event_disclosures.current_event_delivery',return_value=(event,{'version':'source'})), \
+                 patch('data.pipelines.event_disclosures.connect_event',return_value=result):
+                report=run(root/'raw',root/'processed',dart=Mock(),cached_only=True)
+            ledger=pd.read_parquet(Path(report['path'])/'observations.parquet')
+            self.assertEqual(str(ledger.available_at.dtype),'datetime64[ns, Asia/Seoul]')
+            self.assertEqual(ledger[ledger.feature.eq('public_float_ratio_disclosed')].receipt.iloc[0],'20261021000370')
+
     def test_saved_calendar_requires_hash_period_and_both_subscription_dates(self):
         import hashlib
         import os

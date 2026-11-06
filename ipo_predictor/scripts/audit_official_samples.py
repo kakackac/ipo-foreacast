@@ -32,6 +32,8 @@ SAMPLES = {
     "melcon_2026": "20260929000191",
     "est_2026": "20261021000363",
     "sk14_2026": "20261014000196",
+    "est_risks_2026": "20261021000370",
+    "melcon_risks_2026": "20260929000194",
 }
 
 
@@ -110,7 +112,9 @@ def main():
                 continue
         index = main_path.read_text(encoding="utf-8")
         section = {"rznomics_prospectus_2025": "I. 모집 또는 매출에 관한 일반사항",
-                   "rznomics_risks_2025": "III. 투자위험요소"}.get(name)
+                   "rznomics_risks_2025": "III. 투자위험요소",
+                   "est_risks_2026": "III. 투자위험요소",
+                   "melcon_risks_2026": "III. 투자위험요소"}.get(name)
         parameters = select_document(index, receipt, section)
         if not parameters:
             records.append({"sample": name, "receipt": receipt, "status": "viewer_link_not_found"})

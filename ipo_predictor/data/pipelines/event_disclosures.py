@@ -12,7 +12,8 @@ import requests
 from data.collectors.dart_collector import DARTCollector
 from data.collectors.krx_collector import KRXCollector
 from data.pipelines.data_delivery import checked_artifact, digest
-from data.pipelines.disclosure_connections import company_identity, official_family_document, public_text
+from data.pipelines.disclosure_connections import (company_identity, official_family_document, public_text,
+                                                   official_related_prospectus)
 from data.pipelines.event_delivery import current_event_delivery
 from data.pipelines.financial_history import atomic_json
 
@@ -129,11 +130,39 @@ def connect_event(dart, raw_dir, event, candidates, cached_only=False):
     cutoff = pd.Timestamp(event.listing_date).tz_localize('Asia/Seoul')-pd.Timedelta(hours=3)
     available = pd.Timestamp(metadata['rcept_dt']).tz_localize('Asia/Seoul')+pd.Timedelta(days=1)
     if available >= cutoff: raise ValueError('publication_not_before_listing_eve_cutoff')
+    proof['field_sources'] = {}
+    try:
+        extra_meta, extra_body, extra_proof = official_related_prospectus(
+            dart,raw_dir,proof,event.listing_date,cached_only)
+        extra = dart._parse_offering_html(extra_body,extra_meta['rcept_no'])
+        extra.update({k:v for k,v in dart._parse_demand_forecast_html(extra_body,corp).items()
+                      if k not in {'corp_code','parse_success'}})
+        approved = accepted_values(extra,event.offering_price)
+        from data.pipelines.float_source_resolver import resolve_public_float
+        selected_float = resolve_public_float([(metadata,document),({**extra_meta,'supplementary':True},extra)],
+                                               event.offering_price,event.listing_date)
+        approved['public_float_ratio_disclosed'] = selected_float.get('public_float_ratio_disclosed')
+        extra_available = pd.Timestamp(extra_meta['rcept_dt']).tz_localize('Asia/Seoul')+pd.Timedelta(days=1)
+        if extra_available>=cutoff: raise ValueError('supplementary_publication_after_cutoff')
+        for field,value in approved.items():
+            if field=='offering_price' or value is None or values[field] is not None: continue
+            values[field] = value
+            proof['field_sources'][field] = {'source_url':extra_proof['source_url'],
+                'receipt':extra_meta['rcept_no'],'available_at':extra_available.isoformat()}
+        document['supplementary_document'] = extra
+        proof.update(supplementary_status='official_related_prospectus_verified',supplementary=extra_proof)
+    except requests.RequestException:
+        proof['supplementary_status'] = 'supplementary_source_access_failed'
+    except ValueError as exc:
+        proof['supplementary_status'] = str(exc)
     proof.update(company_url=url,company_sha256=company_hash)
     proof['candidate_calendars'] = sorted({s['path']:s for c in candidates for s in c.get('calendar_sources',[])}.values(),
                                            key=lambda s:s['path'])
     sources = []
-    for source_url in {url,initial_url,proof['source_url'],*[r['url'] for r in proof['sections']]}:
+    supplement = proof.get('supplementary',{})
+    urls = {url,initial_url,proof['source_url'],*[r['url'] for r in proof['sections']]}
+    if supplement: urls.update({supplement['source_url'],*[r['url'] for r in supplement['sections']]})
+    for source_url in urls:
         cache = Path(raw_dir)/'dart_connection_sources'/(hashlib.sha256(source_url.encode()).hexdigest()+'.json')
         record = json.loads(cache.read_text())
         if record['url'] != source_url or hashlib.sha256(record['text'].encode()).hexdigest() != record['sha256']:
@@ -192,6 +221,8 @@ def run(raw_dir, processed_dir, dart=None, cached_only=False, discover=False):
                        status='official_identity_family_and_price_verified',available_at=available,prediction_at=cutoff,
                        evidence=json.dumps(proof,ensure_ascii=False))
             lineage.extend({'event_id':event.event_id,'corp_code':proof['corp_code'],**r} for r in proof['family'])
+            lineage.extend({'event_id':event.event_id,'corp_code':proof['corp_code'],**r}
+                           for r in proof.get('supplementary',{}).get('family',[]))
         except requests.RequestException:
             consecutive_failures += 1
             row['status'] = 'source_access_failed'
@@ -199,16 +230,19 @@ def run(raw_dir, processed_dir, dart=None, cached_only=False, discover=False):
             row['status'] = str(exc)
         for field in FIELDS:
             value = row[field]
+            origin = proof.get('field_sources',{}).get(field,{})
+            selected_document = document.get('supplementary_document',{}) if origin else document
             reason = None if value is not None else (row['status'] if not proof else
-                document.get({'institutional_demand_ratio':'institutional_demand_rejection_reason',
+                selected_document.get({'institutional_demand_ratio':'institutional_demand_rejection_reason',
                               'lockup_commitment_ratio':'lockup_rejection_reason'}.get(field,''))
                 or 'not_verified_in_selected_official_sections')
             observations.append({'event_id':event.event_id,'feature':field,'value':value,'is_missing':value is None,
-                'raw_value':document.get(field),'unit':('KRW' if field in {'offering_price','price_band_low','price_band_high'}
+                'raw_value':selected_document.get(field),'unit':('KRW' if field in {'offering_price','price_band_low','price_band_high'}
                     else 'shares' if field in {'new_shares','secondary_shares'} else 'ratio_to_one'
                     if field=='institutional_demand_ratio' else 'fraction'),
                 'missing_reason':reason,'validation_status':'verified_official_source' if value is not None else 'needs_review',
-                'source_url':proof.get('source_url'),'receipt':metadata.get('rcept_no'),'available_at':available,
+                'source_url':origin.get('source_url',proof.get('source_url')),
+                'receipt':origin.get('receipt',metadata.get('rcept_no')),'available_at':origin.get('available_at',available),
                 'prediction_at':cutoff,'collected_at':max((s['collected_at'] for s in proof.get('sources',[])),default=None),
                 'human_review_required':value is None,'evidence':json.dumps(proof,ensure_ascii=False),
                 'parser_evidence':json.dumps(document,ensure_ascii=False,default=str)})
@@ -217,6 +251,10 @@ def run(raw_dir, processed_dir, dart=None, cached_only=False, discover=False):
     ledger = pd.DataFrame(observations,columns=['event_id','feature','value','raw_value','unit','is_missing',
         'missing_reason','validation_status','source_url','receipt','available_at','prediction_at','collected_at',
         'human_review_required','evidence','parser_evidence'])
+    for data in (frame,ledger):
+        for column in ('available_at','prediction_at'):
+            data[column] = pd.to_datetime(data[column],utc=True).dt.tz_convert('Asia/Seoul')
+    ledger['collected_at'] = pd.to_datetime(ledger.collected_at,utc=True).dt.tz_convert('Asia/Seoul')
     used = ledger.loc[~ledger.is_missing.astype(bool)]
     available, cutoffs = pd.to_datetime(used.available_at,utc=True), pd.to_datetime(used.prediction_at,utc=True)
     violations = (available.isna() | cutoffs.isna() | (available >= cutoffs)).sum()

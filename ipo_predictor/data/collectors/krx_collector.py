@@ -127,10 +127,11 @@ class KRXCollector:
 
         if not isinstance(payload, dict):
             raise RuntimeError(f"KRX OpenAPI 응답 형식이 올바르지 않습니다 ({endpoint}, {bas_dd}).")
-        records = payload.get("OutBlock_1", payload.get("output", []))
+        if 'OutBlock_1' not in payload and 'output' not in payload:
+            raise RuntimeError(f"KRX OpenAPI 응답에 데이터 블록이 없습니다 ({endpoint}, {bas_dd}).")
+        records = payload.get("OutBlock_1", payload.get("output"))
         if not isinstance(records, list):
-            logger.warning("KRX OpenAPI 응답에 데이터 목록이 없습니다: %s %s", endpoint, bas_dd)
-            return []
+            raise RuntimeError(f"KRX OpenAPI 데이터 목록 형식이 잘못됐습니다 ({endpoint}, {bas_dd}).")
         return records
 
     @staticmethod

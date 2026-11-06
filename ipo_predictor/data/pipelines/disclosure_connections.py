@@ -178,6 +178,66 @@ def official_family_document(dart, raw_dir, receipt, corp_code, listing_date, ca
              'corp_code': str(corp_code), 'family': final['family'], 'sections': proofs}
 
 
+def official_related_prospectus(dart, raw_dir, terms_proof, listing_date, cached_only=False):
+    """Follow a bidirectional official related-document link, not a name search."""
+    cache = Path(raw_dir)/'dart_connection_sources'
+    corp = terms_proof['corp_code']
+    terms_receipt = parse_qs(terms_proof['source_url'].split('?',1)[1])['rcpNo'][0]
+    terms, terms_hash = public_text(dart,terms_proof['source_url'],cache,
+        lambda text:viewer_identity(text,terms_receipt,corp),cached_only)
+    if terms_hash != terms_proof['final_index_sha256']:
+        raise ValueError('terms_index_changed_during_supplement_selection')
+    cutoff = pd.Timestamp(listing_date).normalize()-pd.Timedelta(hours=3)
+
+    def related(content):
+        rows = []
+        for option in BeautifulSoup(content,'html.parser').select('select#ref option'):
+            receipt = parse_qs(option.get('value','')).get('rcpNo',[''])[0]
+            label = option.get_text(' ',strip=True)
+            day = re.match(r'(\d{4})[.](\d{2})[.](\d{2})',label)
+            if re.fullmatch(r'\d{14}',receipt) and day:
+                rows.append({'rcept_no':receipt,'rcept_dt':'-'.join(day.groups()),
+                             'report_nm':label,'title':option.get('title','')})
+        return rows
+
+    candidates = [r for r in related(terms) if r['title']=='투자설명서'
+                  and pd.Timestamp(r['rcept_dt'])+pd.Timedelta(days=1)<cutoff]
+    if not candidates: raise ValueError('no_pre_cutoff_related_prospectus')
+    candidate = max(candidates,key=lambda r:(r['rcept_dt'],r['rcept_no']))
+    url = 'https://dart.fss.or.kr/dsaf001/main.do?'+urlencode({'rcpNo':candidate['rcept_no']})
+    index, index_hash = public_text(dart,url,cache,
+        lambda text:viewer_identity(text,candidate['rcept_no'],corp,candidate['rcept_dt']),cached_only)
+    identity = viewer_identity(index,candidate['rcept_no'],corp,candidate['rcept_dt'])
+    eligible = [r for r in identity['family'] if '투자설명서' in r['report_nm']
+                and pd.Timestamp(r['rcept_dt'])+pd.Timedelta(days=1)<cutoff]
+    latest = max(eligible,key=lambda r:(r['rcept_dt'],r['rcept_no'])) if eligible else None
+    if latest is None or latest['rcept_no'] != candidate['rcept_no']:
+        raise ValueError('related_prospectus_not_latest_in_family')
+    if any(re.search(r'철회|취소',r['report_nm']) and r['rcept_dt']>=latest['rcept_dt']
+           and pd.Timestamp(r['rcept_dt'])+pd.Timedelta(days=1)<cutoff for r in identity['family']):
+        raise ValueError('related_prospectus_withdrawn')
+    if terms_receipt not in {r['rcept_no'] for r in related(index)}:
+        raise ValueError('related_prospectus_reverse_link_missing')
+    nodes = []
+    for block in re.split(r'var\s+node\d+\s*=\s*\{\s*\}\s*;',index)[1:]:
+        fields = dict(re.findall(r"node\d+\['(text|rcpNo|dcmNo|eleId|offset|length|dtd)'\]\s*=\s*\"([^\"]*)\"",block))
+        if not re.search(r'모집.*매출.*일반사항|투자위험요소',fields.get('text','')): continue
+        if (fields.get('rcpNo') != latest['rcept_no'] or fields.get('dtd') not in ('dart3.xsd','dart4.xsd')
+                or any(not re.fullmatch(r'\d+',fields.get(k,'')) for k in ('dcmNo','eleId','offset','length'))):
+            raise ValueError('related_prospectus_section_identity_conflict')
+        nodes.append({k:v for k,v in fields.items() if k!='text'})
+    if len(nodes)!=2: raise ValueError('related_prospectus_sections_not_unique')
+    bodies, sections = [], []
+    for node in nodes:
+        source_url = 'https://dart.fss.or.kr/report/viewer.do?'+urlencode(node)
+        def validate_body(text):
+            if '<table' not in text.lower(): raise ValueError('related_prospectus_body_invalid')
+        body, sha = public_text(dart,source_url,cache,validate_body,cached_only)
+        bodies.append(body);sections.append({'url':source_url,'sha256':sha})
+    return latest,'\n'.join(bodies),{'source_url':url,'final_index_sha256':index_hash,'corp_code':corp,
+        'family':identity['family'],'sections':sections,'related_from_receipt':terms_receipt}
+
+
 def repair_features(dart, raw_dir, original, event_limit=None, cached_only=False):
     """Only price/institutional-excluded general IPOs; never retail or fitting."""
     from data.pipelines.historical_ipo_pipeline import HistoricalIPOPipeline

@@ -22,6 +22,14 @@ def _html_response(content: str):
     return response
 
 
+class KRXResponseShapeTests(unittest.TestCase):
+    def test_error_payload_is_not_cached_as_empty_trading_day(self):
+        for payload in ({'message':'authentication error'}, {'OutBlock_1':None}):
+            session=Mock();session.get.return_value=_response(payload)
+            collector=KRXCollector(api_key='test',session=session,request_delay=0)
+            with self.assertRaises(RuntimeError):collector._get_daily_records('idx/kospi_dd_trd','20260910')
+
+
 class KRXOpenAPICollectorTests(unittest.TestCase):
     def test_placeholder_unicode_and_control_header_values_fail_before_request(self):
         for key in ('실제_KRX_인증키', 'YOUR_KRX_API_KEY', 'abc\ndef', 'abc def', 'abc\u00a0def'):

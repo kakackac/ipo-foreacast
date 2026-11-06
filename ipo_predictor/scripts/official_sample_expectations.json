@@ -188,6 +188,20 @@
         "new_shares": 6500000,
         "secondary_shares": 0
       }
+    },
+    {
+      "sample": "est_risks_2026",
+      "receipt": "20261021000370",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20261021000370&dcmNo=11622327&eleId=14&offset=806395&length=649869&dtd=dart4.xsd",
+      "sha256": "dd1c3c7c0cccbc5343667c4fd46d64d5056daf01171d4602cf05a000fa98c42a",
+      "expected": {"public_float_ratio_disclosed": 0.376}
+    },
+    {
+      "sample": "melcon_risks_2026",
+      "receipt": "20260929000194",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260929000194&dcmNo=11593668&eleId=14&offset=935732&length=674714&dtd=dart4.xsd",
+      "sha256": "241762fbe88fac21aeff565e576bc4d29afb6ae128ea4cfb42cd30222f346efd",
+      "expected": {"public_float_ratio_disclosed": 0.345}
     }
   ]
 }

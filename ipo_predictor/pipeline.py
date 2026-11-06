@@ -599,7 +599,7 @@ if __name__ == "__main__":
             "train", "backtest", "analyze", "demo", "collect", "collect-events",
             "audit-dart-failures", "prepare-underwriter-institutional-review-queue",
             "audit-underwriter-source-readiness", "build-research-dataset", "collect-and-build",
-            "plan-financials", "collect-financials", "collect-snapshot-prices", "integrate-event-snapshot", "collect-event-disclosures",
+            "plan-financials", "collect-financials", "collect-snapshot-prices", "integrate-event-snapshot", "collect-event-disclosures", "collect-event-context",
         ],
         default="demo",
         help="실행 모드",
@@ -675,6 +675,10 @@ if __name__ == "__main__":
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.research_dataset import run
         print(json.dumps(run(RAW_DIR, PROC_DIR, financial_repair=args.financial_repair), ensure_ascii=False))
+    elif args.mode == 'collect-event-context':
+        from config import RAW_DIR, PROC_DIR
+        from data.pipelines.event_model_inputs import run
+        print(json.dumps(run(RAW_DIR, PROC_DIR, cached_only=args.connection_cached_only), ensure_ascii=False))
     elif args.mode == 'collect-event-disclosures':
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.event_disclosures import run
