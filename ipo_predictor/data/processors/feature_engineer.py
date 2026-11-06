@@ -205,8 +205,8 @@ class FeatureEngineer:
         if "corp_name" not in dart.columns or "corp_name" not in krx.columns:
             raise ValueError("DART와 KRX 데이터에는 corp_name 컬럼이 필요합니다.")
 
-        # 법인 표기, 공백, 문장부호 차이 때문에 이름이 달라도 같은 회사인
-        # 사례를 줄인다. DART 쪽에는 아직 ticker가 없으므로 이름이 기본 키다.
+        # Legacy inputs may lack event IDs. Production records join by event,
+        # not mutable company names or a ticker reused across listing events.
         for frame in (dart, krx):
             frame["corp_name_clean"] = (
                 frame["corp_name"].astype(str)
@@ -216,11 +216,15 @@ class FeatureEngineer:
                 .str.strip()
             )
 
+        keyed = "event_id" in dart and "event_id" in krx
+        if keyed and (dart.event_id.isna().any() or krx.event_id.isna().any()):
+            raise ValueError("event_id must be complete when both inputs provide it")
         merged = pd.merge(
             dart, krx,
-            on="corp_name_clean",
+            on="event_id" if keyed else "corp_name_clean",
             how="inner",
             suffixes=("_dart", "_krx"),
+            validate="one_to_one" if keyed else None,
         )
 
         # 동일 회사가 KOSDAQ 최초 상장 후 KOSPI로 이전 상장한 경우처럼,

@@ -2,6 +2,16 @@
   "description": "Official DART original-table references reviewed 2026-09-09 and 2026-11-06. New aggregate quantity references: Melcon 748389000/2074742000; EST 2489000/1039659000; SK14 14625000/5988330000. Numerator plus noncommitment quantity reconciles to the independently disclosed demand quantity. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
   "samples": [
     {
+      "sample": "maint_prospectus_2015",
+      "receipt": "20150331001027",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20150331001027&dcmNo=4548242&eleId=9&offset=204841&length=110372&dtd=dart3.xsd",
+      "sha256": "07837a5ca840f0c0dd7d98e89275c8e5b621e8b4c4fe256d55289d36855c5e87",
+      "expected": {
+        "institutional_demand_ratio": 643.7,
+        "demand_offering_price": 15000
+      }
+    },
+    {
       "sample": "daesung_2022",
       "receipt": "20220808000054",
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20220808000054&dcmNo=8757875&eleId=1&offset=799&length=363959&dtd=dart3.xsd",

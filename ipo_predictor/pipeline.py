@@ -599,7 +599,7 @@ if __name__ == "__main__":
             "train", "backtest", "analyze", "demo", "collect", "collect-events",
             "audit-dart-failures", "prepare-underwriter-institutional-review-queue",
             "audit-underwriter-source-readiness", "build-research-dataset", "collect-and-build",
-            "plan-financials", "collect-financials", "collect-snapshot-prices", "integrate-event-snapshot", "collect-event-disclosures", "collect-event-context",
+            "plan-financials", "collect-financials", "collect-snapshot-prices", "integrate-event-snapshot", "collect-event-disclosures", "collect-event-context", "recover-historical-events",
         ],
         default="demo",
         help="실행 모드",
@@ -629,6 +629,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--start-year", type=int, default=2015, help="실제 수집 시작 연도")
     parser.add_argument("--financial-limit", type=int, help="재무 수집 공식 API 검증용 연도 분산 표본 개수")
+    parser.add_argument("--recovery-limit", type=int, help="과거 누락 이벤트 복구 표본 개수; 전체 복구 버전 포인터는 갱신하지 않음")
     parser.add_argument("--financial-documents-only", action="store_true",
                         help="재무 API 캐시와 공식 DART 신고서 재무 절만 사용; 새 인증 API 호출 없음")
     parser.add_argument("--financial-repair", type=str, help="연구 데이터 생성에 연결할 재무 복구 디렉터리 또는 latest")
@@ -675,6 +676,11 @@ if __name__ == "__main__":
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.research_dataset import run
         print(json.dumps(run(RAW_DIR, PROC_DIR, financial_repair=args.financial_repair), ensure_ascii=False))
+    elif args.mode == 'recover-historical-events':
+        from config import RAW_DIR, PROC_DIR
+        from data.pipelines.historical_event_recovery import run
+        print(json.dumps(run(RAW_DIR, PROC_DIR, cached_only=args.connection_cached_only,
+                             event_limit=args.recovery_limit), ensure_ascii=False))
     elif args.mode == 'collect-event-context':
         from config import RAW_DIR, PROC_DIR
         from data.pipelines.event_model_inputs import run

@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import time
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode, parse_qs
@@ -72,7 +73,7 @@ def viewer_identity(content, receipt, corp_code, published=None):
     return {'corp_code': str(corp_code), 'publication_date': day, 'title': title, 'family': family}
 
 
-def company_identity(content, corp_code, ticker, market):
+def company_identity(content, corp_code, ticker, market, *, verify_current_market=True):
     """A name discovers a candidate; the official company popup binds its stock code."""
     soup = BeautifulSoup(content, 'html.parser')
     ids = set(re.findall(r"searchPopReport\(['\"](\d{8})['\"]", content))
@@ -88,10 +89,10 @@ def company_identity(content, corp_code, ticker, market):
     code = fields.get('종목코드', '').strip().upper()
     if not re.fullmatch(r'[A-Z0-9]{6}', code) or code != str(ticker).upper().zfill(6):
         raise ValueError('official_company_trading_code_mismatch')
-    if fields.get('법인구분') != {'KOSPI':'유가증권시장', 'KOSDAQ':'코스닥시장'}.get(market):
+    if verify_current_market and fields.get('법인구분') != {'KOSPI':'유가증권시장', 'KOSDAQ':'코스닥시장'}.get(market):
         raise ValueError('official_company_market_mismatch')
     return {'corp_code':str(corp_code), 'ticker':code, 'market':market,
-            'company_name':fields.get('공시회사명')}
+            'company_name':fields.get('공시회사명'), 'current_corporation_type':fields.get('법인구분')}
 
 
 def public_text(dart, url, cache_dir, validator=None, cached_only=False, refresh=False):
@@ -221,7 +222,10 @@ def official_related_prospectus(dart, raw_dir, terms_proof, listing_date, cached
     nodes = []
     for block in re.split(r'var\s+node\d+\s*=\s*\{\s*\}\s*;',index)[1:]:
         fields = dict(re.findall(r"node\d+\['(text|rcpNo|dcmNo|eleId|offset|length|dtd)'\]\s*=\s*\"([^\"]*)\"",block))
-        if not re.search(r'모집.*매출.*일반사항|투자위험요소',fields.get('text','')): continue
+        title = unicodedata.normalize('NFKC', fields.get('text', '')).strip()
+        # Older viewers contain a numbered summary with the same section name.
+        # Select the Roman-numbered full section, not that abbreviated summary.
+        if not re.match(r'^[IVX]+[.]\s*(?:모집.*매출.*일반사항|투자위험요소)', title): continue
         if (fields.get('rcpNo') != latest['rcept_no'] or fields.get('dtd') not in ('dart3.xsd','dart4.xsd')
                 or any(not re.fullmatch(r'\d+',fields.get(k,'')) for k in ('dcmNo','eleId','offset','length'))):
             raise ValueError('related_prospectus_section_identity_conflict')

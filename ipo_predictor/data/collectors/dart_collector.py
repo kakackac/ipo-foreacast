@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 11
+DEMAND_PARSER_VERSION = 12
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -1068,17 +1068,20 @@ class DARTCollector:
         table_text = " ".join(" ".join(row) for row in table)
         # A two-row summary can carry its institutional scope in the immediate heading.
         if len(table) == 2 and re.search(
-            r"수요예측\s*결과\s*[①1.\s]*기관투자자\s*수요예측\s*참여내역\s*$", heading
+            r"수요예측\s*결과\s*[①1.\s]*(?:기관투자자\s*)?수요예측\s*참여내역\s*$", heading
         ):
             headers = [re.sub(r"\s+", "", c) for c in table[0]]
-            if headers == ["참여건수(건)", "신청수량(주)", "단순경쟁률"] and len(table[1]) == 3:
-                cells = [re.fullmatch(r"[0-9][0-9,]*(?:\.[0-9]+)?", c.strip()) for c in table[1]]
-                if all(cells):
+            if (headers[0:1] in (["참여건수(건)"], ["참여건수"])
+                    and headers[1:2] in (["신청수량(주)"], ["신청수량"])
+                    and headers[2:] == ["단순경쟁률"] and len(table[1]) == 3):
+                counts = [re.fullmatch(r"[0-9][0-9,]*", c.strip()) for c in table[1][:2]]
+                rate = re.fullmatch(r"([0-9][0-9,]*(?:\.[0-9]+)?)(?:\s*[:：]\s*1)?", table[1][2].strip())
+                if all(counts) and rate:
                     return {
-                        "institutional_demand_ratio": float(table[1][2].replace(",", "")),
+                        "institutional_demand_ratio": float(rate.group(1).replace(",", "")),
                         "institutional_demand_parse_method": "demand_ratio_institutional_summary",
                         "institutional_demand_evidence": " | ".join(table[1]),
-                        "institutional_demand_rule_id": "DART_DEMAND_INSTITUTIONAL_SUMMARY_V1",
+                        "institutional_demand_rule_id": "DART_DEMAND_INSTITUTIONAL_SUMMARY_V2",
                         "institutional_demand_parser_validation_status": "structurally_verified",
                         "institutional_demand_structured_evidence": cls._table_evidence(
                             table, heading=heading, selected_row=1, selected_column=2,

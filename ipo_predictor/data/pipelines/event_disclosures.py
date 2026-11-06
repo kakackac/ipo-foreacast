@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import tempfile
+from numbers import Integral, Real
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -16,6 +17,7 @@ from data.pipelines.disclosure_connections import (company_identity, official_fa
                                                    official_related_prospectus)
 from data.pipelines.event_delivery import current_event_delivery
 from data.pipelines.financial_history import atomic_json
+from data.pipelines.float_source_resolver import FLOAT_FIELDS, resolve_public_float
 
 
 FIELDS = ('offering_price', 'institutional_demand_ratio', 'lockup_commitment_ratio',
@@ -103,14 +105,82 @@ def discover_candidates(dart, raw_dir, events, cached_only):
     return records
 
 
-def connect_event(dart, raw_dir, event, candidates, cached_only=False):
+def _bundle_scalars(bundle):
+    result = {}
+    for field, value in bundle.items():
+        if not pd.api.types.is_scalar(value):
+            raise ValueError('resolved_bundle_field_not_scalar')
+        if value is None or pd.isna(value):
+            value = None
+        elif isinstance(value, pd.Timestamp):
+            value = value.isoformat()
+        elif isinstance(value, Real) and not isinstance(value, bool):
+            if not math.isfinite(value):
+                value = None
+            else:
+                value = int(value) if isinstance(value, Integral) else float(value)
+        result[field] = value
+    return result
+
+
+def _resolve_supply_bundles(values, proof, documents, expected_price, listing_date):
+    def origin(metadata):
+        return {'receipt': metadata['rcept_no'], 'source_url': metadata['source_url'],
+                'available_at': (pd.Timestamp(metadata['rcept_dt']).tz_localize('Asia/Seoul')
+                                 + pd.Timedelta(days=1)).isoformat()}
+
+    structure_fields = (
+        'new_shares', 'new_shares_parse_method', 'new_shares_parse_evidence',
+        'new_shares_parser_validation_status', 'secondary_shares',
+        'secondary_shares_parse_method', 'secondary_shares_parse_evidence',
+        'secondary_shares_parser_validation_status',
+    )
+    structure = dict.fromkeys((*structure_fields, 'offering_structure_rcept_no',
+                               'offering_structure_rcept_dt', 'source_url', 'available_at'))
+    structure['offering_structure_resolution_status'] = 'no_complete_verified_source'
+    ordered = sorted(documents, key=lambda item: (
+        pd.Timestamp(item[0]['rcept_dt']), item[0]['rcept_no']), reverse=True)
+    # A pair is usable only when both values passed approval in the same document.
+    for metadata, document, approved in ordered:
+        if approved['new_shares'] is None or approved['secondary_shares'] is None:
+            continue
+        structure.update({field: document.get(field) for field in structure_fields})
+        structure.update(offering_structure_rcept_no=metadata['rcept_no'],
+                         offering_structure_rcept_dt=pd.Timestamp(metadata['rcept_dt']).isoformat(),
+                         source_url=metadata['source_url'], available_at=origin(metadata)['available_at'],
+                         offering_structure_resolution_status='latest_complete_verified_source_selected')
+        if metadata.get('supplementary'):
+            for field in ('new_shares', 'secondary_shares'):
+                proof['field_sources'][field] = origin(metadata)
+        break
+    proof['resolved_structure'] = _bundle_scalars(structure)
+    for field in ('new_shares', 'secondary_shares'):
+        values[field] = proof['resolved_structure'][field]
+
+    # Replace, rather than fill, so a newer conflict also clears older values.
+    resolved_float = dict.fromkeys(FLOAT_FIELDS)
+    resolved_float.update(resolve_public_float(
+        [(metadata, document) for metadata, document, _ in documents], expected_price, listing_date))
+    resolved_float.update(source_url=None, available_at=None)
+    receipt = resolved_float['public_float_rcept_no']
+    if receipt is not None:
+        metadata = next(metadata for metadata, _, _ in documents if metadata['rcept_no'] == receipt)
+        resolved_float.update(source_url=metadata['source_url'], available_at=origin(metadata)['available_at'])
+        resolved_float['public_float_rcept_dt'] = pd.Timestamp(resolved_float['public_float_rcept_dt']).isoformat()
+        if metadata.get('supplementary'):
+            proof['field_sources']['public_float_ratio_disclosed'] = origin(metadata)
+    proof['resolved_float'] = _bundle_scalars(resolved_float)
+    values['public_float_ratio_disclosed'] = proof['resolved_float']['public_float_ratio_disclosed']
+
+
+def connect_event(dart, raw_dir, event, candidates, cached_only=False, *, verify_current_market=True):
     corps = {str(c['corp_code']) for c in candidates}
     if len(corps) != 1: raise ValueError('candidate_corp_code_not_unique')
     corp = corps.pop()
     url = 'https://dart.fss.or.kr/dsae001/selectPopup.ax?' + urlencode({'selectKey':corp})
     content, company_hash = public_text(dart,url,Path(raw_dir)/'dart_connection_sources',
-        lambda text:company_identity(text,corp,event.ticker,event.market),cached_only)
-    company_identity(content,corp,event.ticker,event.market)
+        lambda text:company_identity(text,corp,event.ticker,event.market,verify_current_market=verify_current_market),cached_only)
+    company = company_identity(content,corp,event.ticker,event.market,verify_current_market=verify_current_market)
     seed = max(candidates,key=lambda c:(str(c.get('rcept_dt','')),c['rcept_no']))
     initial_url = 'https://dart.fss.or.kr/dsaf001/main.do?' + urlencode({'rcpNo':seed['rcept_no']})
     index_cache = Path(raw_dir)/'dart_connection_sources'/(hashlib.sha256(initial_url.encode()).hexdigest()+'.json')
@@ -131,6 +201,7 @@ def connect_event(dart, raw_dir, event, candidates, cached_only=False):
     available = pd.Timestamp(metadata['rcept_dt']).tz_localize('Asia/Seoul')+pd.Timedelta(days=1)
     if available >= cutoff: raise ValueError('publication_not_before_listing_eve_cutoff')
     proof['field_sources'] = {}
+    documents = [({**metadata, 'source_url': proof['source_url']}, document, values.copy())]
     try:
         extra_meta, extra_body, extra_proof = official_related_prospectus(
             dart,raw_dir,proof,event.listing_date,cached_only)
@@ -138,24 +209,25 @@ def connect_event(dart, raw_dir, event, candidates, cached_only=False):
         extra.update({k:v for k,v in dart._parse_demand_forecast_html(extra_body,corp).items()
                       if k not in {'corp_code','parse_success'}})
         approved = accepted_values(extra,event.offering_price)
-        from data.pipelines.float_source_resolver import resolve_public_float
-        selected_float = resolve_public_float([(metadata,document),({**extra_meta,'supplementary':True},extra)],
-                                               event.offering_price,event.listing_date)
-        approved['public_float_ratio_disclosed'] = selected_float.get('public_float_ratio_disclosed')
         extra_available = pd.Timestamp(extra_meta['rcept_dt']).tz_localize('Asia/Seoul')+pd.Timedelta(days=1)
         if extra_available>=cutoff: raise ValueError('supplementary_publication_after_cutoff')
         for field,value in approved.items():
-            if field=='offering_price' or value is None or values[field] is not None: continue
+            if field in {'offering_price', 'new_shares', 'secondary_shares', 'public_float_ratio_disclosed'}:
+                continue
+            if value is None or values[field] is not None: continue
             values[field] = value
             proof['field_sources'][field] = {'source_url':extra_proof['source_url'],
                 'receipt':extra_meta['rcept_no'],'available_at':extra_available.isoformat()}
         document['supplementary_document'] = extra
         proof.update(supplementary_status='official_related_prospectus_verified',supplementary=extra_proof)
+        documents.append(({**extra_meta, 'source_url': extra_proof['source_url'], 'supplementary': True},
+                          extra, approved))
     except requests.RequestException:
         proof['supplementary_status'] = 'supplementary_source_access_failed'
     except ValueError as exc:
         proof['supplementary_status'] = str(exc)
-    proof.update(company_url=url,company_sha256=company_hash)
+    _resolve_supply_bundles(values, proof, documents, event.offering_price, event.listing_date)
+    proof.update(company_url=url,company_sha256=company_hash,company_identity=company)
     proof['candidate_calendars'] = sorted({s['path']:s for c in candidates for s in c.get('calendar_sources',[])}.values(),
                                            key=lambda s:s['path'])
     sources = []

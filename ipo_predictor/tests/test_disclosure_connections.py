@@ -30,6 +30,9 @@ class ConnectionTests(unittest.TestCase):
         for number,title in [(1,'I. 모집 또는 매출에 관한 일반사항'),(2,'III. 투자위험요소')]:
             prospectus += f"var node{number} = {{}};"+''.join(f"node{number}['{k}'] = \"{v}\";" for k,v in
                 dict(text=title,rcpNo='20150602000400',dcmNo='2',eleId=str(number),offset='1',length='20',dtd='dart3.xsd').items())
+        prospectus += "var node3 = {};" + ''.join(f"node3['{k}'] = \"{v}\";" for k,v in
+            dict(text='2. 모집 또는 매출에 관한 일반사항',rcpNo='20150602000400',dcmNo='2',
+                 eleId='3',offset='1',length='20',dtd='dart3.xsd').items())
         proof={'source_url':'https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20150602000312',
                'corp_code':'00659161','final_index_sha256':hashlib.sha256(terms.encode()).hexdigest()}
         for body,valid in [(prospectus,True),(prospectus.replace('00659161','99999999'),False),

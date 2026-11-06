@@ -1213,8 +1213,10 @@ class HistoricalIPOPipeline:
         include_dart_demand_audit: bool,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         disclosures = []
-        for year in range(start_year, end_year + 1):
-            frame = self.dart.get_ipo_disclosure_list(f"{year}0101", f"{year}1231")
+        first_day = pd.Timestamp(f"{start_year}0101") - pd.Timedelta(days=MAX_FILING_TO_LISTING_DAYS)
+        for year in range(first_day.year, end_year + 1):
+            start = max(first_day, pd.Timestamp(f"{year}0101")).strftime("%Y%m%d")
+            frame = self.dart.get_ipo_disclosure_list(start, f"{year}1231")
             if not frame.empty:
                 disclosures.append(frame)
         if not disclosures:
@@ -1260,8 +1262,21 @@ class HistoricalIPOPipeline:
         records: list[dict[str, Any]] = []
         financial_rows: list[pd.DataFrame] = []
         for listing in calendar.itertuples(index=False):
-            candidates = filings[filings["corp_name_clean"] == listing.corp_name_clean].copy()
-            candidates = candidates[candidates["rcept_dt"] <= listing.listing_date]
+            in_window = filings[filings["rcept_dt"].lt(listing.listing_date)
+                & (listing.listing_date - filings["rcept_dt"]).dt.days.between(0, MAX_FILING_TO_LISTING_DAYS)]
+            ticker = str(getattr(listing, "ticker", "")).strip().upper().zfill(6)
+            codes = in_window.get("stock_code", pd.Series("", index=in_window.index)).fillna("").astype(str).str.strip().str.upper()
+            code_match = codes.str.zfill(6).eq(ticker) & codes.ne("")
+            match_method = "official_list_stock_code_then_receipt_lineage"
+            if code_match.any():
+                candidates = in_window[code_match].copy()
+            else:
+                # Name-only bootstrap remains for legacy/unlisted API rows; a
+                # different nonempty trading code must never be accepted by name.
+                candidates = in_window[in_window["corp_name_clean"].eq(listing.corp_name_clean)
+                                     & codes.eq("")].copy()
+                match_method = "corp_name_bootstrap_unique_dart_corp_code_then_receipt_lineage"
+            candidates = candidates[candidates["rcept_dt"] < listing.listing_date]
             candidates = candidates[
                 (listing.listing_date - candidates["rcept_dt"]).dt.days.between(0, MAX_FILING_TO_LISTING_DAYS)
             ]
@@ -1273,7 +1288,7 @@ class HistoricalIPOPipeline:
                     "krx_standard_code": getattr(listing, "krx_standard_code", None),
                     "listing_date": listing.listing_date,
                     "corp_name": listing.corp_name,
-                    "lineage_status": "actual_related_disclosure_not_found",
+                    "lineage_status": "candidate_not_found_in_queried_list_not_absence_proof",
                     "lineage_version": DART_LINEAGE_VERSION,
                     "source_name": "OpenDART_list_C_C001",
                     "recorded_at": pd.Timestamp.now(tz="Asia/Seoul"),
@@ -1363,7 +1378,7 @@ class HistoricalIPOPipeline:
                     "is_correction": bool(candidate.is_correction),
                     "is_final_conditions": bool(candidate.is_final_conditions),
                     "selection_rank": rank + 1,
-                    "match_method": "corp_name_bootstrap_unique_dart_corp_code_then_receipt_lineage",
+                    "match_method": match_method,
                     "lineage_validation_status": "unique_dart_corp_code_date_bounded_candidate",
                     "source_name": "OpenDART_list_C_C001",
                     "source_url": "https://opendart.fss.or.kr/api/list.json",
