@@ -168,6 +168,25 @@ def compatible_float_dependencies(raw, current_sha):
     return tuple(compatible)
 
 
+@lru_cache(maxsize=8)
+def compatible_lockup_dependencies(raw,current_sha):
+    from data.pipelines.lockup_reconciliation import unchanged_other_parser_logic
+    current=(Path(__file__).parents[1]/'collectors/dart_collector.py').read_text()
+    if hashlib.sha256(current.encode()).hexdigest()!=current_sha:
+        raise RuntimeError('stage_demand_parser_changed_during_analysis')
+    methods={'_extract_lockup_ratios_from_tables','_extract_disclosed_aggregate_lockup_ratio',
+             '_extract_aggregate_lockup_shares'}
+    compatible=[]
+    for snapshot in sorted((Path(raw)/'parser_source_snapshots').glob('*.json')):
+        saved=json.loads(snapshot.read_text());source=saved.get('source','')
+        if not re.search(r'^class DARTCollector\b',source,re.M):continue
+        sha=hashlib.sha256(source.encode()).hexdigest()
+        if saved.get('source_sha256')!=sha or snapshot.stem!=sha:
+            raise RuntimeError('stage_demand_dependency_snapshot_integrity_failed')
+        if sha!=current_sha and unchanged_other_parser_logic(source,current,methods):compatible.append(sha)
+    return tuple(compatible)
+
+
 def document_analysis(dart,body,receipt,corp,raw=None):
     identity={'schema':1,'receipt':receipt,'corp_code':corp,'body_sha256':hashlib.sha256(body.encode()).hexdigest(),
         'parser':digest(Path(__file__).parents[1]/'collectors/dart_collector.py'),
@@ -180,7 +199,7 @@ def document_analysis(dart,body,receipt,corp,raw=None):
         if saved['identity']!=identity or saved['sha256']!=hashlib.sha256(json.dumps(saved['result'],sort_keys=True).encode()).hexdigest():
             raise RuntimeError('stage_document_analysis_integrity_failed')
         return saved['result']
-    reused=None;previous=None
+    reused=None;previous=None;stable_components=None;stable_previous=None
     if path is not None:
         for sha in compatible_float_dependencies(str(Path(raw).resolve()),identity['float_parser']):
             previous_identity={**identity,'float_parser':sha}
@@ -192,11 +211,26 @@ def document_analysis(dart,body,receipt,corp,raw=None):
                     or set(saved['result'])!={'offering','demand','underwriter'}):
                 raise RuntimeError('stage_document_analysis_integrity_failed')
             reused=saved['result'];previous=digest(previous_path);break
-    result={'offering':dart._parse_offering_html(body,receipt),
+        if reused is None:
+            for sha in compatible_lockup_dependencies(str(Path(raw).resolve()),identity['parser']):
+                previous_identity={**identity,'parser':sha}
+                previous_path=path.parent/(hashlib.sha256(json.dumps(previous_identity,sort_keys=True).encode()).hexdigest()+'.json')
+                if not previous_path.exists():continue
+                saved=json.loads(previous_path.read_text())
+                if (saved['identity']!=previous_identity or
+                        saved['sha256']!=hashlib.sha256(json.dumps(saved['result'],sort_keys=True).encode()).hexdigest()
+                        or set(saved['result'])!={'offering','demand','underwriter'}):
+                    raise RuntimeError('stage_document_analysis_integrity_failed')
+                stable_components=saved['result'];stable_previous=digest(previous_path);break
+    result={'offering':dart._parse_offering_html(body,receipt) if stable_components is None else stable_components['offering'],
             'demand':dart._parse_demand_forecast_html(body,corp) if reused is None else reused['demand'],
-            'underwriter':parse_underwriters(body) if reused is None else reused['underwriter']}
+            'underwriter':(reused['underwriter'] if reused is not None else stable_components['underwriter']
+                           if stable_components is not None else parse_underwriters(body))}
+    reuse_proof=({'offering_and_underwriter_from':stable_previous,'demand_reparsed':True,
+                  'unchanged_outside_lockup_parser_proven':True} if stable_components is not None else
+                 {'demand_and_underwriter_from':previous,'offering_reparsed':True})
     if path is not None:atomic_json(path,{'identity':identity,'result':result,
-        'component_reuse':{'demand_and_underwriter_from':previous,'offering_reparsed':True},
+        'component_reuse':reuse_proof,
         'sha256':hashlib.sha256(json.dumps(result,sort_keys=True).encode()).hexdigest()})
     return result
 

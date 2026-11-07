@@ -48,6 +48,30 @@
   ],
   "samples": [
     {
+      "sample":"easycare_bound_share_unit_2019","receipt":"20190308000278","section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20190308000278&dcmNo=6532849&eleId=9&offset=237437&length=170849&dtd=dart3.xsd",
+      "sha256":"b021c57c52bf8f255893b715b4f363d0eb2563c0cc98282c82fe2f1c62e846e2",
+      "expected":{"lockup_commitment_ratio":0.4025},
+      "expected_evidence":{"lockup_structured_evidence":{"committed_quantity":396884000,"quantity_unit_binding":{"unit":"shares","independent_application_quantity":986147000}}},
+      "review_note":"The outcome header says application quantity without a literal share suffix. The same original bookbuilding unit table explicitly declares 1000 shares per quantity step and KRW100 per price step. Independent whole demand is 986147000 shares; preserve printed quantity percentage 40.25%, not count percentage 38.37%."
+    },
+    {
+      "sample":"cowin_bound_share_unit_2019","receipt":"20190723000079","section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20190723000079&dcmNo=6815834&eleId=9&offset=334563&length=163454&dtd=dart3.xsd",
+      "sha256":"0a496a4ca948295712d4ff5196b6d7f627482cf9c9124f3d770a0803dd9c09f4",
+      "expected":{"lockup_commitment_ratio":0.009},
+      "expected_evidence":{"lockup_structured_evidence":{"committed_quantity":2292364,"quantity_unit_binding":{"unit":"shares","independent_application_quantity":261667000}}},
+      "review_note":"Same-document bookbuilding quantity/price units bind the bare quantity header to shares. 2292364/261667000 supports directly printed 0.9% at one decimal percent; 2.9% refers to participant counts and is not the model input."
+    },
+    {
+      "sample":"knj_bound_share_unit_2019","receipt":"20191015000138","section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20191015000138&dcmNo=6925663&eleId=9&offset=257651&length=177389&dtd=dart3.xsd",
+      "sha256":"aaa0c2772c878f17de2f6d5c2954f83f1882018bc9a5835c6b37e2d63d88cea8",
+      "expected":{"lockup_commitment_ratio":0.055},
+      "expected_evidence":{"lockup_structured_evidence":{"committed_quantity":38544000,"quantity_unit_binding":{"unit":"shares","independent_application_quantity":701261000}}},
+      "review_note":"The official bookbuilding unit table states shares separately from KRW price steps. Committed 38544000 and independent demand 701261000 support printed 5.5%, not the adjacent 5.3% participant-count ratio. Raw outcome headers remain unchanged."
+    },
+    {
       "sample":"newpower_subtotal_lockup_2016","receipt":"20161118000332","section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
       "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20161118000332&dcmNo=5356606&eleId=9&offset=152736&length=84560&dtd=dart3.xsd",
       "sha256":"a9f3400e1dadedf0d4a8689b3b45ad3abe7a9ae31a14ec836c135d223cb588ac",

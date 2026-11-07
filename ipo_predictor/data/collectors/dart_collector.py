@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 28
+DEMAND_PARSER_VERSION = 29
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -1266,6 +1266,8 @@ class DARTCollector:
         table_parser.close()
         application_totals = set()
         application_sources = []
+        application_unit_sources = []
+        application_unit_conflicts = []
         integer = r"(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)"
 
         def independent_quantity(table, heading):
@@ -1332,6 +1334,25 @@ class DARTCollector:
                 'paired_dash_components_reconciled_as_zero':paired_dash_columns}
 
         for summary, heading in zip(table_parser.tables, table_parser.table_contexts):
+            compact=re.sub(r'\s+','',heading)
+            unit_title=re.search(r'수요예측(?:참가|참여)수량단위및가격단위$',compact)
+            if unit_title and not re.search(r'(?:차기|예정|비교회사|종속회사|국내|해외|외국|일부|당사)$',compact[:unit_title.start()]):
+                quantity_cells=[(i,1,row[1]) for i,row in enumerate(summary) if len(row)==2
+                                and re.sub(r'\s+','',row[0])=='수량단위']
+                price_cells=[row[1] for row in summary if len(row)==2 and re.sub(r'\s+','',row[0])=='가격단위']
+                if summary and [re.sub(r'\s+','',c) for c in summary[0]]==['수량단위','가격단위']:
+                    quantity_cells=[(i,0,row[0]) for i,row in enumerate(summary[1:],1) if len(row)==2]
+                    price_cells=[row[1] for row in summary[1:] if len(row)==2]
+                if len(quantity_cells)==len(price_cells)==1:
+                    i,c,raw_unit=quantity_cells[0]
+                    if (re.fullmatch(integer+r'\s*주',raw_unit.strip())
+                            and re.fullmatch(integer+r'\s*(?:원|KRW)',price_cells[0].strip())):
+                        application_unit_sources.append(json.loads(cls._table_evidence(summary,heading=heading,
+                            rule_id='DART_BOOKBUILDING_QUANTITY_UNIT_DECLARATION_V1',selected_row=i,selected_column=c,
+                            quantity_unit='shares',quantity_unit_raw=raw_unit,price_unit_raw=price_cells[0])))
+                    else:application_unit_conflicts.append(cls._table_evidence(summary,heading=heading))
+                elif quantity_cells or price_cells:
+                    application_unit_conflicts.append(cls._table_evidence(summary,heading=heading))
             quantity = independent_quantity(summary, heading)
             if quantity is not None:
                 application_totals.add(quantity['application_quantity'])
@@ -1451,6 +1472,9 @@ class DARTCollector:
             header=[header_corrections.get(cell,cell) for cell in header]
             columns = [i for i, cell in enumerate(header) if re.fullmatch(
                 r'(?:신청|참여)(?:수량|주식수)\((?:단위:)?주\)', cell)]
+            bare_columns=[i for i,cell in enumerate(header) if re.fullmatch(r'(?:신청|참여)(?:수량|주식수)',cell)]
+            if (application_unit_sources and not application_unit_conflicts
+                    and application_total is not None and application_sources):columns+=bare_columns
             totals = [(i,row) for i,row in enumerate(table) if row and re.fullmatch(
                 r'합계|총합계|총계|확약합계',re.sub(r'\s+', '',row[0]))]
             if len(columns)!=1 or len(totals)!=1:return None
@@ -1462,6 +1486,10 @@ class DARTCollector:
                    'independently_disclosed_application_total':application_total,
                    'independent_application_sources':application_sources}
             if normalizations:proof['header_unit_normalizations']=normalizations
+            if column in bare_columns:
+                proof['quantity_unit_binding']={'rule':'same_document_bookbuilding_share_unit_and_whole_quantity_v1',
+                    'raw_header':table[0][column],'unit':'shares','declarations':application_unit_sources,
+                    'independent_application_quantity':application_total}
             none_rows=[(i,r) for i,r in enumerate(table) if r and re.sub(r'\s+','',r[0]) in {'미확약','확약없음'}]
             if none_rows:
                 periods=[r[column].strip() for r in table[1:index] if len(r)>column and re.fullmatch(

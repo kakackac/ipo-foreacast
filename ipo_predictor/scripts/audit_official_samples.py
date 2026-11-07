@@ -19,6 +19,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.collectors.dart_collector import DARTCollector
 
 SAMPLES = {
+    "easycare_bound_share_unit_2019": "20190308000278",
+    "cowin_bound_share_unit_2019": "20190723000079",
+    "knj_bound_share_unit_2019": "20191015000138",
     "newpower_subtotal_lockup_2016": "20161118000332",
     "sjgroup_header_lockup_2019": "20191105000199",
     "taewoong_header_lockup_2019": "20191125000235",

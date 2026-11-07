@@ -304,6 +304,7 @@ class StageSnapshotTests(unittest.TestCase):
         parser=Parser()
         with tempfile.TemporaryDirectory() as root,patch.object(module,'digest',side_effect=digest),patch.object(
                 module,'compatible_float_dependencies',return_value=('old',)),patch.object(
+                module,'compatible_lockup_dependencies',return_value=()),patch.object(
                 module,'parse_underwriters',return_value={'tier':3}) as underwriters:
             first=document_analysis(parser,'<p>same</p>','20240101000001','00000001',root)
             revision[0]='new'
@@ -356,6 +357,85 @@ class StageSnapshotTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'dependency_snapshot_integrity_failed'):
                 module.compatible_float_dependencies(root,sha)
         module.compatible_float_dependencies.cache_clear()
+
+    def test_lockup_only_change_reuses_offering_and_underwriter_but_reparses_demand(self):
+        from data.pipelines import stage_snapshots as module
+        original=module.digest;revision=['old'];float_revision=['same'];other={'underwriter_source.py':'u1','feature_engineer.py':'t1'}
+        def digest(path):
+            if Path(path).name=='dart_collector.py':return revision[0]
+            if Path(path).name=='float_tables.py':return float_revision[0]
+            if Path(path).name in other:return other[Path(path).name]
+            return original(path)
+        class Parser:
+            offering=0;demand=0
+            def _parse_offering_html(self,*args):self.offering+=1;return {'offering':self.offering}
+            def _parse_demand_forecast_html(self,*args):self.demand+=1;return {'demand_version':revision[0]}
+        parser=Parser()
+        with tempfile.TemporaryDirectory() as root,patch.object(module,'digest',side_effect=digest),patch.object(
+                module,'compatible_float_dependencies',return_value=()),patch.object(
+                module,'compatible_lockup_dependencies',return_value=('old',)),patch.object(
+                module,'parse_underwriters',return_value={'tier':3}) as underwriters:
+            first=document_analysis(parser,'same','20240101000001','00000001',root)
+            revision[0]='new';second=document_analysis(parser,'same','20240101000001','00000001',root)
+            self.assertEqual((parser.offering,parser.demand,underwriters.call_count),(1,2,1))
+            self.assertEqual(first['offering'],second['offering']);self.assertEqual(first['underwriter'],second['underwriter'])
+            self.assertNotEqual(first['demand'],second['demand'])
+            document_analysis(parser,'same','20240101000001','00000001',root)
+            self.assertEqual((parser.offering,parser.demand),(1,2))
+            proofs=[json.loads(path.read_text())['component_reuse'] for path in (Path(root)/'stage_document_analyses').glob('*.json')]
+            self.assertEqual(sum(bool(p.get('offering_and_underwriter_from')) and p.get('demand_reparsed') for p in proofs),1)
+            for body,receipt,corp in [('changed','20240101000001','00000001'),
+                    ('same','20240101000002','00000001'),('same','20240101000001','00000002')]:
+                document_analysis(parser,body,receipt,corp,root)
+            self.assertEqual((parser.offering,parser.demand,underwriters.call_count),(4,5,4))
+            float_revision[0]='changed'
+            document_analysis(parser,'same','20240101000001','00000001',root)
+            self.assertEqual((parser.offering,parser.demand,underwriters.call_count),(5,6,5))
+            float_revision[0]='same';other['underwriter_source.py']='u2'
+            document_analysis(parser,'same','20240101000001','00000001',root)
+            self.assertEqual((parser.offering,parser.demand,underwriters.call_count),(6,7,6))
+            other['feature_engineer.py']='t2'
+            document_analysis(parser,'same','20240101000001','00000001',root)
+            self.assertEqual((parser.offering,parser.demand,underwriters.call_count),(7,8,7))
+
+    def test_lockup_component_reuse_rejects_corrupt_offering_results(self):
+        from data.pipelines import stage_snapshots as module
+        original=module.digest;revision=['old']
+        def digest(path):return revision[0] if Path(path).name=='dart_collector.py' else original(path)
+        class Parser:
+            def _parse_offering_html(self,*args):return {}
+            def _parse_demand_forecast_html(self,*args):return {}
+        with tempfile.TemporaryDirectory() as root,patch.object(module,'digest',side_effect=digest),patch.object(
+                module,'compatible_float_dependencies',return_value=()),patch.object(
+                module,'compatible_lockup_dependencies',return_value=('old',)):
+            document_analysis(Parser(),'same','20240101000001','00000001',root)
+            path=next((Path(root)/'stage_document_analyses').glob('*.json'));saved=json.loads(path.read_text())
+            saved['result']['offering']={'bad':1};path.write_text(json.dumps(saved));revision[0]='new'
+            with self.assertRaisesRegex(RuntimeError,'analysis_integrity_failed'):
+                document_analysis(Parser(),'same','20240101000001','00000001',root)
+
+    def test_lockup_dependency_proof_rejects_other_parser_changes_and_bad_snapshots(self):
+        import ast
+        from data.pipelines import stage_snapshots as module
+        current=(Path(module.__file__).parents[1]/'collectors/dart_collector.py').read_text()
+        tree=ast.parse(current)
+        for node in ast.walk(tree):
+            if isinstance(node,ast.FunctionDef) and node.name=='_extract_lockup_ratios_from_tables':
+                node.body=[ast.Return(value=ast.Dict(keys=[],values=[]))]
+        old=ast.unparse(ast.fix_missing_locations(tree));old_sha=hashlib.sha256(old.encode()).hexdigest()
+        unrelated=old.replace('MAX_RETRIES = 3','MAX_RETRIES = 4');unrelated_sha=hashlib.sha256(unrelated.encode()).hexdigest()
+        sha=hashlib.sha256(current.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as root:
+            directory=Path(root)/'parser_source_snapshots';directory.mkdir()
+            for text,key in [(old,old_sha),(unrelated,unrelated_sha)]:
+                (directory/(key+'.json')).write_text(json.dumps({'source':text,'source_sha256':key}))
+            module.compatible_lockup_dependencies.cache_clear()
+            self.assertEqual(module.compatible_lockup_dependencies(root,sha),(old_sha,))
+            (directory/(old_sha+'.json')).write_text(json.dumps({'source':old,'source_sha256':'bad'}))
+            module.compatible_lockup_dependencies.cache_clear()
+            with self.assertRaisesRegex(RuntimeError,'dependency_snapshot_integrity_failed'):
+                module.compatible_lockup_dependencies(root,sha)
+        module.compatible_lockup_dependencies.cache_clear()
 
     def test_linked_terms_fill_only_a_truly_unpopulated_field_and_preserve_its_origin(self):
         terms={'rcept_no':'20240101000001','rcept_dt':'2024-01-01','report_nm':'[발행조건확정]증권신고서(지분증권)'}

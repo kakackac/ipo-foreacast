@@ -69,6 +69,35 @@ class LockupRepairTests(unittest.TestCase):
             for bad in [html[html.index('<h3>'):],html.replace('1,000','1,100'),html.replace(header,'신청수랑(원)')]:
                 self.assertIsNone(DARTCollector._extract_lockup_ratios_from_tables(bad)['lockup_commitment_ratio'])
 
+    def test_bare_quantity_header_binds_same_document_bookbuilding_share_units(self):
+        unit=('<h3>수요예측 참가 수량단위 및 가격단위</h3><table>'
+              '<tr><td>구분</td><td>내용</td></tr><tr><td>수량단위</td><td>1,000주</td></tr>'
+              '<tr><td>가격단위</td><td>100원</td></tr></table>')
+        summary,outcome=self.flat_outcome().split('<h3>',1)
+        outcome='<h3>'+outcome.replace('기관수 및 신청수량','기관수').replace('신청수량(주)','신청수량')
+        html=summary+unit+outcome
+        parsed=DARTCollector._extract_lockup_ratios_from_tables(html)
+        self.assertEqual(parsed['lockup_commitment_ratio'],.1)
+        proof=json.loads(parsed['structured_evidence'])
+        self.assertEqual(proof['table'][0][2],'신청수량')
+        self.assertEqual(proof['quantity_unit_binding']['unit'],'shares')
+        self.assertEqual(proof['quantity_unit_binding']['declarations'][0]['quantity_unit_raw'],'1,000주')
+        for bad in [summary+outcome,html.replace('1,000주','1,000원'),
+                    html.replace('수요예측 참가 수량단위','차기 수요예측 참가 수량단위'),
+                    html.replace('<td>신청수량</td>','<td>신청금액</td>'),html.replace('1,000</td>','1,100</td>')]:
+            self.assertIsNone(DARTCollector._extract_lockup_ratios_from_tables(bad)['lockup_commitment_ratio'])
+
+    def test_bare_quantity_unit_binding_rejects_conflicting_or_ambiguous_unit_declarations(self):
+        summary,outcome=self.flat_outcome().split('<h3>',1)
+        outcome='<h3>'+outcome.replace('신청수량(주)','신청수량')
+        unit=('<h3>수요예측 참가 수량단위 및 가격단위</h3><table>'
+              '<tr><td>수량단위</td><td>가격단위</td></tr><tr><td>1,000주</td><td>100원</td></tr></table>')
+        self.assertEqual(DARTCollector._extract_lockup_ratios_from_tables(summary+unit+outcome)['lockup_commitment_ratio'],.1)
+        conflict=unit.replace('1,000주','1,000원')
+        self.assertIsNone(DARTCollector._extract_lockup_ratios_from_tables(summary+unit+conflict+outcome)['lockup_commitment_ratio'])
+        duplicate=unit.replace('</table>','<tr><td>1,000주</td><td>100원</td></tr></table>')
+        self.assertIsNone(DARTCollector._extract_lockup_ratios_from_tables(summary+duplicate+outcome)['lockup_commitment_ratio'])
+
     def test_committed_subtotal_before_noncommitted_is_not_the_whole_total(self):
         summary=self.flat_outcome().split('<h3>',1)[0]
         table=[['구분','기관수(개)','신청수량(주)'],['1개월 확약','1','100'],
