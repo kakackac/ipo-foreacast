@@ -113,6 +113,53 @@ class LockupRepairTests(unittest.TestCase):
         self.assertNotEqual(DARTCollector._extract_lockup_ratios_from_tables(html.replace('<td></td>','<td>-</td>'))[
             'rejection_reason'],'selected_document_lockup_outcome_cells_empty')
 
+    def test_dash_only_result_form_is_unreported_not_zero_or_numeric_conflict(self):
+        html='<h3>기관 수요예측 의무보유확약 신청내역</h3><table><tr><td>구분</td><td>기관수(개)</td><td>신청수량(주)</td></tr>'
+        html+=''.join(f'<tr><td>{label}</td><td>-</td><td>-</td></tr>' for label in ['3개월 확약','1개월 확약','합계'])+'</table>'
+        result=DARTCollector._extract_lockup_ratios_from_tables(html)
+        self.assertIsNone(result['lockup_commitment_ratio'])
+        self.assertEqual(result['parser_validation_status'],'value_not_found')
+        self.assertEqual(result['rejection_reason'],'selected_document_lockup_outcome_dash_only')
+        mixed=html.replace('<td>3개월 확약</td><td>-</td>','<td>3개월 확약</td><td>3</td>')
+        self.assertEqual(DARTCollector._extract_lockup_ratios_from_tables(mixed)['parser_validation_status'],'candidate_rejected')
+
+    def full_scope_lockup_table(self, total_label='총합계'):
+        return [['구분','국내기관투자자','국내기관투자자','해외기관투자자','해외기관투자자','합계','합계'],
+                ['구분','건수','수량','건수','수량','건수','수량'],
+                ['1개월 확약','1','90','1','10','2','100'],
+                ['미확약','8','800','1','100','9','900'],
+                [total_label,'9','890','2','110','11','1000']]
+
+    def test_all_institution_total_alias_is_verified_by_its_own_complete_quantity_partition(self):
+        for label in ['계','총합계','총계','총합']:
+            table=self.full_scope_lockup_table(label)
+            result=DARTCollector._extract_aggregate_lockup_shares(table)
+            self.assertAlmostEqual(result['lockup_commitment_ratio'],.1)
+            self.assertTrue(json.loads(result['structured_evidence'])['all_institution_domestic_foreign_headers'])
+            table[-1][-1]='1001'
+            self.assertIsNone(DARTCollector._extract_aggregate_lockup_shares(table))
+        table=self.full_scope_lockup_table();table[0]=[cell.replace('해외기관투자자','국내기관투자자') for cell in table[0]]
+        self.assertIsNone(DARTCollector._extract_aggregate_lockup_shares(table))
+        table=self.full_scope_lockup_table();table[0]=['구분','합계','합계','국내기관투자자','국내기관투자자','해외기관투자자','해외기관투자자']
+        self.assertIsNone(DARTCollector._extract_aggregate_lockup_shares(table))
+
+    def test_explicit_commitment_share_subtotal_and_percentage_are_not_counts(self):
+        table=self.full_scope_lockup_table('합계')
+        table.extend([['확약 소계','1','90','1','10','2','100'],
+                      ['확약 비중','11.11%','10.11%','50%','9.09%','18.18%','10.0%']])
+        result=DARTCollector._extract_disclosed_aggregate_lockup_ratio(table)
+        self.assertEqual(result['lockup_commitment_ratio'],.1)
+        self.assertEqual(json.loads(result['structured_evidence'])['selected_column'],6)
+        html='<h3>기관 수요예측 의무보유확약 기관수 및 신청수량</h3><table>'+''.join(
+            '<tr>'+''.join('<td>'+s+'</td>' for s in r)+'</tr>' for r in table)+'</table>'
+        self.assertEqual(DARTCollector._extract_lockup_ratios_from_tables(html)['lockup_commitment_ratio'],.1)
+        broken=json.loads(json.dumps(table));broken[-2][-1]='101'
+        self.assertIsNone(DARTCollector._extract_disclosed_aggregate_lockup_ratio(broken))
+        broken=json.loads(json.dumps(table));broken[-1][-1]='11.0%'
+        self.assertIsNone(DARTCollector._extract_disclosed_aggregate_lockup_ratio(broken))
+        table[0]=[cell.replace('해외기관투자자','국내기관투자자') for cell in table[0]]
+        self.assertIsNone(DARTCollector._extract_disclosed_aggregate_lockup_ratio(table))
+
     def test_same_original_section_but_changed_after_view_does_not_reuse_old_lockup(self):
         from data.collectors.dart_collector import DEMAND_PARSER_VERSION
         metadata={'rcept_no':'20240201000001','rcept_dt':'2024-02-01'}

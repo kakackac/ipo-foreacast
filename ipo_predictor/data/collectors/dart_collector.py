@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 26
+DEMAND_PARSER_VERSION = 27
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -1376,7 +1376,7 @@ class DARTCollector:
                 if none is None or all_total is None:
                     return check
                 committed = application_total-none
-                subtotal = quantity({'확약합계'})
+                subtotal = quantity({'확약합계', '확약소계'})
                 if subtotal is not None and subtotal != committed:
                     return {**check, 'status':'conflict', 'declared_committed_quantity':subtotal,
                             'noncommitted_quantity':none}
@@ -1685,6 +1685,14 @@ class DARTCollector:
             if empty and all(empty):
                 result['parser_validation_status'] = 'value_not_found'
                 result['rejection_reason'] = 'selected_document_lockup_outcome_cells_empty'
+            elif candidates and all(
+                    len(candidate['table'])>=3 and all(
+                        all(cell.strip() in {'','-'} for cell in row[1:])
+                        for row in candidate['table'][1:]) for candidate in candidates):
+                # A blank result form is not a zero, a numeric contradiction,
+                # or evidence that an earlier linked final result is absent.
+                result['parser_validation_status'] = 'value_not_found'
+                result['rejection_reason'] = 'selected_document_lockup_outcome_dash_only'
             elif all(any(re.search(r'배정\s*(?:수량|주식\s*수)',cell)
                          for row in candidate['table'][:2] for cell in row)
                      and not any(re.search(r'(?:신청|참여)\s*(?:수량|주식\s*수)',cell)
@@ -1701,19 +1709,47 @@ class DARTCollector:
     def _extract_disclosed_aggregate_lockup_ratio(cls, table: list[list[str]]) -> Optional[dict]:
         """Read an explicit all-institution application-quantity percentage, not counts."""
         for index, row in enumerate(table):
-            if not row or not re.fullmatch(
-                r"총참여건수및(?:신청)?수량대비비율(?:\(%\))?", re.sub(r"\s+", "", row[0])
-            ):
+            if not row:
                 continue
             headers = table[:index]
+            label=re.sub(r"\s+", "", row[0])
+            header_text=re.sub(r"\s+", "", ' '.join(' '.join(h) for h in headers[:3]))
+            all_institutions=(bool(re.search(r'국내기관투자자',header_text)) and
+                              bool(re.search(r'해외기관투자자|외국기관투자자',header_text)))
+            if not (re.fullmatch(r"총참여건수및(?:신청)?수량대비비율(?:\(%\))?",label)
+                    or label=='확약비중' and all_institutions):
+                continue
             columns = [c for c in range(len(row))
                        if any(c < len(h) and re.sub(r"\s+", "", h[c]) in ("합계", "전체") for h in headers)
                        and any(c < len(h) and re.sub(r"\s+", "", h[c]) in ("수량", "신청수량") for h in headers)]
             if len(columns) != 1:
                 continue
             column = columns[0]
+            quantity_columns=[c for h in headers[:3] for c,cell in enumerate(h)
+                              if re.sub(r'\s+','',cell) in {'수량','신청수량','신청주식수'}]
+            if label=='확약비중' and (not quantity_columns or column!=max(quantity_columns)):
+                continue
             match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)%", row[column].replace(" ", ""))
             if match and 0 <= float(match[1]) <= 100:
+                internal_check=None
+                if label=='확약비중':
+                    def quantity(labels):
+                        cells=[r[column].strip() for r in table[:index] if len(r)>column and re.sub(r'\s+','',r[0]) in labels]
+                        if len(cells)!=1 or not re.fullmatch(r'[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+',cells[0]):return None
+                        return int(cells[0].replace(',',''))
+                    total=quantity({'합계','총합계','총계','계'})
+                    none=quantity({'미확약','확약없음'})
+                    committed=quantity({'확약소계','확약합계'})
+                    if total is None or total<=0 or none is None or committed is None or committed+none!=total:
+                        continue
+                    value=float(match[1])/100
+                    quantum=10**(-len(match[1].partition('.')[2]))/100
+                    computed=committed/total
+                    if not (value-quantum/2-1e-12<=computed<=value+quantum/2+1e-12
+                            or value-1e-12<=computed<value+quantum-1e-12):continue
+                    internal_check={'committed':committed,'noncommitted':none,'total':total,
+                        'computed_fraction':computed,'display_quantum_fraction':quantum,
+                        'status':'compatible','all_institution_domestic_foreign_headers':True}
                 return {
                     "lockup_commitment_ratio": float(match[1]) / 100,
                     "parse_method": "lockup_explicit_aggregate_quantity_percentage",
@@ -1723,6 +1759,7 @@ class DARTCollector:
                     "structured_evidence": cls._table_evidence(
                         table, selected_row=index, selected_column=column,
                         scope="all_institution_application_quantity_percentage",
+                        **({'internal_aggregate_quantity_check':internal_check} if internal_check else {}),
                     ),
                 }
         return None
@@ -1741,6 +1778,9 @@ class DARTCollector:
         if start is None:
             return None
         headers = table[:start]
+        header_text=re.sub(r'\s+','', ' '.join(' '.join(row) for row in headers))
+        all_institutions=(bool(re.search(r'국내기관투자자',header_text)) and
+                          bool(re.search(r'해외기관투자자|외국기관투자자',header_text)))
         columns = [c for c in range(max(map(len, headers), default=0))
                    if any(c < len(row) and re.fullmatch(r"\s*합\s*계\s*", row[c]) for row in headers)
                    and any(c < len(row) and re.fullmatch(r"\s*(?:신청\s*주식\s*수|수량)\s*", row[c]) for row in headers)]
@@ -1780,6 +1820,9 @@ class DARTCollector:
         if len(columns) != 1:
             return None
         column = columns[0]
+        quantity_columns=[c for h in headers for c,cell in enumerate(h)
+                          if re.sub(r'\s+','',cell) in {'수량','신청수량','신청주식수'}]
+        complete_scope=(all_institutions and quantity_columns and column==max(quantity_columns))
         quantities = {}
         dash_rows = []
         total_label_alias = False
@@ -1795,13 +1838,13 @@ class DARTCollector:
                 match=cell_quantity.fullmatch(value)
                 if match is None:return None
                 value=match['quantity']
-            if label == '확약합계':
+            if label in {'확약합계','확약소계'} or label=='소계' and all_institutions:
                 if committed_subtotal is not None or not re.fullmatch(r"[0-9][0-9,]*|-", value):
                     return None
                 committed_subtotal = int(value.replace(',', '')) if value != '-' else 0
                 continue
-            if label in {'계', '총합계', '총계'}:
-                if application_total is None:
+            if label in {'계', '총합계', '총계', '총합'}:
+                if application_total is None and not complete_scope:
                     return None
                 label = '합계'
                 total_label_alias = True
@@ -1852,6 +1895,7 @@ class DARTCollector:
                 dash_rows_reconciled_as_zero=dash_rows,
                 total_label_alias_reconciled=total_label_alias,
                 row_order_independent=True,
+                all_institution_domestic_foreign_headers=all_institutions,
                 single_application_quantity_schema=single_quantity_schema,
                 independently_disclosed_committed_subtotal=committed_subtotal,
                 **({'explicit_count_and_share_cell_units':True} if composite_units else {}),

@@ -48,6 +48,50 @@
   ],
   "samples": [
     {
+      "sample":"unitechno_dash_lockup_2016","receipt":"20160902000083",
+      "section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20160902000083&dcmNo=5280828&eleId=9&offset=148665&length=103882&dtd=dart3.xsd",
+      "sha256":"ab52dafcecb71f3eab58f40728f9572f4c8102ac315f830a2dc6837c79328648",
+      "expected":{"lockup_commitment_ratio":null,"lockup_parser_validation_status":"value_not_found","lockup_rejection_reason":"selected_document_lockup_outcome_dash_only"},
+      "review_note":"All commitment result/count/quantity cells in this selected official section are dashes. This is neither an explicit zero nor a numeric contradiction and does not prove issuer-wide nonpublication."
+    },
+    {
+      "sample":"socar_total_alias_lockup_2022","receipt":"20220809000316",
+      "section_title":"I. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20220809000316&dcmNo=8759480&eleId=7&offset=572984&length=200236&dtd=dart3.xsd",
+      "sha256":"073c6815f634ad9d21679747023b2988516b1e95efa1595a87c4e39c71656409",
+      "expected":{"lockup_commitment_ratio":0.0017639779663115845},
+      "expected_evidence":{"lockup_structured_evidence":{"committed":198000,"noncommitted":112048300,"total":112246300,"all_institution_domestic_foreign_headers":true}},
+      "review_note":"The domestic/foreign total quantity column contains committed 198000, noncommitted 112048300 and explicit grand total 112246300. 'Grand total' is a total label, not a missing denominator. Participant counts 19/348 must not replace quantities."
+    },
+    {
+      "sample":"modelsolution_subtotal_lockup_2022","receipt":"20220923000080",
+      "section_title":"I. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20220923000080&dcmNo=8815310&eleId=8&offset=281272&length=187889&dtd=dart3.xsd",
+      "sha256":"60b53c4a606716b77f57448e423028c433e16009e13439f659612c7073e0ec3e",
+      "expected":{"lockup_commitment_ratio":0.0812},
+      "expected_evidence":{"lockup_structured_evidence":{"internal_aggregate_quantity_check":{"committed":101520000,"noncommitted":1148625000,"total":1250145000,"status":"compatible"}}},
+      "review_note":"Explicit total quantity commitment percentage is 8.12%, not adjacent count percentage 8.41%. Declared commitment subtotal 101520000 plus noncommitment 1148625000 equals whole 1250145000. Preserve direct percentage at original precision."
+    },
+    {
+      "sample":"seculetter_total_alias_lockup_2023","receipt":"20230811001361",
+      "section_title":"I. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20230811001361&dcmNo=9382684&eleId=7&offset=889736&length=208146&dtd=dart3.xsd",
+      "sha256":"ba6454ff5c4f90f8fff15a93df9df01d387c63a62656ed945adb2004fc23c555",
+      "expected":{"lockup_commitment_ratio":0.03142752683023105},
+      "expected_evidence":{"lockup_structured_evidence":{"committed":48567000,"noncommitted":1496798000,"total":1545365000}},
+      "review_note":"The whole domestic-and-foreign quantity column reconciles 48567000 committed and 1496798000 noncommitted to explicit 1545365000. Count and application-price columns are not quantities."
+    },
+    {
+      "sample":"hyundaihims_total_alias_lockup_2024","receipt":"20240116000207",
+      "section_title":"I. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20240116000207&dcmNo=9577790&eleId=7&offset=306355&length=225920&dtd=dart3.xsd",
+      "sha256":"c82e90db441ae18edf5ea17cdd3e1176c0a9e22e2c9c430ca183badbe8c0a2fd",
+      "expected":{"lockup_commitment_ratio":0.11984318392818501},
+      "expected_evidence":{"lockup_structured_evidence":{"committed":412041000,"noncommitted":3026127000,"total":3438168000}},
+      "review_note":"The institutional quantity total is explicitly 3438168000, including noncommitment 3026127000 and commitment 412041000. No four-duration completeness assumption or participant-count percentage is used."
+    },
+    {
       "sample": "sunic_threshold_float_2017", "receipt": "20170908000030",
       "section_title": "Ⅲ. 투자위험요소",
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170908000030&dcmNo=5779318&eleId=17&offset=204113&length=196688&dtd=dart3.xsd",

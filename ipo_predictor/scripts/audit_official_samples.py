@@ -19,6 +19,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.collectors.dart_collector import DARTCollector
 
 SAMPLES = {
+    "unitechno_dash_lockup_2016": "20160902000083",
+    "socar_total_alias_lockup_2022": "20220809000316",
+    "modelsolution_subtotal_lockup_2022": "20220923000080",
+    "seculetter_total_alias_lockup_2023": "20230811001361",
+    "hyundaihims_total_alias_lockup_2024": "20240116000207",
     "sunic_threshold_float_2017": "20170908000030",
     "cng_malformed_quantity_float_2018": "20180115000154",
     "cntus_option_scope_float_2021": "20210115000208",
