@@ -273,6 +273,19 @@ def connect_event(dart, raw_dir, event, candidates, cached_only=False, *, verify
             break
     proof['source_selection_policy'] = 'latest_complete_pre_cutoff_document_v2'
     _resolve_supply_bundles(values, proof, documents, event.offering_price, event.listing_date)
+    from data.pipelines.band_source_resolver import resolve_offering_band
+    band_documents = [(m,proof['supplementary'] if m.get('supplementary') else proof,d)
+                      for m,d,_ in documents]
+    band = resolve_offering_band(raw_dir,metadata,proof,event.offering_price,event.listing_date,dart,
+                                parsed_documents=band_documents,primary_body=body)
+    proof['resolved_band'] = band
+    for field in ('price_band_low','price_band_high'):
+        values[field] = band[field]
+        proof['field_sources'].pop(field,None)
+        if band['price_band_rcept_no'] is not None:
+            proof['field_sources'][field] = {'receipt':band['price_band_rcept_no'],
+                'source_url':band['price_band_source_url'],'available_at':(
+                    pd.Timestamp(band['price_band_rcept_dt']).tz_localize('Asia/Seoul')+pd.Timedelta(days=1)).isoformat()}
     proof.update(company_url=url,company_sha256=company_hash,company_identity=company)
     proof['candidate_calendars'] = sorted({s['path']:s for c in candidates for s in c.get('calendar_sources',[])}.values(),
                                            key=lambda s:s['path'])

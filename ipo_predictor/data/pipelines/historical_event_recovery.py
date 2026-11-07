@@ -218,7 +218,7 @@ def source_record(event, values, meta, proof, document):
         record.update({k:v for k,v in selected_doc.items()
                        if k.startswith(prefixes) and pd.api.types.is_scalar(v)})
     # These are resolved bundles, not independently filled raw scalar fields.
-    for key in ('resolved_float', 'resolved_structure'):
+    for key in ('resolved_float', 'resolved_structure', 'resolved_band'):
         bundle = proof.get(key)
         if bundle is not None:
             record.update({field:value for field,value in bundle.items() if field not in {'source_url','available_at'}})

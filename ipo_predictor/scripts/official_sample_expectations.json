@@ -520,6 +520,47 @@
       "review_note": "The institutional participation total competition cell is a dash, not a numeric ratio. Its domestic and foreign application quantities sum to 64603002, and counts sum to 389. Independently, the share-quantity column of the lockup outcome shows 136775 committed plus 64466227 noncommitted, total 64603002. Preserve both tables and coordinates. No competition ratio is reconstructed and missing duration rows are not required."
     },
     {
+      "sample": "woorison_terms_band_2016",
+      "receipt": "20160714000393",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160714000393&dcmNo=5221191&eleId=1&offset=738&length=174802&dtd=dart3.xsd",
+      "sha256": "2251bda58fa7edbddb6c223ea78e9d3a5cdac88e50bd0781e227beac2d7d6b26",
+      "expected": {"offering_price": 2210, "price_band_low": 1935, "price_band_high": 2210,
+        "price_band_validation_status": "direct_currency_band"},
+      "review_note": "The explicitly selected after-correction view states the KRW 1935-2210 hoped band and confirmed price 2210. The same-day linked complete prospectus omits the band. Preserve the notice as the band source and the complete prospectus as the independently confirmed price source."
+    },
+    {
+      "sample": "woorison_prospectus_band_omitted_2016",
+      "receipt": "20160714000401",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160714000401&dcmNo=5221204&eleId=9&offset=223444&length=139111&dtd=dart3.xsd",
+      "sha256": "b0d08e325da4a0b5c40fc6beea4e75b6fa03c8fb1fa5bb61b318e6b9842d9c24",
+      "expected": {"offering_price": 2210, "price_band_low": null, "price_band_high": null},
+      "review_note": "This original explicitly confirms price 2210 but does not repeat a hoped band. Do not attribute the amended band's extraction to this receipt."
+    },
+    {
+      "sample": "madup_terms_ambiguous_band_2026",
+      "receipt": "20260622000382",
+      "section_title": "증권발행조건확정",
+      "extraction_view": "normalized_after_correction_v2",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260622000382&dcmNo=11442273&eleId=1&offset=647&length=432301&dtd=dart4.xsd",
+      "sha256": "37d56bb338e4c86e905dc4d109ac0ee776b805cae0d641d45a9dba00c2d02cb2",
+      "expected": {"offering_price": 8000, "price_band_low": null, "price_band_high": null,
+        "price_band_validation_status": "conflicting_bands_review_required"},
+      "review_note": "After-view contains the current KRW 7000-8000 band with final price 8000 and a separate older valuation passage saying 6900-7900. This broad parser ambiguity is not two independently verified current bands. Do not donate from this ambiguous notice; the later bidirectionally linked complete prospectus has its own clear current band."
+    },
+    {
+      "sample": "madup_later_prospectus_band_2026",
+      "receipt": "20260622000384",
+      "section_title": "I. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260622000384&dcmNo=11442278&eleId=7&offset=514249&length=301163&dtd=dart4.xsd",
+      "sha256": "ed77a99b7568ad225cfe09748b3192fe0f415b8d31d079f6b1fd289c08b9fbac",
+      "expected": {"offering_price": 8000, "price_band_low": 7000, "price_band_high": 8000,
+        "price_band_validation_status": "direct_currency_band"},
+      "review_note": "The later same-day complete prospectus explicitly states the current 7000-8000 band and price 8000. Retain its own verified band despite the earlier notice parser ambiguity. Genuine differences between two verified current bands remain held."
+    },
+    {
       "sample": "sunic_terms_2017",
       "receipt": "20170907000115",
       "section_title": "증권발행조건확정",

@@ -90,8 +90,21 @@ def connection_contract():
              'record':here.with_name('historical_event_recovery.py'),
              'float':here.with_name('float_source_resolver.py'),
              'float_tables':here.parents[1]/'collectors/float_tables.py',
+             'band':here.with_name('band_source_resolver.py'),
              'corrections':here.with_name('correction_views.py'), 'adapter':here}
-    return {name:digest(path) for name,path in paths.items()}
+    result = {name:digest(path) for name,path in paths.items()}
+    import ast
+    selection = {}
+    for filename,names in [('lockup_reconciliation.py',{'documents','original_body'}),
+                           ('stage_snapshots.py',{'amendment_view'})]:
+        tree = ast.parse(here.with_name(filename).read_text())
+        selected = {node.name:ast.dump(node,include_attributes=False) for node in tree.body
+                    if isinstance(node,ast.FunctionDef) and node.name in names}
+        if set(selected) != names: raise RuntimeError('band_selection_dependency_missing')
+        selection.update(selected)
+    result['band'] = hashlib.sha256(json.dumps({'resolver':result['band'],
+        'selection':selection},sort_keys=True).encode()).hexdigest()
+    return result
 
 
 def checkpoint_identity(event, record, contract):

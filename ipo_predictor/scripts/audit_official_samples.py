@@ -70,6 +70,10 @@ SAMPLES = {
     "design_malformed_rate_2018": "20181106000423",
     "gnbs_independent_lockup_2021": "20211018000277",
     "qrt_independent_quantity_2022": "20221021000286",
+    "woorison_terms_band_2016": "20160714000393",
+    "woorison_prospectus_band_omitted_2016": "20160714000401",
+    "madup_terms_ambiguous_band_2026": "20260622000382",
+    "madup_later_prospectus_band_2026": "20260622000384",
 }
 
 

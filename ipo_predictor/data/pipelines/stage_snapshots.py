@@ -192,7 +192,7 @@ def result_day_document(metadata, terms, load, analyse=None):
     analyse=analyse or (lambda m,b,c:document_analysis(dart,b,m['rcept_no'],c))
     full_analysis=deepcopy(analyse(chosen[0],chosen[1],chosen[2]['corp_code']))
     full_price=full_analysis['offering'];full_demand=full_analysis['demand']
-    notices=[];field_sources={};held_fields={}
+    notices=[];field_sources={};held_fields={};band_notices=[]
     for m,body,proof in day:
         if proof.get('content_scope','full')=='full':continue
         linked=(m['rcept_no'] in chosen[2].get('related_receipts',[])
@@ -215,6 +215,8 @@ def result_day_document(metadata, terms, load, analyse=None):
         else:view=None
         partial_analysis=analyse(m,body,proof['corp_code'])
         price=partial_analysis['offering'];demand=partial_analysis['demand']
+        band_notices.append({'receipt':m['rcept_no'],'document':price,'origin':proof,
+                             'metadata':m,'linked':linked,'view':view})
         if view and view.get('rule')=='horizontal_after_cells_consistency_only_v1':
             explicit_prices={int(x.replace(',','')) for x in re.findall(
                 r'(?:모집\s*\(\s*매출\s*\)|모집\s*및\s*매출|모집|매출)\s*'
@@ -257,8 +259,28 @@ def result_day_document(metadata, terms, load, analyse=None):
                 continue
             raise ValueError('stage_same_day_amendment_result_conflict')
         notices.append({'origin':proof,'after_correction_view':view,'field_checks':checks})
+    from data.pipelines.band_source_resolver import select_notice_band
+    band,band_donor,band_checks=select_notice_band(full_price,band_notices,full_price.get('offering_price'),
+                                                complete_receipt=chosen[0]['rcept_no'])
+    full_analysis['offering']=band
+    if band_donor:
+        def component(origin):
+            return {key:origin[key] for key in ('receipt','corp_code','published_at','available_at',
+                                              'source_url','index_sha256','sections')}
+        band_origin={**component(band_donor['origin']),'band_after_view':band_donor['view'],
+            'source_selection_rule':'same_day_linked_confirmed_after_notice_band_v1'}
+        for field in ('price_band_low','price_band_high'):field_sources[field]=band_origin
+        price_origin=component(chosen[2])
+        sections={s['url']:s for source in (price_origin,band_origin) for s in source['sections']}
+        for field in ('offering_price_band_position','band_exceeded'):
+            field_sources[field]={**price_origin,'sections':list(sections.values()),
+                'available_at':max(local(price_origin['available_at']),local(band_origin['available_at'])).isoformat(),
+                'component_sources':{'band':band_origin,'price':price_origin},
+                'source_selection_rule':'band_and_confirmed_price_independent_origins_v1'}
+    elif band.get('price_band_validation_status')=='conflicting_bands_review_required':
+        held_fields['price_band']={'reason':'same_day_official_band_conflict','checks':band_checks}
     return chosen[0],chosen[1],{**chosen[2],'same_day_terms_checks':notices,
-        'result_field_sources':field_sources,'held_result_fields':held_fields},full_analysis
+        'result_field_sources':field_sources,'held_result_fields':held_fields,'band_source_checks':band_checks},full_analysis
 
 
 def same_demand_printed_rounding(left,right):
@@ -691,6 +713,7 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
         'financial_summary':Path(__file__).with_name('financial_history.py'),
         'correction_views':Path(__file__).with_name('correction_views.py'),
         'source_document_selection':Path(__file__).with_name('lockup_reconciliation.py'),
+        'band_sources':Path(__file__).with_name('band_source_resolver.py'),
         'financial_parser':Path(__file__).with_name('disclosure_financials.py'),
         'float_tables':Path(__file__).parents[1]/'collectors/float_tables.py'}
     identity['dependency_sha256']={name:digest(path) for name,path in dependencies.items()}
