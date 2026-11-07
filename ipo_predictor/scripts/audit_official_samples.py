@@ -69,6 +69,7 @@ SAMPLES = {
     "iljin_prospectus_conflict_2021": "20210823000386",
     "design_malformed_rate_2018": "20181106000423",
     "gnbs_independent_lockup_2021": "20211018000277",
+    "qrt_independent_quantity_2022": "20221021000286",
 }
 
 

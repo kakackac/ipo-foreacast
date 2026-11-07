@@ -4,6 +4,60 @@ from data.collectors.dart_collector import DARTCollector
 
 
 class InstitutionalParticipationSummaryTests(unittest.TestCase):
+    def quantity_result(self, table, heading='수요예측 결과 (가) 수요예측 참여 내역', total='1000'):
+        html='<p>'+heading+'</p><table>'+''.join('<tr>'+''.join(
+            '<td>'+c+'</td>' for c in row)+'</tr>' for row in table)+'</table>'
+        html+='<p>의무보유 확약 신청내역</p><table><tr><td>구분</td><td>신청수량(주)</td></tr>'
+        html+='<tr><td>3개월 확약</td><td>100</td></tr><tr><td>미확약</td><td>900</td></tr>'
+        html+='<tr><td>총합계</td><td>'+total+'</td></tr></table>'
+        return DARTCollector(api_key='unused')._parse_demand_forecast_html(html,'00000001')
+
+    def test_independent_participation_quantity_does_not_need_a_rate(self):
+        table=[['구분','국내 기관투자자','해외 기관투자자','합계'],
+            ['건수','8','2','10'],['수량','800','200','1000'],['경쟁률','8','2','-']]
+        for cell in ['-', '', '771,73:1']:
+            table[-1][-1]=cell
+            parsed=self.quantity_result(table)
+            self.assertIsNone(parsed['institutional_demand_ratio'])
+            self.assertEqual(parsed['lockup_commitment_ratio'],.1)
+            proof=json.loads(parsed['lockup_structured_evidence'])
+            source=proof['independent_application_sources'][0]
+            self.assertEqual(source['application_quantity'],1000)
+            self.assertEqual(source['table'][-1][-1],cell)
+            self.assertEqual(source['rule_id'],'DART_INDEPENDENT_APPLICATION_QUANTITY_V1')
+
+    def test_independent_summary_quantity_does_not_need_a_rate(self):
+        table=[['참여건수(건)','신청수량(주)','단순경쟁률'],['10','1000','-']]
+        parsed=self.quantity_result(table,heading='기관투자자 수요예측 참여내역')
+        self.assertIsNone(parsed['institutional_demand_ratio'])
+        self.assertEqual(parsed['lockup_commitment_ratio'],.1)
+
+    def test_independent_quantity_rejects_partial_scope_wrong_units_and_totals(self):
+        table=[['구분','국내 기관투자자','해외 기관투자자','합계'],
+            ['건수','8','2','10'],['수량','800','200','1000'],['경쟁률','8','2','-']]
+        for change in ['domestic_only','retail','planned','allocation','money','scaled_unit',
+                       'bad_grouping','quantity_sum','count_sum','duplicate_total']:
+            with self.subTest(change=change):
+                changed=json.loads(json.dumps(table));heading='수요예측 결과 (가) 수요예측 참여 내역'
+                if change=='domestic_only':heading='국내 기관투자자 수요예측 참여내역'
+                if change=='retail':heading='일반청약 참여내역'
+                if change=='planned':heading+=' 예정'
+                if change=='allocation':changed[2][0]='배정수량'
+                if change=='money':changed[2][0]='신청금액(원)'
+                if change=='scaled_unit':changed[2][0]='신청수량(백만주)'
+                if change=='bad_grouping':changed[2][-1]='1,00'
+                if change=='quantity_sum':changed[2][1]='801'
+                if change=='count_sum':changed[1][1]='9'
+                if change=='duplicate_total':changed[0][1]='합계'
+                parsed=self.quantity_result(changed,heading=heading)
+                self.assertIsNone(parsed['lockup_commitment_ratio'])
+
+    def test_independent_quantity_must_match_lockup_outcome_total(self):
+        table=[['참여건수(건)','신청수량(주)','단순경쟁률'],['10','1001','-']]
+        parsed=self.quantity_result(table,heading='기관투자자 수요예측 참여내역')
+        self.assertIsNone(parsed['lockup_commitment_ratio'])
+        self.assertEqual(parsed['lockup_rejection_reason'],'lockup_independent_application_quantity_mismatch')
+
     def test_malformed_competition_does_not_discard_independently_valid_commitment_quantities(self):
         table=[['구분','국내 기관투자자','해외 기관투자자','합계'],
             ['수량','800','200','1000'],['경쟁률','8','2','771,73:1']]

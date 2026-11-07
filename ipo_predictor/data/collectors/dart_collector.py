@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 24
+DEMAND_PARSER_VERSION = 25
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -1265,7 +1265,73 @@ class DARTCollector:
         table_parser.feed(raw_html)
         table_parser.close()
         application_totals = set()
+        application_sources = []
+        integer = r"(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)"
+
+        def independent_quantity(table, heading):
+            compact = re.sub(r"\s+", "", heading)
+            numbering = r"(?:[①-⑳]|\d+[.)]|\([가-하]\))*"
+            scope = re.search(
+                r"(?:수요예측결과(?:및배정결과)?(?:통보)?" + numbering
+                + r"(?:기관투자자)?수요예측(?:참여|참가)(?:내역|결과)"
+                r"|기관투자자수요예측(?:참여|참가)(?:내역|결과))$", compact)
+            if not scope or re.search(r"(?:국내|해외|일부|당사)$", compact[:scope.start()]):
+                return None
+            if len(table) == 2:
+                headers = [re.sub(r"\s+", "", c) for c in table[0]]
+                row = table[1]
+                offset = 0
+                if headers[:1] == ['구분'] and len(row) == 4 and re.sub(r'\s+', '', row[0]) in {
+                        '국내외기관투자자', '국내및해외기관투자자', '전체기관투자자', '합계', '전체'}:
+                    headers, row, offset = headers[1:], row[1:], 1
+                if (len(headers) == len(row) == 3
+                        and re.fullmatch(r"(?:참여|참가)건수(?:\(건\))?", headers[0])
+                        and re.fullmatch(r"(?:신청수량|참여수량|참가수량|참여주식수)(?:\(주\))?", headers[1])
+                        and re.fullmatch(r"단순경쟁[률율](?:\([:：]1\))?", headers[2])):
+                    count = re.fullmatch('('+integer+r")\s*건?(?:\s*\(\s*주\s*[1-9][0-9]*\s*\))?", row[0])
+                    quantity = re.fullmatch('('+integer+r")\s*주?", row[1])
+                    if count and quantity:
+                        return {'application_quantity':int(quantity[1].replace(',', '')),
+                            'selected_row':1, 'selected_column':offset+1,
+                            'scope':'institutional_participation_summary_quantity'}
+            # Horizontal participation tables identify share quantities by their
+            # count/quantity/rate row schema, independently of the rate's value.
+            headers = table[:next((i for i, row in enumerate(table) if row and re.fullmatch(
+                r"(?:참여)?건수(?:\(건\))?", re.sub(r"\s+", "", row[0]))), 0)]
+            text = re.sub(r"\s+", "", ' '.join(' '.join(row) for row in headers))
+            if not (re.search(r"해외기관투자자|외국기관투자자", text)
+                    and re.search(r"국내기관투자자|운용사\(집합\)|투자매매", text)):
+                return None
+            columns = {c for row in headers for c, cell in enumerate(row)
+                       if re.fullmatch(r"합계|전체", re.sub(r"\s+", "", cell))}
+            quantity_rows = [(i, row) for i, row in enumerate(table) if row and re.fullmatch(
+                r"(?:신청)?수량(?:\(주\))?", re.sub(r"\s+", "", row[0]))]
+            count_rows = [row for row in table if row and re.fullmatch(
+                r"(?:참여)?건수(?:\(건\))?", re.sub(r"\s+", "", row[0]))]
+            if len(columns) != 1 or len(quantity_rows) != 1 or len(count_rows) != 1:
+                return None
+            column = next(iter(columns))
+            index, row = quantity_rows[0]
+            for values in (row, count_rows[0]):
+                if (column != len(values)-1 or column < 2
+                        or not all(re.fullmatch(integer, cell.strip()) for cell in values[1:])
+                        or sum(int(cell.replace(',', '')) for cell in values[1:column])
+                        != int(values[column].replace(',', ''))):
+                    return None
+            return {'application_quantity':int(row[column].replace(',', '')),
+                'selected_row':index, 'selected_column':column,
+                'scope':'institutional_domestic_foreign_quantity_total',
+                'component_quantities_and_counts_reconciled':True}
+
         for summary, heading in zip(table_parser.tables, table_parser.table_contexts):
+            quantity = independent_quantity(summary, heading)
+            if quantity is not None:
+                application_totals.add(quantity['application_quantity'])
+                application_sources.append(json.loads(cls._table_evidence(
+                    summary, heading=heading, rule_id='DART_INDEPENDENT_APPLICATION_QUANTITY_V1', **quantity)))
+                continue
+            # Retain other previously supported participation schemas, but do
+            # not require a successful rate for the independent schemas above.
             summary_result=cls._extract_aggregate_demand_ratio(summary, heading)
             if summary_result is None:
                 continue
@@ -1279,7 +1345,7 @@ class DARTCollector:
                            if re.fullmatch(r"합계|전체", re.sub(r"\s+", "", cell))}
                 if len(columns) == 1:
                     c = next(iter(columns))
-                    if c < len(row) and re.fullmatch(r"[0-9][0-9,]*", row[c]):
+                    if c < len(row) and re.fullmatch(integer, row[c]):
                         application_totals.add(int(row[c].replace(",", "")))
         application_total = next(iter(application_totals)) if len(application_totals) == 1 else None
         if len(application_totals)>1:
@@ -1292,6 +1358,8 @@ class DARTCollector:
             if application_total is None or application_total <= 0:
                 return check
             check['independent_application_quantity'] = application_total
+            if application_sources:
+                check['independent_application_sources'] = application_sources
             rows = [(re.sub(r"\s+", "", row[0]), row[column].strip())
                     for row in table if len(row)>column]
             def quantity(labels):
@@ -1401,6 +1469,10 @@ class DARTCollector:
             diagnostics={}
             aggregate_shares = cls._extract_aggregate_lockup_shares(table, application_total, context,diagnostics)
             if aggregate_shares is not None:
+                if application_sources:
+                    evidence = json.loads(aggregate_shares['structured_evidence'])
+                    evidence['independent_application_sources'] = application_sources
+                    aggregate_shares['structured_evidence'] = json.dumps(evidence, ensure_ascii=False)
                 result.update(aggregate_shares)
                 return result
             if diagnostics:

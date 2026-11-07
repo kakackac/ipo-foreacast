@@ -509,6 +509,17 @@
       "review_note": "The marker follows a BR after the annex heading or preceding prose, not an inline reference. After-view summary prints 527 applications, 1199788000 shares and 342.99:1. Commitment quantity total 295449000 and printed quantity ratio 24.63%, distinct from count ratio 16.51%."
     },
     {
+      "sample": "qrt_independent_quantity_2022",
+      "receipt": "20221021000286",
+      "section_title": "I. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20221021000286&dcmNo=8844521&eleId=7&offset=263764&length=186545&dtd=dart3.xsd",
+      "sha256": "45e54d1afc299bb5bd8139b6fa3d15edfa598c7a639cf882951fa4fa4960928b",
+      "expected": {"institutional_demand_ratio": null,
+        "lockup_commitment_ratio": 0.002117161676171024,
+        "lockup_parser_validation_status": "structurally_verified"},
+      "review_note": "The institutional participation total competition cell is a dash, not a numeric ratio. Its domestic and foreign application quantities sum to 64603002, and counts sum to 389. Independently, the share-quantity column of the lockup outcome shows 136775 committed plus 64466227 noncommitted, total 64603002. Preserve both tables and coordinates. No competition ratio is reconstructed and missing duration rows are not required."
+    },
+    {
       "sample": "sunic_terms_2017",
       "receipt": "20170907000115",
       "section_title": "증권발행조건확정",
