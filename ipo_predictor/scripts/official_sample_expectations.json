@@ -70,8 +70,9 @@
       "section_title": "Ⅲ. 재무에 관한 사항",
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20150807000011&dcmNo=4757143&eleId=29&offset=1265211&length=577909&dtd=dart3.xsd",
       "sha256": "74403a517a9d1059ff282239e93b8683d39dea0b9f4d51ea0a8522348ec0f2b8",
-      "financial_context": {"corp_code": "00365387", "published_at": "2015-08-07", "cutoff": "2015-08-20", "expected_fs_div": "OFS"},
-      "expected": {"financial_as_of_year": 2014, "revenue": 194184554953, "operating_income": 26285715749, "net_income": 18461483934, "total_assets": 484674125513, "total_liabilities": 323883474196, "equity": 160790651317}
+      "financial_context": {"corp_code": "00365387", "published_at": "2015-08-07", "cutoff": "2015-08-20", "expected_fs_div": "CFS"},
+      "expected": {"financial_as_of_year": 2014, "revenue": 1011150088928, "operating_income": 76977721440, "net_income": 28058455257, "total_assets": 1437917070538, "total_liabilities": 1154639967755, "equity": 283277102783},
+      "review_note": "Originally only the unit-qualified OFS summary was extracted. The unitless issuer CFS summary explicitly declares K-IFRS; named primary CFS statements have their own KRW unit, annual dates and matching 2014 amounts. Restored CFS is selected by the existing CFS-first policy, not by changing policy or overwriting OFS. Both scopes are checked separately in audit_financial_samples.py."
     },
     {
       "sample": "yas_correction_2017",

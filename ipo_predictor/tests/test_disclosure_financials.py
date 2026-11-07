@@ -43,6 +43,101 @@ def financial_index(receipt='20230315000001',date='2023.03.15',corp='12345678',n
 
 
 class DisclosureFinancialTests(unittest.TestCase):
+    def interim_comparative(self):
+        html='2. 연결재무제표 연결재무상태표 '
+        html+='제14기 3분기 2023년 9월 30일 현재 제13기 2022년 12월 31일 현재 (단위: 원)'
+        html+=table([['과목','제14기 3분기','제13기'],['자산총계','400','300'],
+                     ['부채총계','110','100'],['자본총계','290','200']])
+        html+='연결손익계산서 제14기 3분기 2023년 1월 1일부터 2023년 9월 30일까지 '
+        html+='제13기 2022년 1월 1일부터 2022년 12월 31일까지 (단위: 원)'
+        html+=table([['과목','제14기 3분기','제13기'],['매출액','900','1000'],
+                     ['영업이익','45','50'],['당기순이익','36','40']])
+        html+='3. 연결재무제표 주석 '
+        html+='요약분기연결재무제표는 2023년 9월 30일 현재 한국채택국제회계기준에 따라 작성되었습니다. '
+        html+='회계추정은 2022년 12월 31일로 종료하는 회계연도에 대한 연차연결재무제표와 동일합니다.'
+        return html
+
+    def test_same_statement_interim_framework_binds_only_identified_prior_annual_columns(self):
+        html=self.interim_comparative()
+        frame=parse_disclosure_financials(html,'12345678','20231101000001','2023-11-01','official')
+        self.assertEqual(len(frame),6);self.assertEqual(set(frame.year),{2022})
+        self.assertEqual(set(frame.fs_div),{'CFS'})
+        self.assertEqual(frame.loc[frame.account_name_en.eq('revenue'),'amount'].iloc[0],1000)
+        self.assertTrue(frame.accounting_standard_evidence.str.contains('same_scope_ifrs_interim_prior_annual_comparative_v1').all())
+
+    def test_interim_basis_does_not_approve_unlinked_year_scope_or_planned_compliance(self):
+        for original,replacement in [
+                ('회계추정은 2022년 12월 31일로','회계추정은 2021년 12월 31일로'),
+                ('연차연결재무제표','연차별도재무제표'),
+                ('한국채택국제회계기준에 따라 작성되었습니다','한국채택국제회계기준에 따라 작성할 예정입니다'),
+                ('한국채택국제회계기준에 따라 작성되었습니다','한국채택국제회계기준 개정사항을 검토 중입니다')]:
+            with self.subTest(replacement=replacement):
+                html=self.interim_comparative().replace(original,replacement)
+                self.assertTrue(parse_disclosure_financials(html,'12345678','20231101000001','2023-11-01','official').empty)
+
+    def test_interim_comparative_cannot_override_explicit_gaap_or_invent_full_year_income(self):
+        html=self.interim_comparative().replace("<td>제13기</td>","<td>제13기 K-GAAP</td>")
+        self.assertTrue(parse_disclosure_financials(html,'12345678','20231101000001','2023-11-01','official').empty)
+        html=self.interim_comparative().replace(
+            '제13기 2022년 1월 1일부터 2022년 12월 31일까지',
+            '제13기 3분기 2022년 1월 1일부터 2022년 9월 30일까지')
+        frame=parse_disclosure_financials(html,'12345678','20231101000001','2023-11-01','official')
+        self.assertEqual(set(frame.account_name_en),{'total_assets','total_liabilities','equity'})
+
+    def test_kifrs_1034_preparation_and_explicit_prior_annual_reference(self):
+        html=self.interim_comparative().replace('한국채택국제회계기준',"기업회계기준서 제1034호 '중간재무보고'")
+        html=html.replace('2022년 12월 31일로 종료하는 회계연도에 대한 연차연결재무제표','전기말 연차연결재무제표')
+        frame=parse_disclosure_financials(html,'12345678','20231101000001','2023-11-01','official')
+        self.assertEqual(len(frame),6);self.assertEqual(set(frame.year),{2022})
+        self.assertTrue(frame.accounting_standard_evidence.str.contains('resolved_from_interim_year=2023').all())
+        for original,replacement in [
+                ('제1034호','제9999호'), ('전기말 연차연결재무제표','전기 연결재무제표'),
+                ('전기말 연차연결재무제표','전기말 연차별도재무제표'),
+                ('따라 작성되었습니다','따라 작성할 예정입니다')]:
+            with self.subTest(replacement=replacement):
+                bad=html.replace(original,replacement)
+                self.assertTrue(parse_disclosure_financials(bad,'12345678','20231101000001','2023-11-01','official').empty)
+
+    def test_remote_prior_annual_reference_cannot_bind_an_unrelated_interim_declaration(self):
+        html=self.interim_comparative().replace('2022년 12월 31일로 종료하는 회계연도에 대한 연차연결재무제표',
+                                               '다른 공시 설명입니다. '+'설명 '*300+'전기말 연차연결재무제표')
+        self.assertTrue(parse_disclosure_financials(html,'12345678','20231101000001','2023-11-01','official').empty)
+
+    def test_local_audit_adoption_since_year_never_approves_earlier_converted_year(self):
+        rows=[['구분','2014년','2013년','2012년']]
+        rows += [[r[0],r[1],r[1],r[1]] for r in summary(standard=False)[1:]]
+        note=('주1) 2012년 사업연도까지 일반기업회계기준으로 수감하였으며, '
+              '2013년 사업연도부터 한국채택국제회계기준(K-IFRS)를 적용한 감사보고서를 발행하였습니다. '
+              '주2) 2012년 수치는 K-IFRS로 변환된 감사받지 않은 수치입니다.')
+        html='1. 요약별도재무정보 (단위: 원)'+table(rows)+table([[note]])
+        frame=parse(html)
+        self.assertEqual(set(frame.year),{2013,2014})
+        self.assertEqual(set(frame.fs_div),{'OFS'})
+        self.assertEqual(len(frame),12)
+        self.assertTrue(frame.accounting_standard_evidence.str.contains('2013년 사업연도부터',regex=False).all())
+        self.assertTrue(parse(html.replace('발행하였습니다','발행할 예정입니다')).empty)
+        self.assertTrue(parse(html.replace('적용한 감사보고서','적용하지 않은 감사보고서')).empty)
+
+    def test_subsidiary_adoption_note_does_not_approve_issuer(self):
+        note='주1) 종속회사는 2013년 사업연도부터 한국채택국제회계기준(K-IFRS)를 적용한 감사보고서를 발행하였습니다.'
+        html='1. 요약별도재무정보 (단위: 원)'+table(summary('2014년',standard=False))+table([[note]])
+        self.assertTrue(parse(html).empty)
+
+    def test_local_summary_standard_can_bind_primary_without_guessing_missing_summary_unit(self):
+        html='1. 요약별도재무정보 당사의 재무제표는 한국채택국제회계기준에 따라 작성되었습니다.'
+        html+=table(summary(standard=False))
+        html+='4. 재무제표 재무상태표 제13기 2022년 12월 31일 현재 (단위: 원)'
+        html+=table([['과목','제13기'],['자산총계','300'],['부채총계','100'],['자본총계','200']])
+        html+='손익계산서 제13기 2022년 1월 1일부터 2022년 12월 31일까지 (단위: 원)'
+        html+=table([['과목','제13기'],['매출액','1000'],['영업이익','50'],['당기순이익','40']])
+        frame=parse(html)
+        self.assertEqual(set(frame.year),{2022});self.assertEqual(len(frame),6)
+        self.assertEqual(set(frame.table_id),{1,2})
+        self.assertTrue(frame.extraction_rule_id.eq('detailed_annual_period_and_basis_v1').all())
+        self.assertTrue(frame.accounting_standard_evidence.str.contains('issuer_summary_year_standard_bound_to_primary_v1').all())
+        self.assertTrue(parse(html.replace('4. 재무제표','2. 연결재무제표')).empty)
+        self.assertTrue(parse(html.replace('한국채택국제회계기준에 따라 작성되었습니다','한국채택국제회계기준을 적용할 예정입니다')).empty)
+
     def test_unqualified_summary_basis_is_corroborated_by_primary_balances(self):
         html='1. 요약재무정보 (단위: 원)'+table(summary())
         html+='2. 연결재무제표 연결재무상태표 (단위: 원)'+table([
@@ -363,9 +458,70 @@ class DisclosureFinancialTests(unittest.TestCase):
     def test_fiscal_term_requires_explicit_calendar_mapping(self):
         html = '1. 요약재무정보 (단위: 백만원)' + table(summary('제10기', False))
         self.assertTrue(parse(html).empty)
-        html += '*한국채택국제회계기준에 따라 작성 2. 연결재무제표 4. 재무제표'
-        html += table([['제 10(전)기 2017년 12월 31일 현재']])
+        html += '*한국채택국제회계기준에 따라 작성 2. 연결재무제표 4. 재무제표 재무상태표 '
+        html += '제 10(전)기 2017년 12월 31일 현재 (단위: 백만원)'
+        html += table([['과목','제10기'],['자산총계','300'],['부채총계','100'],['자본총계','200']])
         self.assertEqual(set(parse(html).year), {2017})
+
+    def test_two_year_income_typo_cannot_relabel_a_dated_annual_balance_term(self):
+        html='1. 요약별도재무정보 (단위: 원)'+table(summary('제17기 기말'))
+        html+='4. 재무제표 재무상태표 제18기 기말 2021년 12월 31일 현재 '
+        html+='제17기 기말 2020년 12월 31일 현재 (단위: 원)'
+        html+=table([['과목','제18기','제17기'],['자산총계','400','300'],
+                     ['부채총계','110','100'],['자본총계','290','200']])
+        html+='손익계산서 제17기 : 2020년 1월 1일부터 2021년 12월 31일까지 (단위: 원)'
+        html+=table([['과목','제17기'],['매출액','9999'],['영업이익','999'],['당기순이익','888']])
+        frame=parse(html)
+        self.assertEqual(set(frame.year),{2020})
+        self.assertEqual(frame.loc[frame.account_name_en.eq('revenue'),'amount'].iloc[0],1000)
+        self.assertTrue(frame.fiscal_term_year_evidence.dropna().str.contains('issuer_primary_year_end_fiscal_term_v1').all())
+
+    def test_note_year_reference_alone_cannot_establish_fiscal_term_identity(self):
+        html='1. 요약별도재무정보 (단위: 원)'+table(summary('제17기 기말'))
+        html+='주석 제17기 : 2020년 1월 1일부터 2021년 12월 31일까지'
+        self.assertTrue(parse(html).empty)
+
+    def test_separate_period_grid_and_attachment_note_keep_the_primary_statement_context(self):
+        html='1. 요약별도재무정보 (단위: 원)'+table(summary('제13기'))
+        html+='4. 재무제표 재무상태표'
+        html+=table([['제14기 반기말 2023년 6월 30일 현재'],['제13기말 2022년 12월 31일 현재']])
+        html+=table([['별첨 주석은 본 반기재무제표의 일부입니다.']])+'(단위: 원)'
+        html+=table([['과목','제14기 반기','제13기'],['자산총계','400','300'],
+                     ['부채총계','110','100'],['자본총계','290','200']])
+        frame=parse(html)
+        self.assertEqual(set(frame.year),{2022})
+        self.assertEqual(frame.loc[frame.account_name_en.eq('revenue'),'amount'].iloc[0],1000)
+
+    def test_parenthesized_equivalent_summary_scope_does_not_inherit_previous_consolidated_scope(self):
+        html='가. 요약연결재무제표 (단위: 원)'+table(summary())
+        html+='나. 요약별도(개별)재무제표 (단위: 원)'+table(summary())
+        frame=parse(html)
+        self.assertEqual(set(frame[frame.table_id.eq(0)].fs_div),{'CFS'})
+        self.assertEqual(set(frame[frame.table_id.eq(1)].fs_div),{'OFS'})
+        self.assertTrue(parse('요약연결(개별)재무정보 (단위: 원)'+table(summary())).empty)
+
+    def test_fiscal_term_uses_own_column_full_year_range_not_another_columns_range(self):
+        rows=summary('제13기')
+        rows.insert(5,['손익현황','제13기 2022.01.01~2022.12.31'])
+        html='1. 요약별도재무정보 (단위: 원)'+table(rows)
+        self.assertEqual(set(parse(html).year),{2022})
+        self.assertTrue(parse(html.replace('제13기 2022.01.01','제12기 2022.01.01')).empty)
+        self.assertTrue(parse(html.replace('2022.01.01~2022.12.31','2021.01.01~2022.12.31')).empty)
+
+    def test_interim_named_sibling_does_not_consume_adjacent_annual_term_dates(self):
+        html='1. 요약별도재무정보 (단위: 원)'+table(summary('제13기'))
+        html+='4. 재무제표 재무상태표 제13(당)기 2022년 12월 31일 현재 '
+        html+='제13(당)분기말 2022년 9월 30일 현재 (단위: 원)'
+        html+=table([['과목','제13(당)기','제13(당)분기'],['자산총계','300','250'],
+                     ['부채총계','100','90'],['자본총계','200','160']])
+        self.assertEqual(set(parse(html).year),{2022})
+
+    def test_income_term_with_wrong_single_calendar_year_cannot_override_balance_year(self):
+        html=self.interim_comparative().replace(
+            '제13기 2022년 1월 1일부터 2022년 12월 31일까지',
+            '제13기 2021년 1월 1일부터 2021년 12월 31일까지')
+        frame=parse_disclosure_financials(html,'12345678','20231101000001','2023-11-01','official')
+        self.assertEqual(set(frame.account_name_en),{'total_assets','total_liabilities','equity'})
 
     def test_non_summary_tables_do_not_inherit_summary_approval(self):
         html = '1. 요약재무정보 (단위: 원)' + table(summary())

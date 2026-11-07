@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from data.pipelines.disclosure_financials import parse_disclosure_financials
 from data.pipelines.financial_history import atomic_json, summarize_asof
+from data.pipelines.disclosure_connections import viewer_identity
 
 
 # Amounts below were read from the original summary tables, not parser output.
@@ -32,6 +33,66 @@ SAMPLES = [
      [165871000000, 24391000000, 227323000000, 154819000000, 72504000000, 19627000000]),
 ]
 
+# Reviewed original annual cells: scope, year, revenue, operating income, assets.
+# A None income pair explicitly checks that interim-only income stays absent.
+BASIS_SAMPLES = [
+    ('에치디프로', '00820389', '20150930000232',
+     'e4d81fded831a7617feb383ab9fe0b47ddc466653fc17c1c906020b77aef4d37',
+     [('OFS', 2014, 66063000000, 3738000000, 32094000000),
+      ('OFS', 2013, 71254000000, 6976000000, 28041000000)], {2013, 2014}),
+    ('오션브릿지', '01113754', '20161118000262',
+     '24d107732915a37192ea9aae02d218ad23ff066cdd9dc91e2624c048096ed841',
+     [('OFS', 2015, 25389000000, 3762000000, 13446000000)], {2015}),
+    ('차백신연구소', '01141599', '20211008000552',
+     'c1dc4c546c6a746c686223a449e0f5c070516cdf610475f1c2da10ff8f8d237a',
+     [('OFS', 2020, 77796488, -4234422385, 25747443759),
+      ('OFS', 2019, None, None, 9556199032)], {2019, 2020}),
+    ('LG씨엔에스', '00139834', '20250117000578',
+     'b864b37c67e790abe0e440d0a959ee4a7b87424e61a3a92123890e4327478657',
+     [('CFS', 2023, 5605300168000, 464048383000, 4040679600000),
+      ('OFS', 2023, 5112688400000, 373164112000, 3689410848000)], {2023}),
+    ('미래에셋생명', '00112332', '20150626000234',
+     '10b651330dd54a4fa8dddb91b0b1a2fb7e2b2fe90a04da3720baf79a5ba0ca6f',
+     [('CFS', 2014, None, None, 24681134224854),
+      ('OFS', 2014, None, None, 24080044889046)], {2014}),
+    ('명인제약', '00179489', '20250917000213',
+     'eae5a6093be90a853c9b6939fa1c5ca7bf17feaacc7015337f593dd99989c5e2',
+     [('CFS', 2024, 269434788789, 92754381974, 581691991637),
+      ('OFS', 2024, 269585959989, 90057625868, 572923047279)], {2024}),
+    ('AJ네트웍스', '00365387', '20150807000011',
+     '74403a517a9d1059ff282239e93b8683d39dea0b9f4d51ea0a8522348ec0f2b8',
+     [('CFS', 2014, 1011150088928, 76977721440, 1437917070538),
+      ('OFS', 2014, 194184554953, 26285715749, 484674125513)], {2013, 2014}),
+    ('오에스피', '01491607', '20220930000631',
+     'bb05f8f4ff8f6c071614cc0121e09894ea86021b6e79c28c99f5766b92b5da9f',
+     [('OFS', 2021, 15694537506, 2803559295, 18495736461),
+      ('OFS', 2020, 15566711787, 3934799221, 15780501749)], {2019, 2020, 2021}),
+    ('웹케시', '00323868', '20190114000238',
+     '3254ef6ee67ebf7ef461de08b2b89910ed9d11c278469c13914a773accceff1f',
+     [('CFS', 2017, 77432986691, 3804075535, 35716017994),
+      ('OFS', 2017, 77086240876, 4007904731, 36425027314)], {2016, 2017}),
+    ('에이스토리', '00975290', '20190708000136',
+     '65f7ea23554390dbbc06b38a55a2a1b223f488fce0e3632e8319299ee6b14b74',
+     [('OFS', 2018, 46446059000, 1185323000, 19456504000)], {2016, 2017, 2018}),
+    ('쿠콘', '01311055', '20210416000329',
+     '03dacc698c5a8a6b2452ceee78902dd25b6334fbf8986c8063ebffbceff19e49',
+     [('CFS', 2020, 51374145182, 11238744762, 141997802981),
+      ('OFS', 2020, 49373922266, 11001158992, 141307999675)], {2019, 2020}),
+    ('일진하이솔루스', '00972503', '20210823000386',
+     '115d3e115b62bf714943cbb9374acf2484f1c247f890bc46cf68f23351ed2ec2',
+     [('OFS', 2020, 113524940199, 15074663005, 81301533377)], {2018, 2019, 2020}),
+    ('원방테크', '00304076', '20200911000117',
+     '0bdb3d46d82708775ec3afa5f04f9beadcd8f7a201eca20ffbd3464c0810a6c8',
+     [('CFS', 2018, 160275380000, 19116447000, 153392507000),
+      ('OFS', 2017, 158171848000, 18939847000, 112783514000)], {2017, 2018, 2019}),
+    ('에스바이오메딕스', '01258020', '20230420000520',
+     'cee482e7b21c978b4684ede270d2e5077cb4c59bb2727fa27aafb40eded6349c',
+     [('OFS', 2022, 361312000, -6536886000, 8855320000)], {2019, 2020, 2021, 2022}),
+    ('삼영에스앤씨', '00405506', '20210510000418',
+     '864cc88b76dc376c51f9b57692476b7261f65e3c2389f52fe95f586bc69e2bfd',
+     [('OFS', 2020, 13557858486, 182225063, 18148583909)], {2019, 2020}),
+]
+
 
 def main():
     cache = Path(__file__).resolve().parents[1] / 'data/raw/dart_ipo_financial_sections'
@@ -46,7 +107,7 @@ def main():
         payload = json.loads(path.read_text())
         digest = hashlib.sha256(payload['html'].encode()).hexdigest()
         frame = parse_disclosure_financials(payload['html'], corp, receipt,
-                                            payload.get('official_publication_date') or f'{receipt[:4]}-{receipt[4:6]}-{receipt[6:8]}', payload['source_url'])
+                                            payload['official_publication_date'], payload['source_url'])
         result = summarize_asof(frame, corp, cutoff)
         fields = ['revenue', 'operating_income', 'total_assets', 'total_liabilities', 'equity', 'net_income']
         mismatches = {key: {'expected': value, 'actual': result.get(key)}
@@ -61,9 +122,43 @@ def main():
                           'mismatches': mismatches}
         results.append(record)
         print(json.dumps(record, ensure_ascii=False))
+    basis_results=[]
+    for issuer,corp,receipt,expected_hash,expected,years in BASIS_SAMPLES:
+        payload=json.loads((cache/(receipt+'.json')).read_text())
+        body_hash=hashlib.sha256(payload['html'].encode()).hexdigest()
+        index=json.loads((cache.parent/'dart_connection_sources'/
+                          (hashlib.sha256(payload['index_url'].encode()).hexdigest()+'.json')).read_text())
+        assert body_hash==payload['sha256']==expected_hash
+        assert hashlib.sha256(index['text'].encode()).hexdigest()==index['sha256']==payload['index_sha256']
+        viewer_identity(index['text'],receipt,corp,payload['official_publication_date'])
+        assert payload['official_corp_code']==corp
+        frame=parse_disclosure_financials(payload['html'],corp,receipt,
+                                          payload['official_publication_date'],payload['source_url'])
+        mismatches=[]
+        if frame.empty or set(frame.year)!=years:mismatches.append('annual_years')
+        cells=[]
+        for scope,year,*values in expected:
+            for name,value in zip(['revenue','operating_income','total_assets'],values):
+                selected=frame[frame.fs_div.eq(scope)&frame.year.eq(year)&frame.account_name_en.eq(name)]
+                actual=set(selected.amount)
+                if actual!=({value} if value is not None else set()):
+                    mismatches.append([scope,year,name,value,sorted(actual)])
+                for row in selected.to_dict('records'):
+                    cells.append({key:row[key] for key in ['year','fs_div','account_name_en','amount',
+                        'raw_amount','unit_multiplier','table_id','row_id','column_id','period_name',
+                        'accounting_standard_evidence','extraction_rule_id']})
+        record={'issuer_at_ipo':issuer,'corp_code':corp,'receipt':receipt,'source_url':payload['source_url'],
+                'sha256':body_hash,'index_sha256':index['sha256'],
+                'published_at':payload['official_publication_date'],'checked_cells_and_absences':len(expected)*3,
+                'status':'mismatch' if mismatches else 'sample_passed','mismatches':mismatches,'cells':cells}
+        basis_results.append(record);failed|=bool(mismatches)
+        print(json.dumps({k:v for k,v in record.items() if k!='cells'},ensure_ascii=False))
     atomic_json(cache.parent.parent / 'processed/financial_sample_audit.json',
-                {'sample_count': len(SAMPLES), 'passed': len(results) == len(SAMPLES) and not failed,
-                 'samples': results, 'training_executed': False})
+                {'sample_count': len(SAMPLES)+len(BASIS_SAMPLES),
+                 'passed': len(results) == len(SAMPLES) and not failed,
+                 'samples': results,'basis_samples':basis_results,
+                 'parser_sha256':hashlib.sha256(Path(sys.modules[parse_disclosure_financials.__module__].__file__).read_bytes()).hexdigest(),
+                 'training_executed': False})
     return int(failed)
 
 
