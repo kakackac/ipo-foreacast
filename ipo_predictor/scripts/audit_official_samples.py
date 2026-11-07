@@ -19,6 +19,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.collectors.dart_collector import DARTCollector
 
 SAMPLES = {
+    "woorison_group_float_2016": "20160714000401",
+    "paxnet_column_float_2016": "20160714000305",
+    "zaigle_total_float_2016": "20160824000350",
+    "ymt_class_float_2017": "20170414001551",
+    "younghwa_inline_float_2017": "20171016000066",
+    "jitech_group_float_2022": "20221025000142",
+    "strad_group_float_2026": "20260617000171",
+    "syswork_group_float_2017": "20171213000011",
+    "alrico_ordinary_float_2018": "20180131000083",
+    "scm_ordinary_float_2020": "20200605000211",
+    "solum_column_scope_float_2021": "20210120000141",
     "cosmecca_flat_lockup_2016": "20161014000121",
     "incross_flat_lockup_2016": "20161018000162",
     "clio_flat_lockup_2016": "20161027000349",

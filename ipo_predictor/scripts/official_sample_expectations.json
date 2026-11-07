@@ -48,6 +48,94 @@
   ],
   "samples": [
     {
+      "sample": "solum_column_scope_float_2021", "receipt": "20210120000141",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210120000141&dcmNo=7767022&eleId=14&offset=693651&length=421977&dtd=dart3.xsd",
+      "sha256": "fd1eda9b4d35f54c7d0a8293a59a89b26a5470b543d2629263cefc4e2db1b485",
+      "expected": {"public_float_shares": 22761232, "total_post_listing_shares": 42508362, "public_float_ratio_disclosed": null},
+      "review_note": "Post-offering total is 42508362. Locked-column total is 19747130 and tradable-column total 22761232; their exact sum equals the issuer total. All three percentage columns independently sum to 100%, meaning the float column's 100% is within-column, not issuer-wide float. Preserve printed percentage scope and derive 22761232/42508362, not 100% float."
+    },
+    {
+      "sample": "alrico_ordinary_float_2018", "receipt": "20180131000083",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20180131000083&dcmNo=5936131&eleId=17&offset=403953&length=211256&dtd=dart3.xsd",
+      "sha256": "cd1999f88dbcf4795a649acfa12624f55b185d68a5ec04cdd5b7d8c2d837c9db",
+      "expected": {"public_float_shares": 2633480, "total_post_listing_shares": 8843825, "public_float_ratio_disclosed": null},
+      "review_note": "Same dated ownership grid explicitly separates ordinary subtotal: tradable ordinary shares 2633480 and total ordinary shares 8843825, versus preferred 516750 and all-class total 9360575. Printed 28.13% uses all classes, not the listed ordinary denominator. Preserve that printed text in audit evidence but derive the ordinary ratio from the two explicit ordinary quantities; do not subtract preferred shares speculatively."
+    },
+    {
+      "sample": "scm_ordinary_float_2020", "receipt": "20200605000211",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20200605000211&dcmNo=7368117&eleId=15&offset=428240&length=371572&dtd=dart3.xsd",
+      "sha256": "3571b45f11349e32e77d265b4fb86c373019e9578b0f6917c61bce4625a1785e",
+      "expected": {"public_float_shares": 4086746, "total_post_listing_shares": 11026646, "public_float_ratio_disclosed": null},
+      "review_note": "Ordinary total row explicitly gives tradable 4086746 / total 11026646. Separate preferred row is 324783 / 714828; all-class row is 4411529 / 11741474. Printed 34.81% is relative to the all-class total. Use only the explicit ordinary pair for an ordinary-share IPO, with null direct ordinary percent and retained class coordinates."
+    },
+    {
+      "sample": "syswork_group_float_2017", "receipt": "20171213000011",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20171213000011&dcmNo=5880873&eleId=16&offset=304054&length=350020&dtd=dart3.xsd",
+      "sha256": "e47c71d34fca50bf61c912f5a77c3ad37e39383e0aa7ca762179bcc61b6e580c",
+      "expected": {"public_float_shares": 5835323, "total_post_listing_shares": 18000000, "public_float_ratio_disclosed": 0.3242},
+      "review_note": "The entire initial float subtotal explicitly prints 5835323 shares and 32.42%, same dated listed total 18000000. The previous broad text match 'tradable shares 1%' was an investor-category heading, not the aggregate float ratio. Its stored 1% must be corrected with this table, not preserved as an existing approved value."
+    },
+    {
+      "sample": "woorison_group_float_2016", "receipt": "20160714000401",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160714000401&dcmNo=5221204&eleId=16&offset=362743&length=216833&dtd=dart3.xsd",
+      "sha256": "c9d5e25c3b6a325ab8eff74cf2f192308da7f2f73d170b5d5c81d7d7e59e143d",
+      "expected": {"public_float_shares": 16440377, "total_post_listing_shares": 61157490, "public_float_ratio_disclosed": 0.2688},
+      "review_note": "Initial tradable group spans an ordinary-share class and subtotal column: 50000 existing plus 16390377 offered = 16440377. The same post-offering total is 61157490. Footnote says prospective amount may change after institutional commitment/allocation; it is not final allocated float."
+    },
+    {
+      "sample": "paxnet_column_float_2016", "receipt": "20160714000305",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160714000305&dcmNo=5220920&eleId=16&offset=295051&length=105429&dtd=dart3.xsd",
+      "sha256": "920dde9c64943d63d14b25e7b2ed5d193c18a58cd8049739a177848c7ba61024",
+      "expected": {"public_float_shares": 5768451, "total_post_listing_shares": 11077521, "public_float_ratio_disclosed": null},
+      "review_note": "Total row's explicitly post-offering tradable column is 5768451, total post shares 11077521 (not pre total 8225421). Next cell 5309070 is locked quantity, not a percent. Preserve null printed ratio and derive only from the two same-table quantities."
+    },
+    {
+      "sample": "zaigle_total_float_2016", "receipt": "20160824000350",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160824000350&dcmNo=5270182&eleId=16&offset=501254&length=136640&dtd=dart3.xsd",
+      "sha256": "68b559432e8711c8e00e0a18c0ff9e73baf0f431ea104525c984220e63709653",
+      "expected": {"public_float_shares": 4410000, "total_post_listing_shares": 13530910, "public_float_ratio_disclosed": 0.3259},
+      "review_note": "Explicit entire tradable-share total is 4410000 ordinary shares and 32.59%, same-table post total 13530910. Investor subgroups above the total are not separate float candidates."
+    },
+    {
+      "sample": "ymt_class_float_2017", "receipt": "20170414001551",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170414001551&dcmNo=5596348&eleId=16&offset=353473&length=207856&dtd=dart3.xsd",
+      "sha256": "913fc3a95f4d3ab834956f6a41b4649844a19e629bd55906edde55a7114a75a6",
+      "expected": {"public_float_shares": 1357727, "total_post_listing_shares": 3602600, "public_float_ratio_disclosed": 0.3769},
+      "review_note": "Top-level tradable subtotal 1357727 / explicit listed total 3602600 prints 37.69%. Convertible-bond rows have dash quantities in this ownership basis, not positive shares. A separate future conversion table does not change the present listed denominator."
+    },
+    {
+      "sample": "younghwa_inline_float_2017", "receipt": "20171016000066",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20171016000066&dcmNo=5812173&eleId=16&offset=401297&length=262323&dtd=dart3.xsd",
+      "sha256": "b2917b36aa47a9301c31c1d38b566e9498056c33700bebdf01bd663c647de66a",
+      "expected": {"public_float_shares": 2301570, "total_post_listing_shares": 5345090, "public_float_ratio_disclosed": 0.4306},
+      "review_note": "One post-offering float cell contains 2301570(43.06%); neighboring cell is locked quantity 3043520(56.94%). Denominator is same-row post total 5345090. Do not treat neighboring quantity as ratio."
+    },
+    {
+      "sample": "jitech_group_float_2022", "receipt": "20221025000142",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20221025000142&dcmNo=8846373&eleId=14&offset=508700&length=256695&dtd=dart3.xsd",
+      "sha256": "bc3f3fbaad7f2a935a5a57b68b21d6b50a42544e4e8eda531e0cc82cad3fb4be",
+      "expected": {"public_float_shares": 2685270, "total_post_listing_shares": 8196186, "public_float_ratio_disclosed": 0.3276},
+      "review_note": "Entire initial tradable group subtotal prints 2685270 and 32.76%, with same-table post-offering total 8196186. Denominator cannot be borrowed from the legacy amount-only text extraction."
+    },
+    {
+      "sample": "strad_group_float_2026", "receipt": "20260617000171",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260617000171&dcmNo=11435722&eleId=14&offset=1801147&length=714201&dtd=dart4.xsd",
+      "sha256": "a3d51fe075b90a1169b83180b44716d6503f937ad5c6a9bad332e9a827a744da",
+      "expected": {"public_float_shares": null, "public_float_ratio_disclosed": null, "public_float_parse_method": "conflicting_float_ratios_review_required"},
+      "review_note": "Base listed float is 26075572/53318546 (48.91%) but this same official section explicitly says voluntary one-month restrictions reduce effective initial float to 20442097 (38.34%). The parser must not silently approve the base value. Preserve the adjusted-basis table for reconciliation. Another shareholders-only total has 11250794 shares and 21.10%, not an issuer denominator. Null here is unresolved disclosed bases, not missing official material."
+    },
+    {
       "sample": "cosmecca_flat_lockup_2016", "receipt": "20161014000121",
       "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20161014000121&dcmNo=5317664&eleId=9&offset=154060&length=116969&dtd=dart3.xsd",
