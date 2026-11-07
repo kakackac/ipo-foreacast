@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 27
+DEMAND_PARSER_VERSION = 28
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -1312,16 +1312,24 @@ class DARTCollector:
                 return None
             column = next(iter(columns))
             index, row = quantity_rows[0]
-            for values in (row, count_rows[0]):
-                if (column != len(values)-1 or column < 2
-                        or not all(re.fullmatch(integer, cell.strip()) for cell in values[1:])
-                        or sum(int(cell.replace(',', '')) for cell in values[1:column])
-                        != int(values[column].replace(',', ''))):
-                    return None
+            counts=count_rows[0]
+            if column<2 or column!=len(row)-1 or len(counts)!=len(row):return None
+            quantities=[];participants=[];paired_dash_columns=[]
+            for c in range(1,column+1):
+                q,n=row[c].strip(),counts[c].strip()
+                if c<column and q==n=='-':
+                    quantities.append(0);participants.append(0);paired_dash_columns.append(c)
+                elif re.fullmatch(integer,q) and re.fullmatch(integer,n):
+                    quantities.append(int(q.replace(',','')));participants.append(int(n.replace(',','')))
+                else:return None
+            if (quantities[-1]<=0 or participants[-1]<=0
+                    or sum(quantities[:-1])!=quantities[-1]
+                    or sum(participants[:-1])!=participants[-1]):return None
             return {'application_quantity':int(row[column].replace(',', '')),
                 'selected_row':index, 'selected_column':column,
                 'scope':'institutional_domestic_foreign_quantity_total',
-                'component_quantities_and_counts_reconciled':True}
+                'component_quantities_and_counts_reconciled':True,
+                'paired_dash_components_reconciled_as_zero':paired_dash_columns}
 
         for summary, heading in zip(table_parser.tables, table_parser.table_contexts):
             quantity = independent_quantity(summary, heading)
@@ -1347,6 +1355,10 @@ class DARTCollector:
                     c = next(iter(columns))
                     if c < len(row) and re.fullmatch(integer, row[c]):
                         application_totals.add(int(row[c].replace(",", "")))
+                        application_sources.append(json.loads(cls._table_evidence(
+                            summary,heading=heading,rule_id='DART_VERIFIED_DEMAND_QUANTITY_REFERENCE_V1',
+                            selected_row=i,selected_column=c,application_quantity=int(row[c].replace(',','')),
+                            scope='verified_aggregate_demand_application_quantity_reference')))
         application_total = next(iter(application_totals)) if len(application_totals) == 1 else None
         if len(application_totals)>1:
             result.update(parser_validation_status='candidate_rejected',
@@ -1370,13 +1382,29 @@ class DARTCollector:
             none = quantity({'미확약', '확약없음'})
             declared = quantity({'합계', '총합계', '총계', '확약합계'})
             if any(label in {'미확약','확약없음'} for label,_ in rows):
-                all_total = quantity({'합계', '총합계', '총계'})
-                if all_total is not None and all_total != application_total:
+                grand_total=quantity({'총합계','총계'})
+                all_total=grand_total if grand_total is not None else quantity({'합계'})
+                positions={label:[i for i,r in enumerate(table) if r and re.sub(r'\s+','',r[0])==label]
+                           for label in ('합계','미확약','확약없음')}
+                none_positions=positions['미확약']+positions['확약없음']
+                subtotal_position=(len(positions['합계'])==len(none_positions)==1
+                                   and positions['합계'][0]<none_positions[0])
+                subtotal_before_none=(grand_total is None and subtotal_position
+                                      and all_total!=application_total)
+                if subtotal_before_none:
+                    if all_total is None or none is None or all_total+none!=application_total:
+                        return {**check,'status':'conflict','declared_committed_quantity':all_total,
+                                'noncommitted_quantity':none}
+                    committed=all_total
+                    check['subtotal_before_noncommitted']=True
+                elif all_total is not None and all_total != application_total:
                     return {**check, 'status':'conflict', 'declared_table_total':all_total}
-                if none is None or all_total is None:
+                elif none is None or all_total is None:
                     return check
-                committed = application_total-none
+                else:committed = application_total-none
                 subtotal = quantity({'확약합계', '확약소계'})
+                if subtotal is None and grand_total is not None and subtotal_position:
+                    subtotal=quantity({'합계'})
                 if subtotal is not None and subtotal != committed:
                     return {**check, 'status':'conflict', 'declared_committed_quantity':subtotal,
                             'noncommitted_quantity':none}
@@ -1412,11 +1440,15 @@ class DARTCollector:
             title = re.search(r'의무보유확약(?:기관수(?:및신청수량)?|신청내역)$', compact)
             if not title or re.search(r'(?:국내|해외|외국|일부|당사)(?:기관투자자|기관)?$', compact[:title.start()]):
                 return None
-            if not table or any(row and re.sub(r'\s+', '', row[0]) in {'미확약','확약없음'} for row in table):
-                return None
+            if not table:return None
             if not any(row and re.fullmatch(r'\d+(?:개월|일|주일|주)(?:확약)?', re.sub(r'\s+', '', row[0])) for row in table):
                 return None
             header = [re.sub(r'\s+', '', cell) for cell in table[0]]
+            header_corrections={'신청수랑(주)':'신청수량(주)','신청수량㈜':'신청수량(주)'}
+            normalizations=[{'column':c,'original':table[0][c],'interpreted':header_corrections[cell],
+                             'rule':'explicit_share_unit_header_variant_with_independent_quantity_v1'}
+                            for c,cell in enumerate(header) if cell in header_corrections]
+            header=[header_corrections.get(cell,cell) for cell in header]
             columns = [i for i, cell in enumerate(header) if re.fullmatch(
                 r'(?:신청|참여)(?:수량|주식수)\((?:단위:)?주\)', cell)]
             totals = [(i,row) for i,row in enumerate(table) if row and re.fullmatch(
@@ -1429,6 +1461,19 @@ class DARTCollector:
                    'scope':'all_institution_committed_application_quantity',
                    'independently_disclosed_application_total':application_total,
                    'independent_application_sources':application_sources}
+            if normalizations:proof['header_unit_normalizations']=normalizations
+            none_rows=[(i,r) for i,r in enumerate(table) if r and re.sub(r'\s+','',r[0]) in {'미확약','확약없음'}]
+            if none_rows:
+                periods=[r[column].strip() for r in table[1:index] if len(r)>column and re.fullmatch(
+                    r'\d+(?:개월|일|주일|주)(?:확약)?',re.sub(r'\s+','',r[0]))]
+                if (len(none_rows)!=1 or none_rows[0][0]<=index or column>=len(none_rows[0][1])
+                        or not re.fullmatch(integer,none_rows[0][1][column].strip()) or not periods
+                        or not all(re.fullmatch(integer,value) for value in periods)
+                        or sum(int(value.replace(',','')) for value in periods)!=committed):return None
+                none=int(none_rows[0][1][column].replace(',',''))
+                if application_total is None or committed+none!=application_total:return None
+                proof['subtotal_noncommitted_reconciliation']={'committed':committed,'noncommitted':none,
+                    'total':application_total,'subtotal_row':index,'noncommitted_row':none_rows[0][0]}
             if application_total is None or application_total<=0:
                 return {**result,'parser_validation_status':'candidate_rejected',
                     'rejection_reason':'lockup_outcome_quantity_schema_or_reconciliation_unverified',
@@ -1436,6 +1481,7 @@ class DARTCollector:
                         'failure_cause':'independent_application_quantity_unavailable',
                         'candidate_tables':[json.loads(cls._table_evidence(table,heading=context,**proof))]},
                         ensure_ascii=False)}
+            if normalizations and not application_sources:return None
             if committed>application_total:
                 return {**result,'parser_validation_status':'candidate_rejected',
                     'rejection_reason':'lockup_independent_application_quantity_mismatch',
@@ -1488,8 +1534,73 @@ class DARTCollector:
                 'structured_evidence':cls._table_evidence(table,heading=context,
                     printed_aggregate_preferred=bool(printed),**proof)}
 
+        def continued_aggregate(table, previous):
+            if application_total is None or application_total<=0:return None
+            period=r'\d+(?:개월|일|주일|주)(?:확약)?|미확약|확약없음|합계|총합계|총계|계'
+            def split(rows):
+                start=next((i for i,row in enumerate(rows) if row and re.fullmatch(
+                    r'\d+(?:개월|일|주일|주)(?:확약)?',re.sub(r'\s+','',row[0]))),None)
+                if start is None:return None
+                data={}
+                for i,row in enumerate(rows[start:],start):
+                    if not row or len(row)!=len(rows[0]):return None
+                    label=re.sub(r'\s+','',row[0])
+                    if not re.fullmatch(period,label) or label in data:return None
+                    if label in {'총합계','총계','계'}:label='합계'
+                    if label=='확약없음':label='미확약'
+                    if label in data:return None
+                    data[label]=(i,row)
+                return start,data
+            left=split(previous);right=split(table)
+            if left is None or right is None or set(left[1])!=set(right[1]):return None
+            if not {'미확약','합계'}.issubset(left[1]):return None
+            if len(previous[0])<4 or (len(previous[0])-1)%3 or len(table[0])<7 or (len(table[0])-1)%3:return None
+            left_scope=[re.sub(r'\s+','',c) for c in previous[0][1:]]
+            right_scope=[re.sub(r'\s+','',c) for c in table[0][1:]]
+            if (not all(c=='국내기관투자자' for c in left_scope)
+                    or not all(c in {'외국기관투자자','해외기관투자자'} for c in right_scope[:-3])
+                    or right_scope[-3:]!=['합계']*3):return None
+            units=[re.sub(r'\s+','',c) for c in previous[left[0]-1][1:]]
+            if units!=['건수','수량','신청가격']*((len(previous[0])-1)//3):return None
+            def pair(row,column):
+                n,q=row[column].strip(),row[column+1].strip()
+                if n==q=='-':return 0,0
+                if not re.fullmatch(integer,n) or not re.fullmatch(integer,q):return None
+                n,q=int(n.replace(',','')),int(q.replace(',',''))
+                return (n,q) if (n==0)==(q==0) else None
+            domestic_columns=list(range(1,len(previous[0]),3))
+            foreign_columns=list(range(1,len(table[0])-3,3));total_column=len(table[0])-3
+            reconciled={}
+            for label,(right_index,row) in right[1].items():
+                domestic=[pair(left[1][label][1],c) for c in domestic_columns]
+                foreign=[pair(row,c) for c in foreign_columns];whole=pair(row,total_column)
+                if whole is None or any(value is None for value in domestic+foreign):return None
+                if tuple(sum(v[i] for v in domestic+foreign) for i in (0,1))!=whole:return None
+                reconciled[label]={'row':right_index,'domestic':domestic,'foreign':foreign,'whole':whole}
+            for group in ['domestic','foreign','whole']:
+                width=len(reconciled['합계'][group]) if group!='whole' else 1
+                for c in range(width):
+                    values=[r[group] if group=='whole' else r[group][c] for label,r in reconciled.items() if label!='합계']
+                    expected=reconciled['합계'][group] if group=='whole' else reconciled['합계'][group][c]
+                    if tuple(sum(v[i] for v in values) for i in (0,1))!=expected:return None
+            total=reconciled['합계']['whole'][1];none=reconciled['미확약']['whole'][1]
+            if total!=application_total:return None
+            committed=total-none
+            return {**result,'lockup_commitment_ratio':committed/total,
+                'parse_method':'lockup_adjacent_domestic_foreign_quantity_reconciliation',
+                'rule_id':'DART_LOCKUP_CONTINUED_DOMESTIC_FOREIGN_QUANTITY_V5',
+                'parser_validation_status':'structurally_verified',
+                'evidence':f'committed={committed}; noncommitted={none}; total={total}',
+                'structured_evidence':cls._table_evidence(table,selected_column=total_column+1,
+                    committed=committed,noncommitted=none,total=total,scope='aggregate_quantity',
+                    continuation_schema_source={'table':previous,'schema_row':left[0]-1,
+                        'domestic_count_columns':domestic_columns,'foreign_count_columns':foreign_columns,
+                        'total_count_column':total_column,'reconciled_rows':reconciled},
+                    independently_disclosed_application_total=application_total,
+                    independent_application_sources=application_sources)}
+
         outcome_candidates = []
-        for table, context in zip(table_parser.tables, table_parser.table_contexts):
+        for table_index,(table, context) in enumerate(zip(table_parser.tables, table_parser.table_contexts)):
             table_text = " ".join(" ".join(row) for row in table)
             context_scope = bool(re.search(
                 r"의무보유확약(?:기관수및신청수량|신청내역)$", re.sub(r"\s+", "", context)))
@@ -1560,6 +1671,20 @@ class DARTCollector:
                     aggregate_shares['structured_evidence'] = json.dumps(evidence, ensure_ascii=False)
                 result.update(aggregate_shares)
                 return result
+            if table_index:
+                previous_index=table_index-1;captions=[]
+                previous_table=table_parser.tables[previous_index]
+                if (previous_index and len(previous_table)==len(previous_table[0])==1
+                        and re.fullmatch(r'\(단위[:：]건[,/]주\)',re.sub(r'\s+','',previous_table[0][0]))):
+                    captions=[{'table_index':previous_index,'table':previous_table}]
+                    previous_index-=1
+                continued=continued_aggregate(table,table_parser.tables[previous_index])
+                if continued is not None:
+                    evidence=json.loads(continued['structured_evidence'])
+                    evidence['continuation_schema_source'].update(table_index=previous_index,
+                        continuation_table_index=table_index,intervening_unit_captions=captions)
+                    continued['structured_evidence']=json.dumps(evidence,ensure_ascii=False)
+                    return continued
             if diagnostics:
                 result.update(parser_validation_status='candidate_rejected',
                     rejection_reason='lockup_independent_application_quantity_mismatch',
@@ -1674,21 +1799,21 @@ class DARTCollector:
             result["parser_validation_status"] = "candidate_rejected"
             result["rejection_reason"] = "lockup_outcome_quantity_schema_or_reconciliation_unverified"
             candidates = [json.loads(item) for item in outcome_candidates]
-            empty = []
+            empty = [];dash_only=[]
             for candidate in candidates:
                 data = [row for row in candidate['table'] if row and re.fullmatch(
-                    r'\d+(?:개월|일|주일|주)(?:확약)?|미확약|확약없음|합계|총합계|총계|계',
+                    r'\d+(?:개월|일|주일|주)(?:확약)?|미확약|확약없음|합계|총합계|총계|계|총합',
                     re.sub(r'\s+', '', row[0]))]
                 empty.append(len(data)>=2 and any(re.fullmatch(r'(?:총)?합계|총계|계',
                     re.sub(r'\s+', '', row[0])) for row in data)
                     and all(len(row)>1 and all(not cell.strip() for cell in row[1:]) for row in data))
+                dash_only.append(len(data)>=2 and any(re.fullmatch(r'(?:총)?합계|총계|계|총합',
+                    re.sub(r'\s+','',row[0])) for row in data)
+                    and all(len(row)>1 and all(cell.strip() in {'','-'} for cell in row[1:]) for row in data))
             if empty and all(empty):
                 result['parser_validation_status'] = 'value_not_found'
                 result['rejection_reason'] = 'selected_document_lockup_outcome_cells_empty'
-            elif candidates and all(
-                    len(candidate['table'])>=3 and all(
-                        all(cell.strip() in {'','-'} for cell in row[1:])
-                        for row in candidate['table'][1:]) for candidate in candidates):
+            elif dash_only and all(dash_only):
                 # A blank result form is not a zero, a numeric contradiction,
                 # or evidence that an earlier linked final result is absent.
                 result['parser_validation_status'] = 'value_not_found'
@@ -1785,14 +1910,16 @@ class DARTCollector:
                    if any(c < len(row) and re.fullmatch(r"\s*합\s*계\s*", row[c]) for row in headers)
                    and any(c < len(row) and re.fullmatch(r"\s*(?:신청\s*주식\s*수|수량)\s*", row[c]) for row in headers)]
         composite_units = False
-        cell_quantity = re.compile(r'[0-9][0-9,.]*\s*건\s*/\s*'
+        # Count punctuation is retained as text; only the explicit share quantity
+        # participates in this reconciliation, never an inferred participant count.
+        cell_quantity = re.compile(r'(?P<count>[0-9][0-9,.]*)\s*건\s*/\s*'
                                    r'(?P<quantity>(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+))\s*주')
         if not columns and application_total is not None and re.search(
                 r'기관\s*투자자', ' '.join(' '.join(row) for row in headers)):
             totals = sorted({c for row in headers for c, cell in enumerate(row)
                              if re.fullmatch(r'합\s*계', cell.strip())})
             if len(totals)==1 and all(totals[0]<len(row) and (
-                    row[totals[0]].strip()=='-' or cell_quantity.fullmatch(row[totals[0]].strip()))
+                    row[totals[0]].strip() in {'-','0'} or cell_quantity.fullmatch(row[totals[0]].strip()))
                     for row in table[start:]):
                 columns=totals
                 composite_units=True
@@ -1827,6 +1954,7 @@ class DARTCollector:
         dash_rows = []
         total_label_alias = False
         committed_subtotal = None
+        unparsed_count_cells=[]
         for i, row in enumerate(table[start:], start):
             if not row or column >= len(row):
                 return None
@@ -1834,9 +1962,12 @@ class DARTCollector:
             if re.fullmatch(r"총참여건수(?:및|/)(?:신청)?수량대비(?:비율|율)(?:\(%\))?", label):
                 continue
             value = row[column].strip()
-            if composite_units and value!='-':
+            if composite_units and value not in {'-','0'}:
                 match=cell_quantity.fullmatch(value)
                 if match is None:return None
+                if not re.fullmatch(r'[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+',match['count']):
+                    unparsed_count_cells.append({'row':i,'column':column,'raw_count_token':match['count'],
+                        'status':'unverified_participant_count_not_used_in_share_ratio'})
                 value=match['quantity']
             if label in {'확약합계','확약소계'} or label=='소계' and all_institutions:
                 if committed_subtotal is not None or not re.fullmatch(r"[0-9][0-9,]*|-", value):
@@ -1899,6 +2030,7 @@ class DARTCollector:
                 single_application_quantity_schema=single_quantity_schema,
                 independently_disclosed_committed_subtotal=committed_subtotal,
                 **({'explicit_count_and_share_cell_units':True} if composite_units else {}),
+                **({'unparsed_participant_count_cells':unparsed_count_cells} if unparsed_count_cells else {}),
             ),
         }
 

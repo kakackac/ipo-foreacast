@@ -48,6 +48,99 @@
   ],
   "samples": [
     {
+      "sample":"newpower_subtotal_lockup_2016","receipt":"20161118000332","section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20161118000332&dcmNo=5356606&eleId=9&offset=152736&length=84560&dtd=dart3.xsd",
+      "sha256":"a9f3400e1dadedf0d4a8689b3b45ad3abe7a9ae31a14ec836c135d223cb588ac",
+      "expected":{"lockup_commitment_ratio":0.078},
+      "expected_evidence":{"lockup_structured_evidence":{"subtotal_noncommitted_reconciliation":{"committed":46659000,"noncommitted":549804000,"total":596463000}}},
+      "review_note":"The sum row before noncommitment is the committed subtotal, not the whole denominator. Exact independent demand is 596463000; 46659000 plus 549804000 reconciles. Preserve printed quantity percentage 7.8%, not adjacent count percentage 6.3%."
+    },
+    {
+      "sample":"sjgroup_header_lockup_2019","receipt":"20191105000199","section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20191105000199&dcmNo=6946667&eleId=9&offset=247038&length=152469&dtd=dart3.xsd",
+      "sha256":"dcdf8a2d1ed3a6ac062877db23994d9b8ebbd9ff6b2ce736431b11a9344a33af",
+      "expected":{"lockup_commitment_ratio":0.1356},
+      "expected_evidence":{"lockup_structured_evidence":{"committed_quantity":76762000,"independently_disclosed_application_total":566079000}},
+      "review_note":"Raw share-unit header contains a spelling error, retained unchanged. Independent official quantity 566079000 and commitment subtotal 76762000 agree with printed quantity percentage 13.56%; count percentage 12.61% is not the model value."
+    },
+    {
+      "sample":"taewoong_header_lockup_2019","receipt":"20191125000235","section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20191125000235&dcmNo=6970812&eleId=9&offset=235150&length=174423&dtd=dart3.xsd",
+      "sha256":"bcda113236c7bb46008c9a0ca0ff85846135a99bd588bb18b801a04fa0293063",
+      "expected":{"lockup_commitment_ratio":0.0253},
+      "expected_evidence":{"lockup_structured_evidence":{"committed_quantity":77945000,"independently_disclosed_application_total":3074943450}},
+      "review_note":"The raw typo header still declares shares. Independent demand quantity and committed subtotal support printed 2.53%, not 2.38% of participants; positive truncation is checked at the printed precision."
+    },
+    {
+      "sample":"aplus_header_lockup_2020","receipt":"20201109000184","section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20201109000184&dcmNo=7538943&eleId=7&offset=365913&length=176578&dtd=dart3.xsd",
+      "sha256":"ab3382445fe9ffe5e6fb9c63c7408fc9bd06840c0bdad309b129e4d293e36042",
+      "expected":{"lockup_commitment_ratio":0.254},
+      "expected_evidence":{"lockup_structured_evidence":{"committed_quantity":1246000,"independently_disclosed_application_total":4915000}},
+      "review_note":"Printed 25.4% is compatible with 1246000/4915000 at one decimal percent. The participation table has paired dash count/quantity for one foreign group; its exact count and quantity partitions independently reconcile. Never use 1.0% of participants."
+    },
+    {
+      "sample":"hana_header_lockup_2020","receipt":"20201112000090","section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20201112000090&dcmNo=7542140&eleId=8&offset=280049&length=152806&dtd=dart3.xsd",
+      "sha256":"d6b7f40a4462e735aea3008a4f666a5453e7cb309c26eae6e8ac72aca2b89635",
+      "expected":{"lockup_commitment_ratio":0.1683},
+      "expected_evidence":{"lockup_structured_evidence":{"committed_quantity":150158000,"independently_disclosed_application_total":892144000}},
+      "review_note":"Raw share-unit symbol is the parenthesized Korean compatibility character. Preserve raw cell and record its interpretation separately; 150158000/892144000 supports printed 16.83%, not 16.47% count percentage."
+    },
+    {
+      "sample":"jitech_composite_lockup_2022","receipt":"20221025000142","section_title":"I. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20221025000142&dcmNo=8846373&eleId=7&offset=300063&length=203743&dtd=dart3.xsd",
+      "sha256":"432524db3ff8f29a0e1996f64a92d5ffa0fc7882cbead1fd85962b8ce10b4e8b",
+      "expected":{"lockup_commitment_ratio":0.005512156736436537},
+      "expected_evidence":{"lockup_structured_evidence":{"committed":4407852,"noncommitted":795252283,"total":799660135,"explicit_count_and_share_cell_units":true}},
+      "review_note":"Cells contain count/share pairs with explicit units, plus literal zero period cells. Whole committed 4407852 plus noncommitted 795252283 equals independent total 799660135; use shares, not 36/945 participants."
+    },
+    {
+      "sample":"samyang_continued_lockup_2025","receipt":"20250114000182","section_title":"I. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20250114000182&dcmNo=10263787&eleId=7&offset=466808&length=259661&dtd=dart4.xsd",
+      "sha256":"10e6641bd5ceceda7acdce8621148a0a48b3d5e3f4db9800a8d86198d811e904",
+      "expected":{"lockup_commitment_ratio":0.011370878788241666},
+      "expected_evidence":{"lockup_structured_evidence":{"committed":8546000,"noncommitted":743023000,"total":751569000}},
+      "review_note":"Adjacent domestic and foreign/global tables repeat count/quantity/price triples across a unit-only caption. Each row and group count/share partition reconciles, including independent demand total. No synthetic header replaces original cells."
+    },
+    {
+      "sample":"lgcns_continued_lockup_2025","receipt":"20250117000578","section_title":"I. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20250117000578&dcmNo=10269085&eleId=7&offset=521438&length=399855&dtd=dart4.xsd",
+      "sha256":"81096efdabb81c75a739b6445d0292d5c02a56a5c0c96574a142fd398ef4eece",
+      "expected":{"lockup_commitment_ratio":0.1056776562583397},
+      "expected_evidence":{"lockup_structured_evidence":{"committed":128825000,"noncommitted":1090212255,"total":1219037255}},
+      "review_note":"The second table includes foreign subgroups and the whole domestic-plus-foreign total. Global quantity is not foreign-only. Every count/share row and column agrees with both source tables and independent total."
+    },
+    {
+      "sample":"daehan_continued_lockup_2025","receipt":"20250721000037","section_title":"I. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20250721000037&dcmNo=10729024&eleId=7&offset=471101&length=316844&dtd=dart4.xsd",
+      "sha256":"ae3366aea839b92eae4448a6045be362bfb2278b04cc372261efde9d1ff3277b",
+      "expected":{"lockup_commitment_ratio":0.5685718657742201},
+      "expected_evidence":{"lockup_structured_evidence":{"committed":862030000,"noncommitted":654102000,"total":1516132000}},
+      "review_note":"Domestic/foreign tables share period rows and repeated count/share/price schema. Exact component sums, group sums and independent demand total support the combined quantity ratio; subgroup ratios are never averaged."
+    },
+    {
+      "sample":"noeul_multiheader_dash_lockup_2022","receipt":"20220218001132","section_title":"I. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20220218001132&dcmNo=8395669&eleId=7&offset=417896&length=220206&dtd=dart3.xsd",
+      "sha256":"0d8511588a44ff9f905c1d723cc4dd837a53f47d00d638252a11596b8c7cb10d",
+      "expected":{"lockup_commitment_ratio":null,"lockup_parser_validation_status":"value_not_found","lockup_rejection_reason":"selected_document_lockup_outcome_dash_only"},
+      "review_note":"Multiple populated header rows are not outcome data. Every actual result cell, including grand total, is a dash; keep NULL and do not infer zero or issuer-wide nonpublication."
+    },
+    {
+      "sample":"webs_count_scope_lockup_2015","receipt":"20150810000107","section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20150810000107&dcmNo=4758933&eleId=9&offset=172091&length=88794&dtd=dart3.xsd",
+      "sha256":"e89806770a86acc15c4511d5478fa809820924de1ab422ee1e22e03ac4ebd1c8",
+      "expected":{"lockup_commitment_ratio":null,"lockup_parser_validation_status":"candidate_rejected"},
+      "review_note":"163 is the number of committed institutions, not shares. A quantity-percentage row label does not resolve the participant-count column's scope; do not approve 33.54% as an application-share commitment ratio."
+    },
+    {
+      "sample":"cherry_malformed_total_lockup_2017","receipt":"20171120000164","section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20171120000164&dcmNo=5852300&eleId=9&offset=303468&length=207398&dtd=dart3.xsd",
+      "sha256":"738bcf598e31f8c2a61917248db29e088112eb4e52518ce0aa98144c183d917c",
+      "expected":{"lockup_commitment_ratio":null,"lockup_parser_validation_status":"candidate_rejected"},
+      "review_note":"Independent whole quantity is printed malformed as 1,306,067,33 in this original. Do not silently insert digits/commas, approve from a rounded percentage, or declare official nonpublication. Resolve the official correction/quantity before using this selected case."
+    },
+    {
       "sample":"unitechno_dash_lockup_2016","receipt":"20160902000083",
       "section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
       "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20160902000083&dcmNo=5280828&eleId=9&offset=148665&length=103882&dtd=dart3.xsd",
