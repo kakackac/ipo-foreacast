@@ -187,14 +187,78 @@ def result_day_document(metadata, terms, load, analyse=None):
     day=[(m,*load(m)) for m in terms if m['rcept_dt']==metadata['rcept_dt']]
     complete=[item for item in day if item[2].get('content_scope','full')=='full']
     if not complete:raise ValueError('stage_partial_document_requires_composition')
+    prospectuses=[item for item in complete if '투자설명서' in item[0].get('report_nm','')]
     chosen=max(complete,key=lambda item:item[0]['rcept_no'])
     dart=DARTCollector(api_key='unused')
     analyse=analyse or (lambda m,b,c:document_analysis(dart,b,m['rcept_no'],c))
+    role_selection=None
+    if prospectuses and '증권신고서' in chosen[0].get('report_nm',''):
+        prospectus=max(prospectuses,key=lambda item:item[0]['rcept_no'])
+        registered=analyse(chosen[0],chosen[1],chosen[2]['corp_code'])
+        final=analyse(prospectus[0],prospectus[1],prospectus[2]['corp_code'])
+        if (registered['offering'].get('offering_price_finality')=='preliminary_price_language'
+                and registered['demand'].get('institutional_demand_parser_validation_status')=='value_not_found'
+                and final['offering'].get('offering_price_finality')=='confirmed_price_language'
+                and final['offering'].get('offering_price_review_status')=='verified_currency_unit'
+                and final['demand'].get('institutional_demand_parser_validation_status')=='structurally_verified'
+                and chosen[2]['corp_code']==prospectus[2]['corp_code']
+                and chosen[0]['rcept_no'] in prospectus[2].get('related_receipts',[])
+                and prospectus[0]['rcept_no'] in chosen[2].get('related_receipts',[])):
+            role_selection={'rule':'linked_final_prospectus_over_planned_unpopulated_registration_v1',
+                'registration_receipt':chosen[0]['rcept_no'],'prospectus_receipt':prospectus[0]['rcept_no']}
+            chosen=prospectus
     full_analysis=deepcopy(analyse(chosen[0],chosen[1],chosen[2]['corp_code']))
     full_price=full_analysis['offering'];full_demand=full_analysis['demand']
-    notices=[];field_sources={};held_fields={};band_notices=[]
-    for m,body,proof in day:
+    notices=[];field_sources={};held_fields={};band_notices=[];full_checks=[]
+    for other in sorted(complete,key=lambda item:item[0]['rcept_no']):
+        m,body,origin=other
+        if m['rcept_no']<=chosen[0]['rcept_no']:continue
+        if (origin['corp_code']!=chosen[2]['corp_code']
+                or m['rcept_no'] not in chosen[2].get('related_receipts',[])
+                or chosen[0]['rcept_no'] not in origin.get('related_receipts',[])):
+            raise ValueError('stage_later_full_document_not_linked')
+        other_analysis=analyse(m,body,origin['corp_code']);other_price=other_analysis['offering']
+        if (other_price.get('offering_price_finality')=='confirmed_price_language'
+                and other_price.get('offering_price_review_status')=='verified_currency_unit'
+                and other_price.get('offering_price')!=full_price.get('offering_price')):
+            raise ValueError('stage_later_full_document_price_conflict')
+        for field in ('new_shares','secondary_shares','price_band_low','price_band_high',
+                      'public_float_shares','public_float_ratio_disclosed','total_post_listing_shares'):
+            if (other_price.get(field) is not None and full_price.get(field) is not None
+                    and other_price[field]!=full_price[field]):
+                raise ValueError('stage_later_full_document_supply_or_band_conflict')
+        other_demand=other_analysis['demand']
+        for field,prefix in [('institutional_demand_ratio','institutional_demand'),('lockup_commitment_ratio','lockup')]:
+            if (other_demand.get(prefix+'_parser_validation_status')=='structurally_verified'
+                    and full_demand.get(prefix+'_parser_validation_status')=='structurally_verified'
+                    and other_demand.get(field)!=full_demand.get(field)
+                    and not (field=='institutional_demand_ratio' and same_demand_printed_rounding(other_demand,full_demand))):
+                raise ValueError('stage_later_full_document_result_conflict')
+        full_checks.append({'receipt':m['rcept_no'],'origin':origin,
+            'comparison':'linked_same_day_registration_not_silently_skipped',
+            'price_finality':other_price.get('offering_price_finality'),
+            'institutional_status':other_demand.get('institutional_demand_parser_validation_status')})
+    active=[item for item in day if '증권신고서' in item[0].get('report_nm','')
+        and '지분증권' in item[0].get('report_nm','')
+        and item[0]['rcept_no'] in chosen[2].get('related_receipts',[])
+        and chosen[0]['rcept_no'] in item[2].get('related_receipts',[])
+        and item[2]['corp_code']==chosen[2]['corp_code']]
+    superseded=[]
+    latest=active[0] if len(active)==1 else None
+    for m,body,proof in sorted(day,key=lambda item:item[0]['rcept_no']):
         if proof.get('content_scope','full')=='full':continue
+        if (latest is not None and '발행조건확정' in m.get('report_nm','')
+                and '투자설명서' in chosen[0].get('report_nm','')
+                and m['rcept_no']<min(latest[0]['rcept_no'],chosen[0]['rcept_no'])
+                and m['rcept_no'] not in chosen[2].get('related_receipts',[])
+                and proof['corp_code']==chosen[2]['corp_code']
+                and {latest[0]['rcept_no'],chosen[0]['rcept_no']}.issubset(proof.get('related_receipts',[]))):
+            superseded.append({'receipt':m['rcept_no'],'replacement_receipt':latest[0]['rcept_no'],
+                'complete_receipt':chosen[0]['rcept_no'],'published_at':m['rcept_dt'],
+                'rule':'same_day_explicit_active_related_terms_pair_v1',
+                'prior_related_receipts':proof['related_receipts'],
+                'complete_related_receipts':chosen[2]['related_receipts']})
+            continue
         linked=(m['rcept_no'] in chosen[2].get('related_receipts',[])
                 and chosen[0]['rcept_no'] in proof.get('related_receipts',[])
                 and chosen[2]['corp_code']==proof['corp_code']
@@ -202,19 +266,38 @@ def result_day_document(metadata, terms, load, analyse=None):
         if re.search(r'정정\s*전',body) and re.search(r'정정\s*후',body):
             try:body,view=amendment_view(body)
             except ValueError as exc:
+                view=None
+                if (str(exc)=='correction_after_without_matching_before' and linked
+                        and full_price.get('offering_price_finality')=='confirmed_price_language'
+                        and full_price.get('offering_price_review_status')=='verified_currency_unit'):
+                    try:body,view=added_note_after_view(body)
+                    except ValueError:pass
+                    if view is not None:view['strict_section_rejection']=str(exc)
                 # A later, bidirectionally linked full prospectus is the source,
                 # not a guessed composition of an incomplete correction notice.
-                if (not linked or chosen[0]['rcept_no']<=m['rcept_no']
+                if view is None and (not linked or chosen[0]['rcept_no']<=m['rcept_no']
                         or full_price.get('offering_price_finality')!='confirmed_price_language'
                         or full_price.get('offering_price_review_status')!='verified_currency_unit'):
                     raise
-                body,view=horizontal_after_cells(body)
-                view.update(strict_section_rejection=str(exc),
-                    replacement_rule='later_bidirectionally_linked_complete_prospectus_v1',
-                    replacement_receipt=chosen[0]['rcept_no'])
+                if view is None:
+                    body,view=horizontal_after_cells(body)
+                    view.update(strict_section_rejection=str(exc),
+                        replacement_rule='later_bidirectionally_linked_complete_prospectus_v1',
+                        replacement_receipt=chosen[0]['rcept_no'])
         else:view=None
         partial_analysis=analyse(m,body,proof['corp_code'])
         price=partial_analysis['offering'];demand=partial_analysis['demand']
+        if view and view.get('rule')=='explicit_overview_empty_before_additions_v1':
+            if (price.get('offering_price_review_status')!='verified_currency_unit'
+                    or price.get('offering_price_finality')!='confirmed_price_language'
+                    or price.get('offering_price')!=full_price.get('offering_price')):
+                raise ValueError('stage_added_notice_price_not_reconciled')
+            if chosen[0]['rcept_no']<m['rcept_no']:
+                for field in ('new_shares','secondary_shares','price_band_low','price_band_high',
+                              'public_float_shares','public_float_ratio_disclosed','total_post_listing_shares'):
+                    if (price.get(field) is not None and full_price.get(field) is not None
+                            and price[field]!=full_price[field]):
+                        raise ValueError('stage_added_notice_supply_or_band_conflict')
         band_notices.append({'receipt':m['rcept_no'],'document':price,'origin':proof,
                              'metadata':m,'linked':linked,'view':view})
         if view and view.get('rule')=='horizontal_after_cells_consistency_only_v1':
@@ -280,7 +363,50 @@ def result_day_document(metadata, terms, load, analyse=None):
     elif band.get('price_band_validation_status')=='conflicting_bands_review_required':
         held_fields['price_band']={'reason':'same_day_official_band_conflict','checks':band_checks}
     return chosen[0],chosen[1],{**chosen[2],'same_day_terms_checks':notices,
-        'result_field_sources':field_sources,'held_result_fields':held_fields,'band_source_checks':band_checks},full_analysis
+        'result_field_sources':field_sources,'held_result_fields':held_fields,'band_source_checks':band_checks,
+        'superseded_same_day_terms':superseded,'same_day_later_full_checks':full_checks,
+        'final_prospectus_role_selection':role_selection},full_analysis
+
+
+def added_note_after_view(html):
+    """An explicit empty-before overview can declare a new, after-only note."""
+    parser=_TableRowParser();parser.feed(html);parser.close();additions={}
+    for table_index,table in enumerate(parser.tables):
+        if not table or [re.sub(r'\s+','',c) for c in table[0]]!=['항목','정정전','정정후']:continue
+        for row_index,row in enumerate(table[1:],1):
+            if len(row)!=3 or re.sub(r'\s+','',row[1])!='-':continue
+            note=re.fullmatch(r'주([1-9][0-9]*)\)',re.sub(r'\s+','',row[2]))
+            if note is None:continue
+            if note[1] in additions:raise ValueError('added_note_overview_reference_not_unique')
+            additions[note[1]]={'table':table_index,'row':row_index,'cells':row}
+    if not additions:raise ValueError('added_note_empty_before_overview_missing')
+    from bs4 import Comment
+    soup=BeautifulSoup(html,'html.parser');matched={}
+    markers={'■정정후','[정정후]','(정정후)','정정후'}
+    for node in list(soup.find_all(string=True)):
+        if isinstance(node,Comment) or node.find_parent(['table','script','style']) is not None:continue
+        note=re.fullmatch(r'주([1-9][0-9]*)\)',re.sub(r'\s+','',str(node)))
+        if note is None or note[1] not in additions:continue
+        text='';first=None;boundary=False
+        for following in node.next_elements:
+            if getattr(following,'name',None)=='table':break
+            if not isinstance(following,str) or isinstance(following,Comment) or not following.strip():continue
+            if following.find_parent(['script','style']) is not None:break
+            first=first if first is not None else following
+            text+=re.sub(r'\s+','',str(following))
+            if text in markers:boundary=True;break
+            if not any(marker.startswith(text) for marker in markers):break
+        if not boundary:continue
+        if note[1] in matched:raise ValueError('added_note_after_boundary_not_unique')
+        before=soup.new_tag('span');before.string='[정정 전]'
+        first.insert_before(soup.new_tag('br'));first.insert_before(before);first.insert_before(soup.new_tag('br'))
+        matched[note[1]]=additions[note[1]]
+    if set(matched)!=set(additions):raise ValueError('added_note_after_boundaries_unverified')
+    expanded=str(soup);selected,evidence=amendment_view(expanded)
+    return selected,{**evidence,'rule':'explicit_overview_empty_before_additions_v1',
+        'original_sha256':hashlib.sha256(html.encode()).hexdigest(),
+        'empty_before_expansion_sha256':hashlib.sha256(expanded.encode()).hexdigest(),
+        'empty_before_notes':matched,'original_paired_sections':evidence['pair_count']-len(matched)}
 
 
 def same_demand_printed_rounding(left,right):

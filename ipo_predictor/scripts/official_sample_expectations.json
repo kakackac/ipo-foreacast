@@ -1,5 +1,29 @@
 {
   "description": "Official DART original-table references reviewed 2026-09-09 and 2026-11-06. New aggregate quantity references: Melcon 748389000/2074742000; EST 2489000/1039659000; SK14 14625000/5988330000. Numerator plus noncommitment quantity reconciles to the independently disclosed demand quantity. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
+  "stage_selection_samples": [
+    {"company":"힘스","event_id":"krx_kind|238490|20170720|힘스",
+     "complete_receipt":"20170707000208","current_registration_receipt":"20170707000203",
+     "superseded_receipts":["20170707000121","20170707000198"],
+     "expected":{"offering_price":20000,"institutional_demand_ratio":729.64,"lockup_commitment_ratio":0.2748},
+     "review_note":"The official active same-day pair is 00203/00208. The 00198 notice prints 27.23 percent; the later active 00203 notice prints 27.48 percent. Do not combine or compare superseded notices as current results."},
+    {"company":"엠아이텍","event_id":"krx_kind|179290|20181129|엠아이텍",
+     "complete_receipt":"20181116000018","current_registration_receipt":"20181116000143",
+     "superseded_receipts":["20181116000017"],"role_selection_required":true,
+     "expected":{"offering_price":4500,"institutional_demand_ratio":472.57,"lockup_commitment_ratio":0.0042},
+     "review_note":"The final prospectus states 833 institutions, 2484332000 shares and aggregate competition 472.57. The commitment table prints 10514000 shares and 0.42 percent. The later linked registration retains a preliminary price and no institutional result; it must be crosschecked, not silently skipped or used to erase the final prospectus."},
+    {"company":"제일홀딩스","event_id":"krx_kind|3380|20170630|제일홀딩스",
+     "complete_receipt":"20170615000297","notice_receipt":"20170615000305","added_notes":["6"],
+     "expected":{"offering_price":20700,"institutional_demand_ratio":113.98,"lockup_commitment_ratio":0.0288},
+     "review_note":"The overview explicitly maps empty before (-) to note 6 after. The new note contains 622 institutions, 1858371479 shares and 113.98; the commitment quantity is 53504800 and the printed quantity percentage is 2.88, not participant-count percentage 4.02."},
+    {"company":"테이팩스","event_id":"krx_kind|55490|20171031|테이팩스",
+     "complete_receipt":"20171020000342","notice_receipt":"20171020000346","added_notes":["6"],
+     "expected":{"offering_price":23000,"institutional_demand_ratio":16.81},
+     "review_note":"The empty-before overview links new note 6. Its all-institution total column states 276 institutions, 16744961 shares and 16.81; subgroup rates are not averaged. No lockup expectation is inferred from an absent table."},
+    {"company":"대원","event_id":"krx_kind|7680|20171201|대원",
+     "complete_receipt":"20171121000228","notice_receipt":"20171121000233","added_notes":["6"],
+     "expected":{"offering_price":15000,"institutional_demand_ratio":247.25},
+     "review_note":"The empty-before overview links new note 6. The domestic-and-foreign aggregate column states 561 institutions, 346145000 shares and 247.25, not any domestic-only or foreign-only rate."}
+  ],
   "samples": [
     {
       "sample": "cosmecca_flat_lockup_2016", "receipt": "20161014000121",

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pandas as pd
 
 from data.pipelines.stage_snapshots import demand_schedule, stage_documents, values_from_document, amendment_view, horizontal_after_cells, original_cache_hashes, reusable_checkpoint, document_analysis, section_text, StageResponseInvalid, result_day_document, same_demand_printed_rounding, set_stage_offering_price_metadata, stage_collection_fields, stage_observation, stage_checkpoint_identity, stage_financial_missing_reason
-from data.pipelines.stage_snapshots import same_verified_lockup_table
+from data.pipelines.stage_snapshots import same_verified_lockup_table, added_note_after_view
 from features.model_profiles import get_model_profile
 from features.prediction_time_contract import validate_prediction_times
 
@@ -18,6 +18,139 @@ def schedule(start='2024년 02월 08일',end='02월 09일'):
 
 
 class StageSnapshotTests(unittest.TestCase):
+    def added_note_html(self):
+        return ('<table><tr><td>항목</td><td>정정 전</td><td>정정 후</td></tr>'
+            '<tr><td>신규 수요예측 결과</td><td>-</td><td>주2)</td></tr></table>'
+            '<p>주1)</p><p>■ 정정 전</p><p>obsolete price</p>'
+            '<p>■ 정정 후</p><p>confirmed price</p>'
+            '<p>주2)</p><p><b>■ </b><span>정정 후</span></p>'
+            '<table><tr><td>new institutional result</td><td>100</td></tr></table>')
+
+    def test_explicit_empty_before_note_is_a_new_section_not_a_missing_pair(self):
+        body=self.added_note_html()
+        with self.assertRaisesRegex(ValueError,'after_without_matching_before'):amendment_view(body)
+        selected,proof=added_note_after_view(body)
+        self.assertNotIn('obsolete price',selected)
+        self.assertIn('confirmed price',selected);self.assertIn('new institutional result',selected)
+        self.assertEqual(proof['rule'],'explicit_overview_empty_before_additions_v1')
+        self.assertEqual(proof['original_paired_sections'],1)
+        self.assertEqual(set(proof['empty_before_notes']),{'2'})
+        self.assertEqual(proof['original_sha256'],hashlib.sha256(body.encode()).hexdigest())
+        inline=body.replace('<p>주2)</p><p><b>■ </b><span>정정 후</span></p>',
+            '<p>prior tail<br/>주2)<br/><b>■</b><span>정정 후</span><br/></p>')
+        self.assertIn('new institutional result',added_note_after_view(inline)[0])
+
+    def test_after_only_notes_require_unique_overview_and_matching_body_boundaries(self):
+        body=self.added_note_html()
+        for changed in [body.replace('<td>-</td>','<td>주1)</td>'),
+                body.replace('<td>주2)</td>','<td>주3)</td>'),
+                body.replace('<p>주2)</p>','<p>unidentified note</p>'),
+                body.replace('</table>','<tr><td>duplicate</td><td>-</td><td>주2)</td></tr></table>',1),
+                body+'<p>주2)</p><p>■ 정정 후</p><p>ambiguous duplicate</p>']:
+            with self.subTest(body=changed),self.assertRaises(ValueError):added_note_after_view(changed)
+
+    def test_added_note_rejection_preserves_later_full_horizontal_crosscheck_not_an_earlier_one(self):
+        notice={'rcept_no':'20240101000001','rcept_dt':'2024-01-01','report_nm':'[발행조건확정]증권신고서(지분증권)'}
+        full={**notice,'rcept_no':'20240101000002','report_nm':'투자설명서'}
+        body=('<table><tr><td>항목</td><td>정정 전</td><td>정정 후</td></tr>'
+            '<tr><td>공통</td><td>예정</td><td>모집가액: 4,000원</td></tr></table>'
+            '<p>[정정 후]</p><p>unpaired prose is not a feature source</p>')
+        def load(m):return body if m==notice else 'full',{'corp_code':'00000001',
+            'content_scope':'partial_terms_notice' if m==notice else 'full',
+            'related_receipts':[notice['rcept_no'],full['rcept_no']]}
+        def analyse(m,*args):return {'offering':{'offering_price':4000,'offering_price_finality':'confirmed_price_language',
+            'offering_price_review_status':'verified_currency_unit'} if m==full else {},'demand':{}}
+        result=result_day_document(notice,[notice,full],load,analyse)
+        view=result[2]['same_day_terms_checks'][0]['after_correction_view']
+        self.assertEqual(view['rule'],'horizontal_after_cells_consistency_only_v1')
+        self.assertEqual(view['replacement_receipt'],full['rcept_no'])
+        old_full={**full,'rcept_no':'20240101000000'}
+        def earlier(m):
+            text,proof=load(notice if m==notice else full)
+            proof['related_receipts']=[notice['rcept_no'],old_full['rcept_no']]
+            return text,proof
+        with self.assertRaises(ValueError):result_day_document(notice,[notice,old_full],earlier,analyse)
+
+    def test_later_added_note_can_crosscheck_an_earlier_linked_full_with_matching_price(self):
+        full={'rcept_no':'20240101000001','rcept_dt':'2024-01-01','report_nm':'투자설명서'}
+        notice={'rcept_no':'20240101000002','rcept_dt':'2024-01-01','report_nm':'[발행조건확정]증권신고서(지분증권)'}
+        def load(m):return self.added_note_html() if m==notice else 'full',{
+            'receipt':m['rcept_no'],'corp_code':'00000001','content_scope':'partial_terms_notice' if m==notice else 'full',
+            'related_receipts':[notice['rcept_no'],full['rcept_no']]}
+        def analyse(m,*args):return {'offering':{'offering_price':4000,'offering_price_finality':'confirmed_price_language',
+            'offering_price_review_status':'verified_currency_unit'},'demand':{'institutional_demand_ratio':100,
+            'institutional_demand_parser_validation_status':'structurally_verified'}}
+        result=result_day_document(notice,[full,notice],load,analyse)
+        self.assertEqual(result[0],full);self.assertEqual(result[3]['demand']['institutional_demand_ratio'],100)
+        self.assertEqual(result[2]['same_day_terms_checks'][0]['after_correction_view']['original_paired_sections'],1)
+        for field,value,expected in [('offering_price',5000,'added_notice_price_not_reconciled'),
+                                     ('new_shares',200,'added_notice_supply_or_band_conflict')]:
+            def conflict(m,*args):
+                r=analyse(m,*args)
+                if field=='new_shares':r['offering'][field]=200 if m==notice else 100
+                elif m==notice:r['offering'][field]=value
+                return r
+            with self.subTest(field=field),self.assertRaisesRegex(ValueError,expected):
+                result_day_document(notice,[full,notice],load,conflict)
+
+    def test_explicit_active_pair_supersedes_only_proven_older_same_day_terms_in_any_order(self):
+        from itertools import permutations
+        old={'rcept_no':'20240101000001','rcept_dt':'2024-01-01','report_nm':'[발행조건확정]증권신고서(지분증권)'}
+        active={**old,'rcept_no':'20240101000002'}
+        full={**old,'rcept_no':'20240101000003','report_nm':'[정정]투자설명서'}
+        def load(m):return m['rcept_no'],{'receipt':m['rcept_no'],'corp_code':'00000001',
+            'content_scope':'full' if m==full else 'partial_terms_notice',
+            'related_receipts':[active['rcept_no'],full['rcept_no']]}
+        def analyse(m,*args):return {'offering':{'offering_price':3000 if m==old else 4000,
+            'offering_price_review_status':'verified_currency_unit','offering_price_finality':'confirmed_price_language'},
+            'demand':{'institutional_demand_ratio':None if m==full else 999 if m==old else 100,
+                'institutional_demand_parser_validation_status':'value_not_found' if m==full else 'structurally_verified'}}
+        expected=None
+        for order in permutations([old,active,full]):
+            result=result_day_document(active,list(order),load,analyse)
+            self.assertEqual(result[3]['demand']['institutional_demand_ratio'],100)
+            self.assertEqual(result[2]['superseded_same_day_terms'][0]['receipt'],old['rcept_no'])
+            if expected is None:expected=result
+            else:self.assertEqual(result,expected)
+        def unproven(m):
+            body,proof=load(m)
+            if m==old:proof['related_receipts']=[]
+            return body,proof
+        with self.assertRaisesRegex(ValueError,'price_conflict'):
+            result_day_document(active,[old,active,full],unproven,analyse)
+        def ambiguous(m):
+            body,proof=load(m)
+            if m==full:proof['related_receipts'].append(old['rcept_no'])
+            return body,proof
+        with self.assertRaisesRegex(ValueError,'price_conflict'):
+            result_day_document(active,[old,active,full],ambiguous,analyse)
+
+    def test_later_linked_registration_does_not_replace_final_prospectus_with_empty_planned_fields(self):
+        old={'rcept_no':'20240101000001','rcept_dt':'2024-01-01','report_nm':'[발행조건확정]증권신고서(지분증권)'}
+        full={**old,'rcept_no':'20240101000002','report_nm':'투자설명서'}
+        registration={**old,'rcept_no':'20240101000003','report_nm':'[정정]증권신고서(지분증권)'}
+        def load(m):return m['rcept_no'],{'receipt':m['rcept_no'],'corp_code':'00000001',
+            'content_scope':'partial_terms_notice' if m==old else 'full',
+            'related_receipts':[full['rcept_no'],registration['rcept_no']]}
+        def analyse(m,*args):return {'offering':{'offering_price':None if m==registration else 4000,
+            'offering_price_finality':'preliminary_price_language' if m==registration else 'confirmed_price_language',
+            'offering_price_review_status':'preliminary_price_language' if m==registration else 'verified_currency_unit'},
+            'demand':{'institutional_demand_ratio':None if m==registration else 100,
+                'institutional_demand_parser_validation_status':'value_not_found' if m==registration else 'structurally_verified'}}
+        for order in [[old,full,registration],[registration,full,old]]:
+            result=result_day_document(old,order,load,analyse)
+            self.assertEqual(result[0],full)
+            self.assertEqual(result[3]['demand']['institutional_demand_ratio'],100)
+            self.assertEqual(result[2]['superseded_same_day_terms'][0]['replacement_receipt'],registration['rcept_no'])
+            self.assertEqual(result[2]['same_day_later_full_checks'][0]['receipt'],registration['rcept_no'])
+        def conflict(m,*args):
+            r=analyse(m,*args)
+            if m==registration:r['offering'].update(offering_price=5000,
+                offering_price_finality='confirmed_price_language',offering_price_review_status='verified_currency_unit')
+            return r
+        with self.assertRaisesRegex(ValueError,'price_conflict'):
+            result_day_document(old,[old,full,registration],load,conflict)
+
     def test_same_outcome_table_requires_exact_cells_and_no_real_quantity_conflict(self):
         table=[['구분','합계'],['6개월','1건 / 100주'],['미확약','9건 / 900주'],['합계','10건 / 1000주']]
         verified={'lockup_parser_validation_status':'structurally_verified',
