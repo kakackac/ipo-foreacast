@@ -12,6 +12,69 @@ from data.pipelines.data_delivery import digest
 
 
 class LockupRepairTests(unittest.TestCase):
+    def flat_outcome(self, quantity='1,000', total='100', percent='10.0'):
+        return ('<p>수요예측 결과 기관투자자 수요예측 참여내역</p><table>'
+            '<tr><td>참여건수(건)</td><td>신청수량(주)</td><td>단순경쟁률</td></tr>'
+            f'<tr><td>100</td><td>{quantity}</td><td>10:1</td></tr></table>'
+            '<h3>의무보유확약 기관수 및 신청수량</h3><table>'
+            '<tr><td>구분</td><td>기관수(개)</td><td>신청수량(주)</td><td>비율(%)</td></tr>'
+            '<tr><td>1개월 확약</td><td>1</td><td>100</td><td>10.0</td></tr>'
+            f'<tr><td>합계</td><td>1</td><td>{total}</td><td>{percent}</td></tr></table>')
+
+    def test_flat_committed_total_prefers_explicit_percentage_without_noncommitted_rows(self):
+        parsed=DARTCollector._extract_lockup_ratios_from_tables(self.flat_outcome())
+        self.assertEqual(parsed['lockup_commitment_ratio'],.1)
+        proof=json.loads(parsed['structured_evidence'])
+        self.assertEqual(proof['selected_column'],2)
+        self.assertEqual(proof['percentage_column'],3)
+        self.assertTrue(proof['printed_aggregate_preferred'])
+        # Missing/incomplete duration detail does not invalidate an explicit aggregate.
+        partial=self.flat_outcome().replace('<td>1개월 확약</td><td>1</td><td>100</td><td>10.0</td>',
+                                           '<td>1개월 확약</td><td>1</td><td>50</td><td>5.0</td>')
+        self.assertEqual(DARTCollector._extract_lockup_ratios_from_tables(partial)['lockup_commitment_ratio'],.1)
+
+    def test_flat_committed_quantity_requires_independent_scope_and_preserves_percentage_conflicts(self):
+        html=self.flat_outcome()
+        for original,replacement in [('신청수량(주)','배정수량(주)'),
+                ('의무보유확약 기관수 및 신청수량','국내기관 의무보유확약 기관수 및 신청수량'),
+                ('1,000','1,2,000')]:
+            with self.subTest(replacement=replacement):
+                parsed=DARTCollector._extract_lockup_ratios_from_tables(html.replace(original,replacement))
+                self.assertIsNone(parsed['lockup_commitment_ratio'])
+        parsed=DARTCollector._extract_lockup_ratios_from_tables(self.flat_outcome(percent='11.0'))
+        self.assertIsNone(parsed['lockup_commitment_ratio'])
+        self.assertEqual(parsed['rejection_reason'],'lockup_disclosed_percent_quantity_conflict')
+        malformed=DARTCollector._extract_lockup_ratios_from_tables(self.flat_outcome(percent='10,0'))
+        self.assertIsNone(malformed['lockup_commitment_ratio'])
+        self.assertEqual(malformed['rejection_reason'],'lockup_flat_percentage_cell_unverified')
+
+    def test_flat_total_with_percentage_row_uses_quantity_not_count(self):
+        html=self.flat_outcome().replace('<td>비율(%)</td>','<td>비고</td>')
+        html=html.replace('<td>100</td><td>10.0</td></tr></table>',
+            '<td>100</td><td>-</td></tr><tr><td>총 수량 대비 비율(%)</td><td>1.0</td><td>10.0</td><td>-</td></tr></table>')
+        parsed=DARTCollector._extract_lockup_ratios_from_tables(html)
+        self.assertEqual(parsed['lockup_commitment_ratio'],.1)
+        self.assertEqual(json.loads(parsed['structured_evidence'])['percentage_column'],2)
+
+    def test_allocation_quantity_is_a_different_basis_not_missing_official_data(self):
+        html=self.flat_outcome().replace('<td>신청수량(주)</td><td>비율(%)</td>',
+                                         '<td>배정수량(주)</td><td>비율(%)</td>')
+        parsed=DARTCollector._extract_lockup_ratios_from_tables(html)
+        self.assertIsNone(parsed['lockup_commitment_ratio'])
+        self.assertEqual(parsed['rejection_reason'],'lockup_allocation_quantity_scope_not_application_demand')
+
+    def test_identical_flat_table_without_its_separate_denominator_keeps_composition_contract(self):
+        from data.pipelines.stage_snapshots import same_verified_lockup_table
+        complete=self.flat_outcome()
+        without_summary='<h3>'+complete.split('<h3>',1)[1]
+        dart=DARTCollector(api_key='unused')
+        good=dart._parse_demand_forecast_html(complete,'test')
+        missing=dart._parse_demand_forecast_html(without_summary,'test')
+        self.assertIsNone(missing['lockup_commitment_ratio'])
+        self.assertTrue(same_verified_lockup_table(good,missing))
+        self.assertEqual(json.loads(missing['lockup_structured_evidence'])['failure_cause'],
+                         'independent_application_quantity_unavailable')
+
     def test_institutional_reuse_includes_selection_and_direct_label_logic(self):
         before='DEMAND_PARSER_VERSION=23\nclass DARTCollector:\n def _extract_lockup_ratios_from_tables(self):return 1\n def _extract_aggregate_demand_ratio(self):return 10\n def _parse_demand_forecast_html(self):return 20\n'
         after=before.replace('=23','=24').replace('return 1\n','return 2\n')

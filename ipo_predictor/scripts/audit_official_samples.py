@@ -19,6 +19,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.collectors.dart_collector import DARTCollector
 
 SAMPLES = {
+    "cosmecca_flat_lockup_2016": "20161014000121",
+    "incross_flat_lockup_2016": "20161018000162",
+    "clio_flat_lockup_2016": "20161027000349",
+    "parksystems_flat_lockup_2015": "20151208000179",
+    "hct_flat_lockup_conflict_2016": "20161004000323",
+    "daelim_allocated_lockup_2016": "20160318000684",
+    "fusion_allocated_lockup_2016": "20161209000102",
     "daesung_2022": "20220808000054",
     "nbt_2021": "20210111000425",
     "sensorview_2023": "20230706000211",

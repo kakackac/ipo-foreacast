@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
-DEMAND_PARSER_VERSION = 25
+DEMAND_PARSER_VERSION = 26
 
 FINAL_PRICE_LABEL_PATTERN = (
     r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
@@ -1407,6 +1407,87 @@ class DARTCollector:
                     'computed_fraction':computed, 'display_quantum_fraction':quantum,
                     'compatible_display_modes':(['nearest'] if nearest else [])+
                                                (['positive_truncation'] if truncated else [])}
+        def flat_committed_aggregate(table, context):
+            compact = re.sub(r'\s+', '', context)
+            title = re.search(r'의무보유확약(?:기관수(?:및신청수량)?|신청내역)$', compact)
+            if not title or re.search(r'(?:국내|해외|외국|일부|당사)(?:기관투자자|기관)?$', compact[:title.start()]):
+                return None
+            if not table or any(row and re.sub(r'\s+', '', row[0]) in {'미확약','확약없음'} for row in table):
+                return None
+            if not any(row and re.fullmatch(r'\d+(?:개월|일|주일|주)(?:확약)?', re.sub(r'\s+', '', row[0])) for row in table):
+                return None
+            header = [re.sub(r'\s+', '', cell) for cell in table[0]]
+            columns = [i for i, cell in enumerate(header) if re.fullmatch(
+                r'(?:신청|참여)(?:수량|주식수)\((?:단위:)?주\)', cell)]
+            totals = [(i,row) for i,row in enumerate(table) if row and re.fullmatch(
+                r'합계|총합계|총계|확약합계',re.sub(r'\s+', '',row[0]))]
+            if len(columns)!=1 or len(totals)!=1:return None
+            column=columns[0];index,row=totals[0]
+            if column>=len(row) or not re.fullmatch(integer,row[column].strip()):return None
+            committed=int(row[column].replace(',',''))
+            proof={'selected_row':index,'selected_column':column,'committed_quantity':committed,
+                   'scope':'all_institution_committed_application_quantity',
+                   'independently_disclosed_application_total':application_total,
+                   'independent_application_sources':application_sources}
+            if application_total is None or application_total<=0:
+                return {**result,'parser_validation_status':'candidate_rejected',
+                    'rejection_reason':'lockup_outcome_quantity_schema_or_reconciliation_unverified',
+                    'structured_evidence':json.dumps({
+                        'failure_cause':'independent_application_quantity_unavailable',
+                        'candidate_tables':[json.loads(cls._table_evidence(table,heading=context,**proof))]},
+                        ensure_ascii=False)}
+            if committed>application_total:
+                return {**result,'parser_validation_status':'candidate_rejected',
+                    'rejection_reason':'lockup_independent_application_quantity_mismatch',
+                    'structured_evidence':cls._table_evidence(table,heading=context,**proof)}
+            printed=[]
+            for c, cell in enumerate(header):
+                if (c<len(row) and cell=='비율(%)' and row[c].strip() not in {'','-'}
+                        and not re.fullmatch(r'\d+(?:\.\d+)?%?',row[c].replace(' ',''))):
+                    return {**result,'parser_validation_status':'candidate_rejected',
+                        'rejection_reason':'lockup_flat_percentage_cell_unverified',
+                        'structured_evidence':cls._table_evidence(table,heading=context,**proof)}
+                if (c<len(row) and re.fullmatch(r'비율\(%\)|신청수량비중(?:\(%\))?',cell)
+                        and re.fullmatch(r'\d+(?:\.\d+)?%?',row[c].replace(' ',''))
+                        and ('%' in cell or row[c].strip().endswith('%'))):
+                    printed.append((row[c].replace(' ','').rstrip('%'),index,c))
+            for i, cells in enumerate(table):
+                label=re.sub(r'\s+','',cells[0]) if cells else ''
+                if (column<len(cells) and re.fullmatch(r'총.*대비(?:비율|율)\(%\)',label)
+                        and cells[column].strip() not in {'','-'}
+                        and not re.fullmatch(r'\d+(?:\.\d+)?%?',cells[column].replace(' ',''))):
+                    return {**result,'parser_validation_status':'candidate_rejected',
+                        'rejection_reason':'lockup_flat_percentage_cell_unverified',
+                        'structured_evidence':cls._table_evidence(table,heading=context,**proof)}
+                if (column<len(cells) and re.fullmatch(
+                        r'비율|총(?:(?:참여|신청)?건수(?:및|또는|/))?(?:신청|참여)?수량대비(?:비율|율)(?:\(%\))?'
+                        r'|총건수대비(?:비율|율)(?:\(%\))?',label)
+                        and re.fullmatch(r'\d+(?:\.\d+)?%?',cells[column].replace(' ',''))
+                        and ('%' in label or cells[column].strip().endswith('%'))):
+                    printed.append((cells[column].replace(' ','').rstrip('%'),i,column))
+            if any(not 0<=float(v)<=100 for v,_,_ in printed) or len({float(v) for v,_,_ in printed})>1:
+                return {**result,'parser_validation_status':'candidate_rejected',
+                    'rejection_reason':'lockup_disclosed_percent_quantity_conflict',
+                    'structured_evidence':cls._table_evidence(table,heading=context,printed_candidates=printed,**proof)}
+            if printed:
+                value,pr,pc=printed[0]
+                check=disclosed_percentage_check(table,column,value)
+                proof.update(percentage_row=pr,percentage_column=pc,aggregate_quantity_check=check)
+                if check['status']!='compatible':
+                    return {**result,'parser_validation_status':'candidate_rejected',
+                        'rejection_reason':'lockup_disclosed_percent_quantity_conflict',
+                        'structured_evidence':cls._table_evidence(table,heading=context,**proof)}
+                ratio=float(value)/100
+            else:
+                ratio=committed/application_total
+            return {**result,'lockup_commitment_ratio':ratio,
+                'parse_method':'lockup_flat_committed_quantity_aggregate',
+                'rule_id':'DART_LOCKUP_FLAT_COMMITTED_QUANTITY_V1',
+                'parser_validation_status':'structurally_verified',
+                'evidence':f'committed={committed}; all_applications={application_total}',
+                'structured_evidence':cls._table_evidence(table,heading=context,
+                    printed_aggregate_preferred=bool(printed),**proof)}
+
         outcome_candidates = []
         for table, context in zip(table_parser.tables, table_parser.table_contexts):
             table_text = " ".join(" ".join(row) for row in table)
@@ -1449,6 +1530,10 @@ class DARTCollector:
                             ),
                         })
                         return result
+            flat = flat_committed_aggregate(table,context)
+            if flat is not None:
+                result.update(flat)
+                return result
             if not context_scope and not re.search(r"기관\s*(?:투자자)?", table_text):
                 continue
             direct_aggregate = cls._extract_disclosed_aggregate_lockup_ratio(table)
@@ -1600,6 +1685,12 @@ class DARTCollector:
             if empty and all(empty):
                 result['parser_validation_status'] = 'value_not_found'
                 result['rejection_reason'] = 'selected_document_lockup_outcome_cells_empty'
+            elif all(any(re.search(r'배정\s*(?:수량|주식\s*수)',cell)
+                         for row in candidate['table'][:2] for cell in row)
+                     and not any(re.search(r'(?:신청|참여)\s*(?:수량|주식\s*수)',cell)
+                                 for row in candidate['table'][:2] for cell in row)
+                     for candidate in candidates):
+                result['rejection_reason']='lockup_allocation_quantity_scope_not_application_demand'
             result["structured_evidence"] = json.dumps({"candidate_tables": candidates}, ensure_ascii=False)
         elif re.search(r"의무\s*보유\s*확약", normalized_document):
             result["parser_validation_status"] = "candidate_rejected"

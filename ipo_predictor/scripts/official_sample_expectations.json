@@ -2,6 +2,62 @@
   "description": "Official DART original-table references reviewed 2026-09-09 and 2026-11-06. New aggregate quantity references: Melcon 748389000/2074742000; EST 2489000/1039659000; SK14 14625000/5988330000. Numerator plus noncommitment quantity reconciles to the independently disclosed demand quantity. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
   "samples": [
     {
+      "sample": "cosmecca_flat_lockup_2016", "receipt": "20161014000121",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20161014000121&dcmNo=5317664&eleId=9&offset=154060&length=116969&dtd=dart3.xsd",
+      "sha256": "21a320f10eddee22acea5fc76f7bd3bc8f2080976257618d5adea33b41ea02aa",
+      "expected": {"lockup_commitment_ratio": 0.308, "lockup_rule_id": "DART_LOCKUP_FLAT_COMMITTED_QUANTITY_V1"},
+      "review_note": "The committed-only table prints total application quantity 141738000 and a typed percentage column 30.8. Separate domestic-and-foreign institutional participation is 460683000 shares. Preserve the printed aggregate, not the participant-count ratio; noncommitted and six-month rows are not prerequisites."
+    },
+    {
+      "sample": "incross_flat_lockup_2016", "receipt": "20161018000162",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20161018000162&dcmNo=5321002&eleId=9&offset=216187&length=122468&dtd=dart3.xsd",
+      "sha256": "94741a08d8b10134b962c4dd5b539da14ed10dc726b98861b908a3ca3e62d0a8",
+      "expected": {"lockup_commitment_ratio": 0.061, "lockup_rule_id": "DART_LOCKUP_FLAT_COMMITTED_QUANTITY_V1"},
+      "review_note": "Quantity-column aggregate 8494000 / all institutional applications 139217000 is compatible with the printed 6.1 percent. The adjacent count-column 5.3 is not the model value."
+    },
+    {
+      "sample": "clio_flat_lockup_2016", "receipt": "20161027000349",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20161027000349&dcmNo=5330636&eleId=9&offset=218090&length=114101&dtd=dart3.xsd",
+      "sha256": "7f9d8c4b6e36e11c929ee9a6c269ff82af17e1448ab7b9373f2be9249bc36e20",
+      "expected": {"lockup_commitment_ratio": 0.1042},
+      "review_note": "Use printed share-quantity ratio 10.42 percent (53809000 / 516374000), not institution-count ratio 5.62 percent."
+    },
+    {
+      "sample": "parksystems_flat_lockup_2015", "receipt": "20151208000179",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20151208000179&dcmNo=4877801&eleId=9&offset=137420&length=101602&dtd=dart3.xsd",
+      "sha256": "0e7abdda44850a0076807fc98cfc19a5f91b5ebbacb32c1a493e76086fc59f91",
+      "expected": {"lockup_commitment_ratio": 0.573},
+      "review_note": "Explicit application-quantity share column prints 57.3 percent, alongside quantity 21613000. Independent participation quantity is 37715000. Institution-count percentage is a separate column."
+    },
+    {
+      "sample": "hct_flat_lockup_conflict_2016", "receipt": "20161004000323",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20161004000323&dcmNo=5306582&eleId=9&offset=177299&length=122659&dtd=dart3.xsd",
+      "sha256": "a944585f62243b5a0766fee3fbb78f194fe8ae4172c83cf393e70d71e8926f27",
+      "expected": {"lockup_commitment_ratio": null, "lockup_rejection_reason": "lockup_disclosed_percent_quantity_conflict"},
+      "review_note": "Original committed total 14565000 / all applications 65230964 is not compatible with printed 11.6 percent. Do not repair the total by guessing or replacing it with the period sum."
+    },
+    {
+      "sample": "daelim_allocated_lockup_2016", "receipt": "20160318000684",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160318000684&dcmNo=4990610&eleId=9&offset=240041&length=156501&dtd=dart3.xsd",
+      "sha256": "b7476f53bc2bc05a05a90e117c75ce6a42a9f51461be23ad620c743d0ba9088c",
+      "expected": {"lockup_commitment_ratio": null, "lockup_rejection_reason": "lockup_allocation_quantity_scope_not_application_demand"},
+      "review_note": "The lockup result uses allocated shares, not demand application shares. Retain the original allocation-based ratio for audit, not as the application's institutional-demand commitment feature."
+    },
+    {
+      "sample": "fusion_allocated_lockup_2016", "receipt": "20161209000102",
+      "section_title": "Ⅰ. 모집 또는 매출에 관한 일반사항",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20161209000102&dcmNo=5376685&eleId=9&offset=198047&length=105120&dtd=dart3.xsd",
+      "sha256": "6195bdfd804c4323b8be6a1a03d87ba83114513147f6f3f2f547594848432133",
+      "expected": {"lockup_commitment_ratio": null, "lockup_rejection_reason": "lockup_allocation_quantity_scope_not_application_demand"},
+      "review_note": "The disclosed 12.05 percent is explicitly an institutional allocated-quantity ratio. It is not an application-quantity commitment ratio."
+    },
+    {
       "sample": "mekics_adjacent_post_float_2015",
       "receipt": "20151202000452",
       "section_title": "Ⅲ. 투자위험요소",
