@@ -171,7 +171,7 @@ def audit_band_origins():
     import pandas as pd
     from data.pipelines.reconciled_dataset import pin_connections
     from data.pipelines.stage_snapshots import read_document, document_analysis, stage_documents, values_from_document
-    from data.pipelines.band_source_resolver import resolve_offering_band, currency_band
+    from data.pipelines.band_source_resolver import resolve_offering_band, currency_band, finalized_band_overview
     from data.pipelines.financial_history import atomic_json
 
     root=Path(__file__).resolve().parents[1]
@@ -200,10 +200,35 @@ def audit_band_origins():
             'band':list(expected),'band_receipt':sample['band_receipt'],
             'post_receipt':post['metadata']['rcept_no'],'main_evidence':json.loads(main['price_band_resolution_evidence']),
             'post_band_origin':post['proof']['result_field_sources']['price_band_low']})
-    result={'samples_checked':len(checks),'checks':checks,'cached_only':True,'passed':True,
+    transitions=[]
+    for sample in json.loads(Path(__file__).with_name('official_sample_expectations.json').read_text()).get('band_transition_samples',[]):
+        matched=rows[rows.record.map(lambda record:json.loads(record)['rcept_no']==sample['notice_receipt'])]
+        if len(matched)!=1:raise ValueError('official_transition_sample_event_not_unique')
+        row=matched.iloc[0];record=json.loads(row.record);proof=json.loads(row.proof)
+        family={m['rcept_no']:m for bundle in (proof,proof.get('supplementary',{})) for m in bundle.get('family',[])}
+        resolved=resolve_offering_band(raw,family[record['rcept_no']],proof,record['offering_price'],record['listing_date'],collector)
+        history=json.loads(resolved['price_band_resolution_evidence'])['historical_band']
+        item=next((c for c in history['checks'] if c['receipt']==sample['notice_receipt']),None)
+        if not item or item.get('status')!='explicit_planned_range_finalized':
+            raise ValueError('official_transition_sample_not_verified:'+sample['company'])
+        evidence=item['finalization_overview'];pair=tuple(sample['expected_band'])
+        if currency_band(resolved)!=pair or evidence['confirmed_price']!=sample['expected_price']:
+            raise ValueError('official_transition_value_mismatch:'+sample['company'])
+        notice,notice_origin=read_document(collector,raw,family[sample['notice_receipt']],str(record['corp_code']),True)
+        full_meta=family[evidence['complete_receipt']]
+        full,full_origin=read_document(collector,raw,full_meta,str(record['corp_code']),True)
+        confirmed=collector._parse_offering_html(full,full_meta['rcept_no'])
+        repeated=finalized_band_overview(notice,family[sample['notice_receipt']],notice_origin,
+                                       (full_meta,full,full_origin),pair,confirmed)
+        if repeated!=evidence:raise ValueError('official_transition_evidence_not_reproduced')
+        transitions.append({'company':sample['company'],'notice_receipt':sample['notice_receipt'],
+            'expected_band':list(pair),'expected_price':sample['expected_price'],'evidence':evidence,
+            'scope':'band_continuity_only_not_institutional_or_stage_selection_approval'})
+    result={'samples_checked':len(checks),'checks':checks,'transition_samples_checked':len(transitions),
+        'transition_checks':transitions,'cached_only':True,'passed':True,
         'training_executed':False,'deployment_authorized':False}
     atomic_json(processed/'band_origin_sample_audit.json',result)
-    print(json.dumps({k:v for k,v in result.items() if k!='checks'},ensure_ascii=False))
+    print(json.dumps({k:v for k,v in result.items() if k not in {'checks','transition_checks'}},ensure_ascii=False))
 
 
 def main():

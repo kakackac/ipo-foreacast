@@ -1,5 +1,13 @@
 {
   "description": "Official DART original-table references reviewed 2026-09-09 and 2026-11-06. New aggregate quantity references: Melcon 748389000/2074742000; EST 2489000/1039659000; SK14 14625000/5988330000. Numerator plus noncommitment quantity reconciles to the independently disclosed demand quantity. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
+  "band_transition_samples": [
+    {"company":"코미코","notice_receipt":"20170310000348","expected_band":[11000,13000],"expected_price":13000},
+    {"company":"하나머티리얼즈","notice_receipt":"20170414001422","expected_band":[10000,12000],"expected_price":12000},
+    {"company":"파워넷","notice_receipt":"20180528000154","expected_band":[5500,6500],"expected_price":6500},
+    {"company":"유틸렉스","notice_receipt":"20181212000285","expected_band":[38000,50000],"expected_price":50000},
+    {"company":"컴퍼니케이","notice_receipt":"20190510000371","expected_band":[3600,4000],"expected_price":4500},
+    {"company":"펌텍코리아","notice_receipt":"20190624000285","expected_band":[240000,270000],"expected_price":190000}
+  ],
   "band_origin_samples": [
     {"company":"대원","event_id":"krx_kind|7680|20171201|대원",
      "complete_receipt":"20171121000228","band_receipt":"20171121000233",

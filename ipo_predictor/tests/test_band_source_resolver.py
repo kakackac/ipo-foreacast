@@ -4,11 +4,55 @@ from copy import deepcopy
 from unittest.mock import patch
 
 from data.collectors.dart_collector import DARTCollector
-from data.pipelines.band_source_resolver import currency_band, select_notice_band, verified_after_view, historical_indicative_band
+from data.pipelines.band_source_resolver import currency_band, select_notice_band, verified_after_view, historical_indicative_band, finalized_band_overview
 from data.pipelines.stage_snapshots import result_day_document, values_from_document
 
 
 class BandSourceTests(unittest.TestCase):
+    def overview(self):
+        return ('<table><tr><td>항 목</td><td>정 정 전</td><td>정 정 후</td></tr>'
+            '<tr><td>공통 정정사항</td><td>모집(매출)가액 예정 : 80원 ~ 120원 '
+            '모집(매출)총액 예정 : 8,000원 ~ 12,000원</td>'
+            '<td>모집(매출)가액(확정) : 100원 모집(매출)총액 : 10,000원</td></tr></table>')
+
+    def test_finalization_overview_checks_per_share_range_not_gross_amount_or_general_after_view(self):
+        m={'rcept_no':'20240210000001','rcept_dt':'2024-02-10','report_nm':'[발행조건확정]증권신고서(지분증권)'}
+        full={**m,'rcept_no':'20240210000002','report_nm':'투자설명서'}
+        origin={'corp_code':'00000001','related_receipts':[m['rcept_no'],full['rcept_no']]}
+        chosen=(full,'full',{**origin})
+        result=finalized_band_overview(self.overview(),m,origin,chosen,(80,120),self.document())
+        self.assertEqual(result['band'],[80,120]);self.assertEqual(result['confirmed_price'],100)
+        self.assertEqual(result['row_index'],1)
+        self.assertEqual(result['scope'],'band_transition_consistency_only_not_general_after_view')
+        self.assertIsNotNone(finalized_band_overview(self.overview().replace('가액(확정)','확정가액'),
+            m,origin,chosen,(80,120),self.document()))
+        for html in [self.overview().replace('80원 ~ 120원','81원 ~ 120원'),
+                     self.overview().replace('100원','101원'),
+                     self.overview().replace('80원 ~ 120원','80 ~ 120'),
+                     self.overview().replace('80원 ~ 120원','8,0원 ~ 120원'),
+                     self.overview().replace('가액(확정)','가액(예정)'),
+                     self.overview().replace('100원 모집','100원 모집(매출)가액(예정): 90원 ~ 130원 모집'),
+                     self.overview().replace('가액 예정','총액 예정'),
+                     self.overview()+self.overview(),
+                     self.overview()+'<p>희망공모가액 90원 ~ 130원</p>']:
+            with self.subTest(html=html):
+                self.assertIsNone(finalized_band_overview(html,m,origin,chosen,(80,120),self.document()))
+        for changed,other in [({**origin,'corp_code':'00000002'},chosen),
+                              ({**origin,'related_receipts':[]},chosen),
+                              (origin,({**full,'rcept_dt':'2024-02-09'},'full',origin))]:
+            self.assertIsNone(finalized_band_overview(self.overview(),m,changed,other,(80,120),self.document()))
+
+    def test_finalization_row_can_check_range_continuity_without_composing_unpaired_prose(self):
+        def change(records,pre,post,schedule):
+            m={**post,'rcept_no':'20240210000000','report_nm':'[발행조건확정]증권신고서(지분증권)'}
+            records[m['rcept_no']]=[m,self.overview()+'<p>unpaired result prose is not a model source</p>',{'offering':{}}]
+        donor,evidence=self.history(change)
+        self.assertIsNotNone(donor)
+        check=next(c for c in evidence['checks'] if c['receipt']=='20240210000000')
+        self.assertEqual(check['status'],'explicit_planned_range_finalized')
+        self.assertNotIn('after_view',check)
+        self.assertEqual(donor['document']['offering_price'],None)
+
     def test_added_note_band_requires_reproducible_empty_before_proof(self):
         from data.pipelines.stage_snapshots import added_note_after_view
         body=('<table><tr><td>항목</td><td>정정 전</td><td>정정 후</td></tr>'
@@ -41,7 +85,7 @@ class BandSourceTests(unittest.TestCase):
             if fault and m==pre:raise fault
             return records[m['rcept_no']][1],{'receipt':m['rcept_no'],'corp_code':'00000001',
                 'content_scope':'partial_terms_notice' if '발행조건확정' in m['report_nm'] else 'full',
-                'related_receipts':[post['rcept_no']],'source_url':'official/'+m['rcept_no'],
+                'related_receipts':list(records),'source_url':'official/'+m['rcept_no'],
                 'published_at':m['rcept_dt'],'available_at':m['rcept_dt']+'T00:00:00+09:00',
                 'index_sha256':'a'*64,'sections':[{'url':'section/'+m['rcept_no'],'sha256':'b'*64}]}
         analyse=lambda m,b,c:records[m['rcept_no']][2]

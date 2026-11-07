@@ -121,6 +121,52 @@ def select_notice_band(complete, notices, price, *, complete_receipt=None):
     return complete, None, checks
 
 
+def finalized_band_overview(original, metadata, origin, chosen, pair, confirmed):
+    """Check a literal planned range -> fixed price row, not a general after-view."""
+    from data.collectors.dart_collector import DARTCollector, _TableRowParser
+    full_meta,_,full_origin=chosen
+    if (not confirmed_price(confirmed,confirmed.get('offering_price'))
+            or '발행조건확정' not in metadata.get('report_nm','')
+            or metadata['rcept_dt']!=full_meta['rcept_dt']
+            or origin['corp_code']!=full_origin['corp_code']
+            or metadata['rcept_no'] not in full_origin.get('related_receipts',[])
+            or full_meta['rcept_no'] not in origin.get('related_receipts',[])):
+        return None
+    parser=_TableRowParser();parser.feed(original);parser.close()
+    label=r'(?:모집\s*\(\s*매출\s*\)|모집\s*및\s*매출|공모)\s*'
+    number=r'([0-9][0-9,]*)'
+    range_values=number+r'\s*(?:원|KRW)?\s*[~～]\s*'+number+r'\s*(?:원|KRW)'
+    before=re.compile(label+r'(?:가액|가격)\s*(?:\(\s*예정\s*\)|예정)\s*[:：]\s*'+number+
+        r'\s*(?:원|KRW)?\s*[~～]\s*'+number+r'\s*(?:원|KRW)',re.IGNORECASE)
+    changed_range=re.compile(label+r'(?:확정\s*)?(?:가액|가격)\s*'
+        r'(?:\(\s*(?:예정|확정)\s*\)|예정)?\s*[:：]\s*'+range_values,re.IGNORECASE)
+    after=re.compile(label+r'(?:확정\s*)?(?:가액|가격)\s*(?:\(\s*확정\s*\))?\s*[:：]\s*'+number+
+        r'\s*(?:원|KRW)(?!\s*[~～])',re.IGNORECASE)
+    def amount(value):
+        if not re.fullmatch(r'(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)',value):return None
+        return float(value.replace(',',''))
+    candidates=[]
+    for table_index,table in enumerate(parser.tables):
+        if not table or [re.sub(r'\s+','',c) for c in table[0]]!=['항목','정정전','정정후']:continue
+        for row_index,row in enumerate(table[1:],1):
+            if len(row)!=3 or re.sub(r'\s+','',row[0])!='공통정정사항':continue
+            left=list(before.finditer(row[1]));right=list(after.finditer(row[2]))
+            if len(left)!=1 or len(right)!=1 or changed_range.search(row[2]):continue
+            band=tuple(amount(left[0][n]) for n in (1,2));price=amount(right[0][1])
+            if band!=pair or price!=confirmed['offering_price'] or not all(v and v>0 for v in band):continue
+            candidates.append({'rule':'explicit_planned_range_to_confirmed_price_overview_v1',
+                'table_index':table_index,'row_index':row_index,'row':row,'table':table,
+                'before_range_text':left[0][0],'after_price_text':right[0][0],
+                'band':list(band),'confirmed_price':price,'complete_receipt':full_meta['rcept_no'],
+                'original_sha256':hashlib.sha256(original.encode()).hexdigest(),
+                'scope':'band_transition_consistency_only_not_general_after_view'})
+    if len(candidates)!=1:return None
+    raw=DARTCollector(api_key='unused')._parse_offering_html(original,metadata['rcept_no'])
+    if (raw.get('price_band_validation_status')=='conflicting_bands_review_required'
+            or currency_band(raw) is not None and currency_band(raw)!=pair):return None
+    return candidates[0]
+
+
 def historical_indicative_band(chosen, family, load, analyse, cutoff):
     """Retain the last pre-bookbuilding range only through a checked filing lineage."""
     from data.pipelines.stage_snapshots import available, local, demand_schedule, amendment_view, added_note_after_view
@@ -176,10 +222,20 @@ def historical_indicative_band(chosen, family, load, analyse, cutoff):
                     check.update(status='explicitly_superseded_terms',supersession=superseded[m['rcept_no']]);continue
                 view=None
                 if p.get('content_scope','full')!='full':
-                    try:b,view=amendment_view(b)
+                    original=b
+                    try:b,view=amendment_view(original)
                     except ValueError as exc:
-                        if str(exc)!='correction_after_without_matching_before':raise
-                        b,view=added_note_after_view(b);view['strict_section_rejection']=str(exc)
+                        if str(exc)=='correction_after_without_matching_before':
+                            try:b,view=added_note_after_view(original)
+                            except ValueError:pass
+                            else:view['strict_section_rejection']=str(exc)
+                        if view is None:
+                            confirmed=analyse(meta,body,origin['corp_code'])['offering']
+                            transition=finalized_band_overview(original,m,p,chosen,pair,confirmed)
+                            if transition is None:raise
+                            check.update(status='explicit_planned_range_finalized',band=list(pair),
+                                finalization_overview=transition,strict_section_rejection=str(exc))
+                            continue
                     if not verified_after_view(view):raise ValueError('historical_band_after_view_unverified')
                 current=analyse(m,b,p['corp_code'])['offering'];current_pair=currency_band(current)
                 check.update(band=current_pair,after_view=view)
@@ -298,6 +354,60 @@ def resolve_offering_band(raw, metadata, proof, price, listing_date, dart, *,
     return result
 
 
+def band_retry_dependencies(raw, rows):
+    """A formerly missing original is a new input, even without a parser change."""
+    from urllib.parse import urlparse, parse_qs
+    from data.pipelines.data_delivery import digest
+    dependencies={}
+    for row in rows.itertuples():
+        record=json.loads(row.record)
+        if record.get('price_band_low') is not None:continue
+        history=json.loads(record.get('price_band_resolution_evidence','{}')).get('historical_band')
+        if not history or history.get('reason')!='official_source_not_cached':continue
+        url=history.get('failed_url');parsed=urlparse(url or '')
+        proof=json.loads(row.proof)
+        family={m['rcept_no'] for bundle in (proof,proof.get('supplementary',{})) for m in bundle.get('family',[])}
+        if (parsed.scheme!='https' or parsed.netloc!='dart.fss.or.kr'
+                or parsed.path not in {'/dsaf001/main.do','/report/viewer.do'}
+                or parse_qs(parsed.query).get('rcpNo',[''])[0] not in family):
+            raise RuntimeError('band_retry_source_outside_verified_family')
+        cache=Path(raw)/'dart_connection_sources'/(hashlib.sha256(url.encode()).hexdigest()+'.json')
+        if not cache.exists():continue
+        payload=json.loads(cache.read_text())
+        if (payload.get('url')!=url or not isinstance(payload.get('text'),str)
+                or hashlib.sha256(payload['text'].encode()).hexdigest()!=payload.get('sha256')):
+            raise RuntimeError('band_retry_cache_integrity_failed')
+        dependencies[row.event_id]={'url':url,'sha256':payload['sha256'],'cache_sha256':digest(cache)}
+    return dependencies
+
+
+def unchanged_band_rules(raw, report, previous, contract):
+    """Permit policy-only replay without re-parsing unrelated approved values."""
+    from data.pipelines.lockup_reconciliation import parser_snapshot
+    from data.pipelines.data_delivery import digest
+    if {k:v for k,v in previous.items() if k!='band'}!={k:v for k,v in contract.items() if k!='band'}:return False
+    sha=report.get('amendment',{}).get('repair')
+    if not sha:return False
+    old=parser_snapshot(raw,sha)
+    if old is None:return False
+    def extraction(text):
+        tree=ast.parse(text)
+        tree.body=[n for n in tree.body if not (isinstance(n,ast.FunctionDef) and n.name in {
+            'refresh_cached_band','band_retry_dependencies','unchanged_band_rules'})]
+        return ast.dump(tree,include_attributes=False)
+    if extraction(old)!=extraction(Path(__file__).read_text()):return False
+    selection={}
+    for filename,names in [('lockup_reconciliation.py',{'documents','original_body'}),
+                           ('stage_snapshots.py',{'amendment_view','added_note_after_view'})]:
+        selected={n.name:ast.dump(n,include_attributes=False) for n in ast.parse(Path(__file__).with_name(filename).read_text()).body
+                  if isinstance(n,ast.FunctionDef) and n.name in names}
+        if set(selected)!=names:return False
+        selection.update(selected)
+    def bound(resolver):
+        return hashlib.sha256(json.dumps({'resolver':resolver,'selection':selection},sort_keys=True).encode()).hexdigest()
+    return bound(sha)==previous['band'] and bound(digest(__file__))==contract['band']
+
+
 def refresh_cached_band(raw_dir, processed_dir, dart=None):
     """Migrate only bands from pinned originals; preserve every other raw field."""
     from data.collectors.dart_collector import DARTCollector
@@ -312,7 +422,12 @@ def refresh_cached_band(raw_dir, processed_dir, dart=None):
     parent,report = pin_connections(processed)
     previous = report.get('replay_contract',report['inputs']['contract'])
     contract = connection_contract()
-    if previous == contract: return None
+    rows = pd.read_parquet(parent/'connection_results.parquet')
+    retry_records=rows[['event_id','record','proof']].copy(deep=True)
+    retry_dependencies=band_retry_dependencies(raw,retry_records)
+    same_contract=previous==contract
+    if same_contract and not retry_dependencies:return None
+    reuse_unchanged=same_contract or unchanged_band_rules(raw,report,previous,contract)
     owned = {'band','adapter','record','resolver'}
     if {k:v for k,v in previous.items() if k not in owned} != {k:v for k,v in contract.items() if k not in owned}:
         return None
@@ -350,20 +465,28 @@ def refresh_cached_band(raw_dir, processed_dir, dart=None):
                     Path(__file__).with_name('historical_reconciliation.py').read_text()): return None
     inputs = load_inputs(raw,processed)
     if inputs['input_sha256'] != report['inputs']['inputs']: return None
-    rows = pd.read_parquet(parent/'connection_results.parquet')
     general = set(inputs['events'].loc[inputs['events'].event_class.eq('general_ipo'),'event_id'])
     if set(rows.event_id) != general or rows.event_id.duplicated().any() or not rows.status.eq('official_sources_connected').all():
         return None
     identity = {'parent_manifest':str((parent/'manifest.json').relative_to(processed)),
         'parent_sha256':digest(parent/'manifest.json'),'contract':contract,'repair':digest(__file__),
         'scope':'band_fields_only_original_identity_prices_and_other_features_unchanged',
-        'initial_contract_baseline':baseline if 'band' not in previous else None}
+        'initial_contract_baseline':baseline if 'band' not in previous else None,
+        'retry_dependencies':retry_dependencies,'unchanged_extraction_rules':reuse_unchanged}
     version = hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:20]
     checkpoints = raw/'band_field_repairs'/version
     dart = dart or DARTCollector(api_key='unused')
     audit = [];archive={}
+    def audit_row(row,old,updated,reprocessed):
+        return {'event_id':row.event_id,'corp_name':row.corp_name,'before_low':old.get('price_band_low'),
+            'before_high':old.get('price_band_high'),'after_low':updated.get('price_band_low'),
+            'after_high':updated.get('price_band_high'),'resolution_status':updated['price_band_resolution_status'],
+            'receipt':updated.get('price_band_rcept_no'),'unrelated_fields_unchanged':True,
+            'reprocessed':reprocessed,'evidence':updated.get('price_band_resolution_evidence')}
     for index,row in rows.iterrows():
         old,proof = json.loads(row.record),json.loads(row.proof)
+        if reuse_unchanged and row.event_id not in retry_dependencies:
+            audit.append(audit_row(row,old,old,False));continue
         capture_sources(raw,proof.get('sources',[]),{})
         path = checkpoints/(hashlib.sha256(row.event_id.encode()).hexdigest()+'.json')
         if path.exists():
@@ -401,13 +524,11 @@ def refresh_cached_band(raw_dir, processed_dir, dart=None):
             raise RuntimeError('band_field_unrelated_value_changed')
         rows.at[index,'record'] = json.dumps(updated,ensure_ascii=False)
         rows.at[index,'proof'] = json.dumps(payload['proof'],ensure_ascii=False)
-        audit.append({'event_id':row.event_id,'corp_name':row.corp_name,'before_low':old.get('price_band_low'),
-            'before_high':old.get('price_band_high'),'after_low':updated.get('price_band_low'),
-            'after_high':updated.get('price_band_high'),'resolution_status':updated['price_band_resolution_status'],
-            'receipt':updated.get('price_band_rcept_no'),'unrelated_fields_unchanged':True,
-            'evidence':updated.get('price_band_resolution_evidence')})
+        audit.append(audit_row(row,old,updated,True))
         if len(audit)%100 == 0: print(json.dumps({'band_reprocessed':len(audit),'population':len(rows)}),flush=True)
-    if contract != connection_contract() or identity['repair'] != digest(__file__) or inputs['input_sha256'] != load_inputs(raw,processed)['input_sha256']:
+    if (contract != connection_contract() or identity['repair'] != digest(__file__)
+            or retry_dependencies!=band_retry_dependencies(raw,retry_records)
+            or inputs['input_sha256'] != load_inputs(raw,processed)['input_sha256']):
         raise RuntimeError('band_field_inputs_changed')
     destination = processed/'historical_reconciliations'/version
     if not destination.exists():
@@ -420,9 +541,13 @@ def refresh_cached_band(raw_dir, processed_dir, dart=None):
         amended = {**report,'version':version,'amendment':identity,'replay_contract':contract,
             'source_archive_policy':'parent_manifest_archive_plus_amendment_originals',
             'band_field_reprocessing':{'processed':len(rows),'unrelated_fields_unchanged':True,
+                'reparsed_events':sum(r['reprocessed'] for r in audit),
+                'unchanged_events_reused':sum(not r['reprocessed'] for r in audit),
                 'status_counts':pd.DataFrame(audit).resolution_status.value_counts().to_dict()},
             'output_sha256':{f.name:digest(f) for f in staging.iterdir()}}
         atomic_json(staging/'manifest.json',amended);staging.rename(destination)
+    from data.pipelines.lockup_reconciliation import parser_snapshot
+    parser_snapshot(raw,digest(__file__),Path(__file__).read_text())
     atomic_json(processed/'current_historical_source_connections.json',{
         'manifest':str((destination/'manifest.json').relative_to(processed)),'sha256':digest(destination/'manifest.json')})
     return {**checked_artifact(destination),'path':str(destination)}
