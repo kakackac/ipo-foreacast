@@ -548,6 +548,30 @@ class ActualDataPipelineTests(unittest.TestCase):
             self.assertEqual(latest["dart_final_terms_demand_parser_version"], DEMAND_PARSER_VERSION)
             self.assertNotEqual(latest["public_float_shares"], 999_999)
 
+    def test_shared_float_parser_hash_invalidates_document_cache_not_numeric_versions(self):
+        import hashlib
+        from data.pipelines import historical_ipo_pipeline as module
+        expected_hash=hashlib.sha256((Path(module.__file__).parents[1]/"collectors/float_tables.py").read_bytes()).hexdigest()
+        for stored_hash,expected_calls in [(None,1),("old_float_parser",1),(expected_hash,0)]:
+            with self.subTest(stored_hash=stored_hash), tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);dart=_FakeDART()
+                cached=dart.get_offering_info("20240101000001")
+                cached.update(offering_price_parser_version=module.OFFERING_PRICE_PARSER_VERSION,
+                    structured_price_check_version=module.STRUCTURED_PRICE_CHECK_VERSION,
+                    dart_final_terms_demand_parser_version=module.DART_FINAL_TERMS_DEMAND_PARSER_VERSION)
+                if stored_hash is not None:cached["offering_float_parser_sha256"]=stored_hash
+                dart.get_offering_info=Mock(wraps=dart.get_offering_info)
+                pipeline=HistoricalIPOPipeline(dart_collector=dart,raw_dir=root/"raw",processed_dir=root/"processed")
+                pipeline._offering_document_cache=pd.DataFrame([cached])
+                calendar=_FakeKRX().get_official_listing_events("20240101","20241231")
+                first,_=pipeline._collect_dart_records(calendar,2024,2024,include_dart_demand_audit=False)
+                self.assertEqual(dart.get_offering_info.call_count,expected_calls)
+                pipeline._flush_document_cache_updates()
+                self.assertEqual(first.iloc[0]["offering_float_parser_sha256"],expected_hash)
+                second,_=pipeline._collect_dart_records(calendar,2024,2024,include_dart_demand_audit=False)
+                self.assertEqual(dart.get_offering_info.call_count,expected_calls)
+                self.assertEqual(second.iloc[0]["offering_float_parser_sha256"],expected_hash)
+
     def test_final_terms_document_parses_offering_and_demand_without_cross_overwriting_status(self):
         collector = DARTCollector(api_key="a" * 40)
         collector.get_document_text = Mock(return_value=(

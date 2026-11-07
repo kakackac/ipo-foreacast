@@ -53,7 +53,17 @@ def ownership_float(tables):
                     candidates.append((numerator,total,ratio,ti,ri,ri,0,0,table))
                     paragraph_bindings[(ti,ri)]=binding
         headers = table[:2]
-        post = lambda c: any(c < len(h) and re.search(r'公募後|공모후|상장후', compact(h[c])) for h in headers)
+        quantity_columns = {c for h in headers for c,cell in enumerate(h)
+                            if re.fullmatch(r'주식수(?:\(주\))?', compact(cell))}
+        has_pre_column = any(re.search(r'공모전|상장전',compact(cell)) for h in headers for cell in h)
+        def post(c):
+            if any(c < len(h) and re.search(r'公募後|공모후|상장후', compact(h[c])) for h in headers):
+                return True
+            # A sole share-quantity column can be dated by its adjacent explicit
+            # post-offering percentage header, never by a pre/post mixed grid.
+            return (quantity_columns == {c} and not has_pre_column and any(
+                c+1 < len(h) and re.fullmatch(r'공모후(?:지분율|비율)(?:\(%\))?',compact(h[c+1]))
+                for h in headers))
         for ri, row in enumerate(table):
             label = compact(' '.join(row[:3]))
             total_label = bool(re.search(r'상장후총발행주식수|상장예정주식(?:총)?수', label))
@@ -79,9 +89,11 @@ def ownership_float(tables):
             # Layout B: float subtotal and total share one post-offering column.
             for fr, frow in enumerate(table):
                 flabel = compact(' '.join(frow[:3]))
+                reference = r'(?:\((?:주)?\d+\))?'
                 if not (re.search(r'^유통가능주식수(?:\(\d+\))?', flabel)
-                        or any(compact(cell)=='유통가능물량소계' for cell in frow[:3])
-                        or (compact(frow[0])=='유통가능물량' and len(frow)>1 and compact(frow[1])=='소계')):
+                        or any(re.fullmatch(r'(?:상장직후)?유통가능물량소계'+reference, compact(cell)) for cell in frow[:3])
+                        or (re.fullmatch(r'(?:상장직후)?유통가능물량',compact(frow[0])) and len(frow)>1
+                            and re.fullmatch(r'소계'+reference, compact(frow[1])))):
                     continue
                 columns = [c for c in range(min(len(row), len(frow)))
                            if shares(row[c]) is not None and shares(frow[c]) is not None

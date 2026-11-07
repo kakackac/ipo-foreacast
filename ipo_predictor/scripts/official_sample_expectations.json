@@ -2,6 +2,33 @@
   "description": "Official DART original-table references reviewed 2026-09-09 and 2026-11-06. New aggregate quantity references: Melcon 748389000/2074742000; EST 2489000/1039659000; SK14 14625000/5988330000. Numerator plus noncommitment quantity reconciles to the independently disclosed demand quantity. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
   "samples": [
     {
+      "sample": "mekics_adjacent_post_float_2015",
+      "receipt": "20151202000452",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20151202000452&dcmNo=4873246&eleId=16&offset=110534&length=166354&dtd=dart3.xsd",
+      "sha256": "e753c584c46f84e5fd02185def5ab8e64823f479acb9f421b5ba0cea67da3753",
+      "expected": {"public_float_shares": 3332040, "total_post_listing_shares": 5361500, "public_float_ratio_disclosed": 0.6215},
+      "review_note": "A single share-quantity column sits immediately before the explicit post-offering percentage column. The float subtotal and total use that same quantity column; no pre-offering quantity column is present."
+    },
+    {
+      "sample": "lemon_initial_float_subtotal_2020",
+      "receipt": "20200218000962",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20200218000962&dcmNo=7074280&eleId=14&offset=384358&length=274950&dtd=dart3.xsd",
+      "sha256": "404862964bcb87bd1b1d97d571237627860b7d6d786b092a154ab57ff6f201e0",
+      "expected": {"public_float_shares": 12710050, "total_post_listing_shares": 34500000, "public_float_ratio_disclosed": 0.3684},
+      "review_note": "The row explicitly says immediately after listing. Select the post-offering 12710050 / 34500000 shares, not the pre-offering 9160050 / 30400000 pair, and do not admit future-release subtotals."
+    },
+    {
+      "sample": "genoray_numbered_float_subtotal_2018",
+      "receipt": "20180515000471",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20180515000471&dcmNo=6177463&eleId=16&offset=419070&length=197894&dtd=dart3.xsd",
+      "sha256": "bcdcdd7dfbc49669e368c91185ec926270b1a71ee194a0095ad2dfcf8b575759",
+      "expected": {"public_float_shares": 2421938, "total_post_listing_shares": 4028700, "public_float_ratio_disclosed": 0.601},
+      "review_note": "The numbered float subtotal and listed-share total are in the same post-offering table. The adjoining issuer disclosure explicitly excludes 394550 preferred shares from the 4028700 listed shares. This is not a shareholder subgroup subtotal."
+    },
+    {
       "sample": "vc_annual_financial_2022",
       "receipt": "20220214000382",
       "section_title": "III. 재무에 관한 사항",

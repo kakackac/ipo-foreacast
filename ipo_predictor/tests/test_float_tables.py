@@ -6,6 +6,57 @@ import pandas as pd
 
 
 class FloatTablesTests(unittest.TestCase):
+    def test_only_quantity_column_can_use_adjacent_post_offering_percentage(self):
+        table=[['구분','성명','주식수','공모후 지분율','매도금지기간'],
+               ['유통가능물량 소계','유통가능물량 소계','3,332,040','62.15%','-'],
+               ['합계','합계','5,361,500','100.0%','-']]
+        result=ownership_float([table])
+        self.assertEqual(result['public_float_shares'],3332040)
+        self.assertEqual(result['total_post_listing_shares'],5361500)
+        self.assertAlmostEqual(result['public_float_ratio_disclosed'],.6215)
+        table[0][3]='공모전 지분율'
+        self.assertEqual(ownership_float([table]),{})
+        table[0][3]='지분율'
+        self.assertEqual(ownership_float([table]),{})
+        table[0][3]='공모후 지분율';table[0][2]='공모전 주식수'
+        self.assertEqual(ownership_float([table]),{})
+
+    def test_initial_float_subtotal_uses_post_not_pre_offering_quantity(self):
+        table=[['구분','공모 전','공모 전','공모 후','공모 후'],
+               ['구분','주식수','지분율','주식수','지분율'],
+               ['상장직후 유통가능물량 소계','9,160,050','30.13%','12,710,050','36.84%'],
+               ['합계','30,400,000','100.00%','34,500,000','100.00%']]
+        result=ownership_float([table])
+        self.assertEqual(result['public_float_shares'],12710050)
+        self.assertEqual(result['total_post_listing_shares'],34500000)
+        self.assertAlmostEqual(result['public_float_ratio_disclosed'],.3684)
+        table[2][0]='상장 6개월 후 유통가능물량 소계'
+        self.assertEqual(ownership_float([table]),{})
+
+    def test_float_subtotal_reference_is_not_a_different_scope(self):
+        table=[['구분','구분','공모 후 주식수(주)','지분율(%)','보호예수기간'],
+               ['유통제한물량','유통제한물량 소계 (1)','1,606,762','39.9%','-'],
+               ['유통가능물량','벤처금융','204,746','5.1%','-'],
+               ['유통가능물량','기타주주','2,217,192','55.0%','-'],
+               ['유통가능물량','유통가능물량 소계 (2)','2,421,938','60.1%','-'],
+               ['상장예정주식수 합계 (1+2)','상장예정주식수 합계 (1+2)','4,028,700','100.0%','-']]
+        for label in ['유통가능물량 소계 (2)','유통가능물량 소계 (주2)','소계 (2)']:
+            with self.subTest(label=label):
+                table[4][1]=label
+                result=ownership_float([table])
+                self.assertEqual(result['public_float_shares'],2421938)
+                self.assertEqual(result['total_post_listing_shares'],4028700)
+                self.assertAlmostEqual(result['public_float_ratio_disclosed'],.601)
+                self.assertEqual(result['total_post_listing_shares_parse_method'],'same_table_post_offering_scope_v1')
+        table[4][1]='유통가능물량 소계 (2년 후)'
+        self.assertEqual(ownership_float([table]),{})
+
+    def test_numbered_investor_subtotal_is_not_entire_float(self):
+        table=[['구분','구분','구분','공모 후 주식수','지분율'],
+               ['유통가능물량','벤처금융','소계 (2)','10','10%'],
+               ['합계','합계','합계','100','100%']]
+        self.assertEqual(ownership_float([table]),{})
+
     def test_inline_percentage_before_share_quantity_is_not_discarded(self):
         text='당사의 상장예정주식 수 48,052,977주 중 약 39.10%에 해당하는 18,790,687주는 상장 직후 유통가능물량입니다.'
         result=ownership_float([[[text]]])

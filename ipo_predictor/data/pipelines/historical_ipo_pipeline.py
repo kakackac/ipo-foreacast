@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 MAX_FILING_TO_LISTING_DAYS = 400
 STRUCTURED_PRICE_CHECK_VERSION = 3
 OFFERING_PRICE_PARSER_VERSION = 7
+OFFERING_FLOAT_PARSER_SHA256 = hashlib.sha256(
+    (Path(__file__).parents[1] / "collectors/float_tables.py").read_bytes()
+).hexdigest()
 DART_LINEAGE_VERSION = 1
 DART_DEMAND_PARSER_VERSION = DEMAND_PARSER_VERSION
 DART_FINAL_TERMS_DEMAND_PARSER_VERSION = DEMAND_PARSER_VERSION
@@ -1229,7 +1232,7 @@ class HistoricalIPOPipeline:
         offering_cache_by_receipt: dict[str, dict[str, Any]] = {}
         reusable_offering_columns = {
             "rcept_no", "offering_price_parser_version", "structured_price_check_version",
-            "dart_final_terms_demand_parser_version",
+            "dart_final_terms_demand_parser_version", "offering_float_parser_sha256",
         }
         # Event-level merged records are not receipt-level parser results.
         for frame in (self._offering_document_cache,):
@@ -1241,6 +1244,7 @@ class HistoricalIPOPipeline:
                 & frame["dart_final_terms_demand_parser_version"].eq(
                     DART_FINAL_TERMS_DEMAND_PARSER_VERSION
                 )
+                & frame["offering_float_parser_sha256"].eq(OFFERING_FLOAT_PARSER_SHA256)
             ].drop_duplicates("rcept_no", keep="last")
             offering_cache_by_receipt.update({
                 str(row.rcept_no): row._asdict() for row in reusable_offerings.itertuples(index=False)
@@ -1399,6 +1403,7 @@ class HistoricalIPOPipeline:
                     and cached.get("offering_price_parser_version") == OFFERING_PRICE_PARSER_VERSION
                     and cached.get("dart_final_terms_demand_parser_version")
                     == DART_FINAL_TERMS_DEMAND_PARSER_VERSION
+                    and cached.get("offering_float_parser_sha256") == OFFERING_FLOAT_PARSER_SHA256
                 ):
                     offering_documents.append((candidate, cached))
                     entry["attempt_status"] = "cached_verified_record"
@@ -1410,6 +1415,7 @@ class HistoricalIPOPipeline:
                     parsed_offering = self.dart.get_offering_info(receipt)
                     parsed_offering["structured_price_check_version"] = STRUCTURED_PRICE_CHECK_VERSION
                     parsed_offering["offering_price_parser_version"] = OFFERING_PRICE_PARSER_VERSION
+                    parsed_offering["offering_float_parser_sha256"] = OFFERING_FLOAT_PARSER_SHA256
                     parsed_offering["dart_final_terms_demand_parser_version"] = (
                         DART_FINAL_TERMS_DEMAND_PARSER_VERSION
                     )
@@ -1468,6 +1474,7 @@ class HistoricalIPOPipeline:
             )
             offering["structured_price_check_version"] = STRUCTURED_PRICE_CHECK_VERSION
             offering["offering_price_parser_version"] = OFFERING_PRICE_PARSER_VERSION
+            offering["offering_float_parser_sha256"] = OFFERING_FLOAT_PARSER_SHA256
             # 신주·구주는 같은 문서의 구조 검증을 동시에 통과한
             # 경우만 파생 비율에 쓴다. 서로 다른 정정본의 값을
             # 조합하면 실제 공시에 없는 공모 구조가 만들어진다.

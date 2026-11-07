@@ -74,6 +74,9 @@ SAMPLES = {
     "woorison_prospectus_band_omitted_2016": "20160714000401",
     "madup_terms_ambiguous_band_2026": "20260622000382",
     "madup_later_prospectus_band_2026": "20260622000384",
+    "genoray_numbered_float_subtotal_2018": "20180515000471",
+    "mekics_adjacent_post_float_2015": "20151202000452",
+    "lemon_initial_float_subtotal_2020": "20200218000962",
 }
 
 
@@ -229,6 +232,8 @@ def main():
             "sha256": hashlib.sha256(body_path.read_bytes()).hexdigest(),
             "audited_at": datetime.now(timezone.utc).isoformat(),
             "parser_sha256": hashlib.sha256(Path(sys.modules[DARTCollector.__module__].__file__).read_bytes()).hexdigest(),
+            "float_parser_sha256": hashlib.sha256((Path(__file__).resolve().parents[1] / "data/collectors/float_tables.py").read_bytes()).hexdigest(),
+            "expectations_sha256": hashlib.sha256(reference_path.read_bytes()).hexdigest(),
             "status": "parsed_not_independently_approved",
             "view_evidence": view_evidence,
         }
