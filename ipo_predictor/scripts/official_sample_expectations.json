@@ -48,6 +48,40 @@
   ],
   "samples": [
     {
+      "sample": "sunic_threshold_float_2017", "receipt": "20170908000030",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170908000030&dcmNo=5779318&eleId=17&offset=204113&length=196688&dtd=dart3.xsd",
+      "sha256": "7915ad0c53707bbe27882cc2e1a691ba0e682b766b75421db0236bec6bdb4ad4",
+      "expected": {"public_float_shares":2949430,"total_post_listing_shares":6000000,"public_float_ratio_disclosed":0.4916},
+      "review_note": "Generic quantity header is dated by a positive public-offering holder and the complete locked/float partition: 3050570 + 2949430 = 6000000 at 100%. The adjacent investor heading '1% or more' is not the float percentage. This receipt alone does not authorize copying to an earlier stage."
+    },
+    {
+      "sample": "cng_malformed_quantity_float_2018", "receipt": "20180115000154",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20180115000154&dcmNo=5919373&eleId=16&offset=332368&length=178934&dtd=dart3.xsd",
+      "sha256": "31a7b8977cf95bc7b135577232623abc0a008045c51d810dd48f3d11c7f4aedc",
+      "expected": {"public_float_shares":null,"public_float_ratio_disclosed":0.5479},
+      "expected_evidence": {"public_float_parse_evidence":{"rule":"explicit_post_issuer_total_ratio_v1","unparsed_quantity_text":"2.302.600","denominator_inferred":false}},
+      "review_note": "The issuer's post-offering total row explicitly prints aggregate float 54.79%. Quantity is malformed '2.302.600'; retain NULL quantity and literal evidence, not a repaired or inferred share count."
+    },
+    {
+      "sample": "cntus_option_scope_float_2021", "receipt": "20210115000208",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210115000208&dcmNo=7762716&eleId=14&offset=594164&length=304746&dtd=dart3.xsd",
+      "sha256": "82b70556a399240c86da9e70a1bda2f626a46b939e9ca174618802dafddd5172",
+      "expected": {"public_float_shares":null,"public_float_ratio_disclosed":null,"public_float_parse_method":"conflicting_float_ratios_review_required"},
+      "review_note": "The selected aggregate grid includes positive option shares and a mixed class/denominator scope. Flat text '5%' is an investor threshold, not aggregate float. Neither that value nor 58.63% may be substituted without the ordinary-listed denominator and applicable initial basis. This is scope unverified, not source absent."
+    },
+    {
+      "sample": "dayone_listing_schedule_float_2025", "receipt": "20250114000477",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20250114000477&dcmNo=10264820&eleId=14&offset=944822&length=346605&dtd=dart4.xsd",
+      "sha256": "f591bb93bd10f3a913ba562600c4be58be484940f6a5717077cbd2544dfe9559",
+      "expected": {"public_float_shares":4392116,"public_float_ratio_disclosed":0.3228},
+      "expected_evidence": {"public_float_parse_evidence":{"rule":"explicit_listing_day_schedule_ratio_v1","denominator_inferred":false}},
+      "review_note": "The initial listing-day row explicitly prints 4392116 shares and 32.28%. Later lockup-release rows are not a denominator or replacement for the initial ratio."
+    },
+    {
       "sample": "solum_column_scope_float_2021", "receipt": "20210120000141",
       "section_title": "Ⅲ. 투자위험요소",
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20210120000141&dcmNo=7767022&eleId=14&offset=693651&length=421977&dtd=dart3.xsd",

@@ -1,4 +1,5 @@
 import unittest
+import json
 from data.collectors.float_tables import ownership_float
 from data.collectors.dart_collector import DARTCollector
 from data.processors.feature_engineer import FeatureEngineer
@@ -6,6 +7,12 @@ import pandas as pd
 
 
 class FloatTablesTests(unittest.TestCase):
+    def assertNotApproved(self, result):
+        self.assertIsNone(result.get('public_float_shares'))
+        self.assertIsNone(result.get('public_float_ratio_disclosed'))
+        self.assertNotEqual(result.get('total_post_listing_shares_parser_validation_status'), 'structurally_verified')
+        self.assertIn(result.get('public_float_parse_method'), (None, 'conflicting_float_ratios_review_required'))
+
     def test_only_quantity_column_can_use_adjacent_post_offering_percentage(self):
         table=[['구분','성명','주식수','공모후 지분율','매도금지기간'],
                ['유통가능물량 소계','유통가능물량 소계','3,332,040','62.15%','-'],
@@ -15,11 +22,11 @@ class FloatTablesTests(unittest.TestCase):
         self.assertEqual(result['total_post_listing_shares'],5361500)
         self.assertAlmostEqual(result['public_float_ratio_disclosed'],.6215)
         table[0][3]='공모전 지분율'
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
         table[0][3]='지분율'
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
         table[0][3]='공모후 지분율';table[0][2]='공모전 주식수'
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
 
     def test_initial_float_subtotal_uses_post_not_pre_offering_quantity(self):
         table=[['구분','공모 전','공모 전','공모 후','공모 후'],
@@ -31,7 +38,7 @@ class FloatTablesTests(unittest.TestCase):
         self.assertEqual(result['total_post_listing_shares'],34500000)
         self.assertAlmostEqual(result['public_float_ratio_disclosed'],.3684)
         table[2][0]='상장 6개월 후 유통가능물량 소계'
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
 
     def test_float_subtotal_reference_is_not_a_different_scope(self):
         table=[['구분','구분','공모 후 주식수(주)','지분율(%)','보호예수기간'],
@@ -49,13 +56,13 @@ class FloatTablesTests(unittest.TestCase):
                 self.assertAlmostEqual(result['public_float_ratio_disclosed'],.601)
                 self.assertEqual(result['total_post_listing_shares_parse_method'],'same_table_post_offering_scope_v1')
         table[4][1]='유통가능물량 소계 (2년 후)'
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
 
     def test_numbered_investor_subtotal_is_not_entire_float(self):
         table=[['구분','구분','구분','공모 후 주식수','지분율'],
                ['유통가능물량','벤처금융','소계 (2)','10','10%'],
                ['합계','합계','합계','100','100%']]
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
 
     def test_inline_percentage_before_share_quantity_is_not_discarded(self):
         text='당사의 상장예정주식 수 48,052,977주 중 약 39.10%에 해당하는 18,790,687주는 상장 직후 유통가능물량입니다.'
@@ -92,11 +99,11 @@ class FloatTablesTests(unittest.TestCase):
         self.assertEqual(result['public_float_shares'],1377340)
         self.assertEqual(result['total_post_listing_shares'],3460340)
         self.assertAlmostEqual(result['public_float_ratio_disclosed'],.398)
-        self.assertEqual(ownership_float([[[text.replace('당사의','비교회사의')]]]),{})
+        self.assertNotApproved(ownership_float([[[text.replace('당사의','비교회사의')]]]))
         excluded='회사의 상장예정주식수 6,212,799주 중 3,996,472주(공모 후, 63.8%)를 제외하고는 상장 직후 유통가능 물량입니다.'
-        self.assertEqual(ownership_float([[[excluded]]]),{})
+        self.assertNotApproved(ownership_float([[[excluded]]]))
         future=text.replace('상장 직후','보호예수 종료 후')
-        self.assertEqual(ownership_float([[[future]]]),{})
+        self.assertNotApproved(ownership_float([[[future]]]))
         wrong=text.replace('39.8%','49.8%')
         self.assertEqual(ownership_float([[[wrong]]])['public_float_parse_method'],'conflicting_float_ratios_review_required')
 
@@ -133,7 +140,7 @@ class FloatTablesTests(unittest.TestCase):
         other=[r[:] for r in table];other[1]=['유통가능주식수(2)','30주','30%']
         self.assertEqual(ownership_float([table,other])['public_float_basis_status'],'same_table_candidates_conflict')
         other[1]=['유통가능주식수(2)','120주','30%']
-        self.assertEqual(ownership_float([other]),{})
+        self.assertNotApproved(ownership_float([other]))
 
     def test_investor_subtotal_is_not_the_entire_float(self):
         table=[['구분','구분','구분','공모후 주식수','공모후 지분율'],
@@ -154,7 +161,7 @@ class FloatTablesTests(unittest.TestCase):
         self.assertEqual(result['total_post_listing_shares'],61157490)
         self.assertAlmostEqual(result['public_float_ratio_disclosed'],.2688)
         table[4][1]='벤처금융'
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
 
     def test_post_prefixed_quantity_column_is_not_confused_with_locked_quantity(self):
         table=[['구분','공모전','공모전','공모후','공모후','공모후유통가능물량','공모후매도금지물량'],
@@ -165,7 +172,7 @@ class FloatTablesTests(unittest.TestCase):
         self.assertEqual(result['total_post_listing_shares'],11077521)
         self.assertIsNone(result['public_float_ratio_disclosed'])
         table[0][5]=table[1][5]='상장6개월후유통가능물량'
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
 
     def test_inline_quantity_percent_has_its_own_percentage_cell(self):
         table=[['구분','공모후','공모후','공모후 유통가능물량','공모후 매도금지물량'],
@@ -185,7 +192,7 @@ class FloatTablesTests(unittest.TestCase):
                ['총합계','총합계','총합계','100','100%']]
         self.assertEqual(ownership_float([table])['public_float_shares'],50)
         table[3]=['유통가능주식수','벤처금융','소계','10','10%']
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
 
     def test_named_float_total_accepts_explicit_listed_total_not_future_total(self):
         table=[['구분','구분','주식종류','공모후주식수','공모후지분율'],
@@ -193,7 +200,7 @@ class FloatTablesTests(unittest.TestCase):
                ['상장후 총 발행주식 합계','상장후 총 발행주식 합계','보통주','100','100%']]
         self.assertEqual(ownership_float([table])['public_float_shares'],40)
         table[1][0]=table[1][1]='상장 1년 후 유통가능 주식 합계'
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
 
     def test_positive_preferred_or_convertible_amount_cannot_define_listed_denominator(self):
         for kind in ['전환상환우선주','우선주','전환사채']:
@@ -201,26 +208,26 @@ class FloatTablesTests(unittest.TestCase):
                    ['유통제한물량',kind,'A','10','10%'],
                    ['유통가능물량','보통주','소계','40','40%'],
                    ['합계','합계','합계','100','100%']]
-            self.assertEqual(ownership_float([table]),{})
+            self.assertNotApproved(ownership_float([table]))
             table[1][3]='-'
             self.assertEqual(ownership_float([table])['public_float_shares'],40)
 
     def test_malformed_grouped_quantity_is_not_normalized_into_valid_number(self):
         table=[['구분','공모후주식수','공모후지분율'],
                ['유통가능 주식 합계','4,0','40%'], ['합계','100','100%']]
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
 
     def test_multiple_post_exercise_bases_are_not_selected_by_column_order(self):
         table=[['구분','공모후','공모후','공모후','공모후'],
                ['구분','행사전주식수','지분율','행사후주식수','지분율'],
                ['유통가능 소계','40','40%','60','50%'],['합계','100','100%','120','100%']]
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
 
     def test_shareholder_subset_total_is_not_the_issuers_post_total(self):
         table=[['주주명','공모후','공모후','공모후유통가능물량','공모후유통가능물량'],
                ['주주명','보유주식','지분율','주식수','지분율'],
                ['합계','100','20%','50','10%']]
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
 
     def test_explicit_voluntary_adjustment_does_not_silently_approve_unadjusted_float(self):
         base=[['구분','공모후','공모후','유통가능물량','유통가능물량'],
@@ -249,7 +256,7 @@ class FloatTablesTests(unittest.TestCase):
         self.assertEqual(result['total_post_listing_shares'],1000)
         self.assertIsNone(result['public_float_ratio_disclosed'])
         table[1][2]='보유수량'
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
 
     def test_explicit_listed_total_must_not_use_diluted_basis_percentage(self):
         table=[['구분','공모후 주주명부','공모후 주주명부','유통가능물량','유통가능물량'],
@@ -300,7 +307,7 @@ class FloatTablesTests(unittest.TestCase):
         self.assertIsNone(result['public_float_ratio_disclosed'])
         self.assertIn('28.13%',result['public_float_parse_evidence'])
         table[2][2]='우선주'
-        self.assertEqual(ownership_float([table]),{})
+        self.assertNotApproved(ownership_float([table]))
 
     def test_float_column_uses_same_ordinary_total_not_all_issued_class_total(self):
         table=[['구분','종류','공모후','공모후','유통가능물량','유통가능물량'],
@@ -324,3 +331,96 @@ class FloatTablesTests(unittest.TestCase):
         self.assertIn('within_float_and_locked_columns',result['public_float_parse_evidence'])
         table[2][3]='59'
         self.assertEqual(ownership_float([table])['public_float_basis_status'],'same_table_candidates_conflict')
+
+    def test_complete_public_offering_partition_ignores_investor_threshold(self):
+        table=[['구분','구분','주식수','비율(%)','비고'],
+               ['유통불가능 주식수','소계','3,050,570주','50.84%','-'],
+               ['유통가능 주식수','1%이상 소유주주','375,260주','6.25%','-'],
+               ['유통가능 주식수','소액주주','1,119,170주','18.65%','1%이하 소유주주'],
+               ['유통가능 주식수','공모주주(기관투자자, 일반투자자)','1,455,000주','24.25%','-'],
+               ['유통가능 주식수','소계','2,949,430주','49.16%','-'],
+               ['합계','합계','6,000,000주','100.00%','-']]
+        result=ownership_float([table])
+        self.assertEqual(result['public_float_shares'],2949430)
+        self.assertEqual(result['total_post_listing_shares'],6000000)
+        self.assertAlmostEqual(result['public_float_ratio_disclosed'],.4916)
+        html='<table>'+''.join('<tr>'+''.join('<td>'+s+'</td>' for s in r)+'</tr>' for r in table)+'</table>'
+        parsed=DARTCollector(api_key='unused')._parse_offering_html(html,'20170908000030')
+        self.assertAlmostEqual(parsed['public_float_ratio_disclosed'],.4916)
+        for mutate in ('missing_public_holder','wrong_partition','wrong_percent','pre_listing_application'):
+            changed=[r[:] for r in table]
+            if mutate=='missing_public_holder':changed[4][1]='기존주주'
+            if mutate=='wrong_partition':changed[1][2]='3,050,571주'
+            if mutate=='wrong_percent':changed[5][3]='59.16%'
+            if mutate=='pre_listing_application':changed[0][2]='상장신청일 주식수'
+            with self.subTest(mutate=mutate):self.assertNotApproved(ownership_float([changed]))
+
+    def test_listing_day_schedule_retains_direct_ratio_without_future_denominator(self):
+        table=[['구분','유통가능주식수','유통가능주식수비율'],
+               ['상장일 유통가능','300','30.0%'],['상장 3개월 후','1200','100.0%']]
+        result=ownership_float([table])
+        self.assertEqual(result['public_float_shares'],300)
+        self.assertAlmostEqual(result['public_float_ratio_disclosed'],.3)
+        self.assertNotIn('total_post_listing_shares',result)
+        evidence=json.loads(result['public_float_parse_evidence'])
+        self.assertFalse(evidence['denominator_inferred'])
+        self.assertEqual(evidence['rule'],'explicit_listing_day_schedule_ratio_v1')
+        self.assertEqual(evidence['table'],table)
+        for row_label in ('상장 1개월 후 유통가능','상장신청일 유통가능'):
+            changed=[r[:] for r in table];changed[1][0]=row_label
+            self.assertNotApproved(ownership_float([changed]))
+
+    def test_schedule_conflict_cannot_be_overridden_by_valid_quantity_pair(self):
+        base=[['구분','공모후','공모후','유통가능물량','유통가능물량'],
+              ['구분','주식수','지분율','주식수','지분율'],['합계','1000','100%','300','30%']]
+        schedule=[['구분','유통가능주식수','유통가능주식수비율'],['상장일 유통가능','300','40%']]
+        result=ownership_float([base,schedule])
+        self.assertNotApproved(result)
+        self.assertIn('direct_initial_ratio_quantity_conflict_v1',result['public_float_parse_evidence'])
+        schedule[1][2]='30%'
+        self.assertEqual(ownership_float([base,schedule])['total_post_listing_shares'],1000)
+
+    def test_malformed_quantity_does_not_destroy_explicit_issuer_percentage(self):
+        table=[['구분','주주명','주식의종류','공모 후','공모 후','유통가능물량','유통가능물량'],
+               ['구분','주주명','주식의종류','주식수(주)','지분율','주식수(주)','지분율'],
+               ['합계','합계','-','4,202,740','100.00%','2.302.600','54.79%']]
+        result=ownership_float([table])
+        self.assertIsNone(result['public_float_shares'])
+        self.assertAlmostEqual(result['public_float_ratio_disclosed'],.5479)
+        evidence=json.loads(result['public_float_parse_evidence'])
+        self.assertEqual(evidence['unparsed_quantity_text'],'2.302.600')
+        self.assertFalse(evidence['denominator_inferred'])
+        table[2][6]='154.79%'
+        self.assertNotApproved(ownership_float([table]))
+
+    def test_unsupported_scope_blocks_legacy_flat_threshold_fallback(self):
+        table=[['구분','종류','공모후주식수','유통가능물량','유통가능물량'],
+               ['구분','종류','주식수','주식수','지분율'],
+               ['주주','주식매수선택권','100','100','5%'],
+               ['합계','전체','1000','500','50%']]
+        html='<p>상장직후 유통가능 물량 5% 이상 소유주주</p><table>'+''.join(
+            '<tr>'+''.join('<td>'+s+'</td>' for s in r)+'</tr>' for r in table)+'</table>'
+        result=DARTCollector(api_key='unused')._parse_offering_html(html,'20210115000208')
+        self.assertNotApproved(result)
+        self.assertIn('initial_float_scope_requires_review_v1',result['public_float_parse_evidence'])
+
+    def test_explicit_nondiluted_post_column_is_distinct_from_diluted_column(self):
+        table=[['구분','공모전','공모전','공모후','공모후','공모후','공모후','유통가능물량','유통가능물량'],
+               ['구분','주식수','지분율','주식수','지분율','희석후주식수','희석후지분율','주식수','지분율'],
+               ['합계','80','100%','100','100%','120','100%','30','30%']]
+        result=ownership_float([table])
+        self.assertEqual(result['total_post_listing_shares'],100)
+        self.assertEqual(result['public_float_shares'],30)
+        self.assertAlmostEqual(result['public_float_ratio_disclosed'],.3)
+
+    def test_generic_total_uses_explicit_locked_total_not_its_components(self):
+        table=[['구분','주주명','총주식수','총주식수','유통가능물량','유통가능물량',
+                '매각제한물량','매각제한물량','매각제한물량','매각제한물량'],
+               ['구분','주주명','주식수','지분율','주식수','지분율','의무보호예수물량','자발적보호예수물량','총보호예수물량','지분율'],
+               ['신규주주','공모주주(기관투자자 및 일반청약자)','20','20%','20','20%','-','-','-','-'],
+               ['합계','합계','100','100%','30','30%','60','10','70','70%']]
+        result=ownership_float([table])
+        self.assertEqual(result['total_post_listing_shares'],100)
+        self.assertAlmostEqual(result['public_float_ratio_disclosed'],.3)
+        table[1][8]='기타제한물량'
+        self.assertNotApproved(ownership_float([table]))

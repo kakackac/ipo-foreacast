@@ -1,5 +1,6 @@
 """Point-in-time IPO inputs from actual historical documents, not final-row masks."""
 import hashlib
+import ast
 import fcntl
 import json
 import math
@@ -9,6 +10,7 @@ import unicodedata
 from copy import deepcopy
 from decimal import Decimal, ROUND_HALF_UP
 from html import escape
+from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlencode, parse_qs
 
@@ -145,6 +147,27 @@ def read_document(dart, raw, metadata, corp, cached_only):
         'related_receipts':sorted(number for number in related if re.fullmatch(r'\d{14}',number))}
 
 
+@lru_cache(maxsize=8)
+def compatible_float_dependencies(raw, current_sha):
+    path=Path(__file__).parents[1]/'collectors/float_tables.py'
+    current=path.read_text()
+    if hashlib.sha256(current.encode()).hexdigest()!=current_sha:
+        raise RuntimeError('stage_float_parser_changed_during_analysis')
+    def outside(source):
+        tree=ast.parse(source)
+        tree.body=[n for n in tree.body if not (isinstance(n,ast.FunctionDef) and n.name=='ownership_float')]
+        return ast.dump(tree,include_attributes=False)
+    baseline=outside(current);compatible=[]
+    for snapshot in sorted((Path(raw)/'parser_source_snapshots').glob('*.json')):
+        saved=json.loads(snapshot.read_text());source=saved.get('source','')
+        if not re.search(r'^def ownership_float\(',source,re.M):continue
+        sha=hashlib.sha256(source.encode()).hexdigest()
+        if saved.get('source_sha256')!=sha or snapshot.stem!=sha:
+            raise RuntimeError('stage_float_dependency_snapshot_integrity_failed')
+        if sha!=current_sha and outside(source)==baseline:compatible.append(sha)
+    return tuple(compatible)
+
+
 def document_analysis(dart,body,receipt,corp,raw=None):
     identity={'schema':1,'receipt':receipt,'corp_code':corp,'body_sha256':hashlib.sha256(body.encode()).hexdigest(),
         'parser':digest(Path(__file__).parents[1]/'collectors/dart_collector.py'),
@@ -157,9 +180,23 @@ def document_analysis(dart,body,receipt,corp,raw=None):
         if saved['identity']!=identity or saved['sha256']!=hashlib.sha256(json.dumps(saved['result'],sort_keys=True).encode()).hexdigest():
             raise RuntimeError('stage_document_analysis_integrity_failed')
         return saved['result']
-    result={'offering':dart._parse_offering_html(body,receipt),'demand':dart._parse_demand_forecast_html(body,corp),
-            'underwriter':parse_underwriters(body)}
+    reused=None;previous=None
+    if path is not None:
+        for sha in compatible_float_dependencies(str(Path(raw).resolve()),identity['float_parser']):
+            previous_identity={**identity,'float_parser':sha}
+            previous_path=path.parent/(hashlib.sha256(json.dumps(previous_identity,sort_keys=True).encode()).hexdigest()+'.json')
+            if not previous_path.exists():continue
+            saved=json.loads(previous_path.read_text())
+            if (saved['identity']!=previous_identity or
+                    saved['sha256']!=hashlib.sha256(json.dumps(saved['result'],sort_keys=True).encode()).hexdigest()
+                    or set(saved['result'])!={'offering','demand','underwriter'}):
+                raise RuntimeError('stage_document_analysis_integrity_failed')
+            reused=saved['result'];previous=digest(previous_path);break
+    result={'offering':dart._parse_offering_html(body,receipt),
+            'demand':dart._parse_demand_forecast_html(body,corp) if reused is None else reused['demand'],
+            'underwriter':parse_underwriters(body) if reused is None else reused['underwriter']}
     if path is not None:atomic_json(path,{'identity':identity,'result':result,
+        'component_reuse':{'demand_and_underwriter_from':previous,'offering_reparsed':True},
         'sha256':hashlib.sha256(json.dumps(result,sort_keys=True).encode()).hexdigest()})
     return result
 

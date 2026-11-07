@@ -271,7 +271,8 @@ class StageSnapshotTests(unittest.TestCase):
             def _parse_offering_html(self,*args):self.calls+=1;return {}
             def _parse_demand_forecast_html(self,*args):return {}
         parser=Parser()
-        with tempfile.TemporaryDirectory() as root,patch.object(stage_snapshots,'digest',side_effect=digest):
+        with tempfile.TemporaryDirectory() as root,patch.object(stage_snapshots,'digest',side_effect=digest),patch.object(
+                stage_snapshots,'compatible_float_dependencies',return_value=()):
             document_analysis(parser,'<p>original</p>','20240101000001','00000001',root)
             document_analysis(parser,'<p>original</p>','20240101000001','00000001',root)
             self.assertEqual(parser.calls,1)
@@ -288,6 +289,73 @@ class StageSnapshotTests(unittest.TestCase):
         self.assertFalse(same_demand_printed_rounding(result('187.7 : 1'),result('187.67 : 1',quantity=136695001)))
         self.assertFalse(same_demand_printed_rounding(result('1471.01 : 1'),result('1471.04 : 1')))
         self.assertFalse(same_demand_printed_rounding({},result('187.7 : 1')))
+
+    def test_float_only_change_reuses_only_unchanged_document_components(self):
+        from data.pipelines import stage_snapshots as module
+        original=module.digest;revision=['old'];changed=[False]
+        def digest(path):
+            if Path(path).name=='float_tables.py':return revision[0]
+            if changed[0] and Path(path).name=='dart_collector.py':return 'changed-dart'
+            return original(path)
+        class Parser:
+            offering=0;demand=0
+            def _parse_offering_html(self,*args):self.offering+=1;return {'float_version':revision[0]}
+            def _parse_demand_forecast_html(self,*args):self.demand+=1;return {'verified':7}
+        parser=Parser()
+        with tempfile.TemporaryDirectory() as root,patch.object(module,'digest',side_effect=digest),patch.object(
+                module,'compatible_float_dependencies',return_value=('old',)),patch.object(
+                module,'parse_underwriters',return_value={'tier':3}) as underwriters:
+            first=document_analysis(parser,'<p>same</p>','20240101000001','00000001',root)
+            revision[0]='new'
+            second=document_analysis(parser,'<p>same</p>','20240101000001','00000001',root)
+            self.assertEqual((parser.offering,parser.demand,underwriters.call_count),(2,1,1))
+            self.assertNotEqual(first['offering'],second['offering'])
+            self.assertEqual(first['demand'],second['demand']);self.assertEqual(first['underwriter'],second['underwriter'])
+            document_analysis(parser,'<p>same</p>','20240101000001','00000001',root)
+            self.assertEqual((parser.offering,parser.demand),(2,1))
+            for body,receipt,corp in [('<p>changed</p>','20240101000001','00000001'),
+                    ('<p>same</p>','20240101000002','00000001'),('<p>same</p>','20240101000001','00000002')]:
+                document_analysis(parser,body,receipt,corp,root)
+            self.assertEqual((parser.offering,parser.demand,underwriters.call_count),(5,4,4))
+            changed[0]=True
+            document_analysis(parser,'<p>same</p>','20240101000001','00000001',root)
+            self.assertEqual((parser.offering,parser.demand,underwriters.call_count),(6,5,5))
+
+    def test_component_reuse_rejects_tampered_prior_analysis(self):
+        from data.pipelines import stage_snapshots as module
+        original=module.digest;revision=['old']
+        def digest(path):return revision[0] if Path(path).name=='float_tables.py' else original(path)
+        class Parser:
+            def _parse_offering_html(self,*args):return {}
+            def _parse_demand_forecast_html(self,*args):return {}
+        with tempfile.TemporaryDirectory() as root,patch.object(module,'digest',side_effect=digest),patch.object(
+                module,'compatible_float_dependencies',return_value=('old',)):
+            document_analysis(Parser(),'same','20240101000001','00000001',root)
+            path=next((Path(root)/'stage_document_analyses').glob('*.json'))
+            saved=json.loads(path.read_text());saved['result']['demand']={'bad':1};path.write_text(json.dumps(saved))
+            revision[0]='new'
+            with self.assertRaisesRegex(RuntimeError,'analysis_integrity_failed'):
+                document_analysis(Parser(),'same','20240101000001','00000001',root)
+
+    def test_component_dependency_inventory_requires_verified_float_only_sources(self):
+        from data.pipelines import stage_snapshots as module
+        current=(Path(module.__file__).parents[1]/'collectors/float_tables.py').read_text()
+        sha=hashlib.sha256(current.encode()).hexdigest()
+        old=current.split('\ndef ownership_float(')[0]+'\ndef ownership_float(tables):\n    return {}\n'
+        old_sha=hashlib.sha256(old.encode()).hexdigest()
+        unrelated=old.replace('import re','import re\nDEFAULT_SCOPE = "changed"')
+        unrelated_sha=hashlib.sha256(unrelated.encode()).hexdigest()
+        with tempfile.TemporaryDirectory() as root:
+            directory=Path(root)/'parser_source_snapshots';directory.mkdir()
+            for source,key in [(old,old_sha),(unrelated,unrelated_sha)]:
+                (directory/(key+'.json')).write_text(json.dumps({'source':source,'source_sha256':key}))
+            module.compatible_float_dependencies.cache_clear()
+            self.assertEqual(module.compatible_float_dependencies(root,sha),(old_sha,))
+            (directory/(old_sha+'.json')).write_text(json.dumps({'source':old,'source_sha256':'bad'}))
+            module.compatible_float_dependencies.cache_clear()
+            with self.assertRaisesRegex(RuntimeError,'dependency_snapshot_integrity_failed'):
+                module.compatible_float_dependencies(root,sha)
+        module.compatible_float_dependencies.cache_clear()
 
     def test_linked_terms_fill_only_a_truly_unpopulated_field_and_preserve_its_origin(self):
         terms={'rcept_no':'20240101000001','rcept_dt':'2024-01-01','report_nm':'[발행조건확정]증권신고서(지분증권)'}

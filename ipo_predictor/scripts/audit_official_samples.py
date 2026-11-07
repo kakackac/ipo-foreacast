@@ -19,6 +19,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.collectors.dart_collector import DARTCollector
 
 SAMPLES = {
+    "sunic_threshold_float_2017": "20170908000030",
+    "cng_malformed_quantity_float_2018": "20180115000154",
+    "cntus_option_scope_float_2021": "20210115000208",
+    "dayone_listing_schedule_float_2025": "20250114000477",
     "woorison_group_float_2016": "20160714000401",
     "paxnet_column_float_2016": "20160714000305",
     "zaigle_total_float_2016": "20160824000350",
