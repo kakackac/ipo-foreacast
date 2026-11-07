@@ -293,6 +293,7 @@ def connect_event(dart, raw_dir, event, candidates, cached_only=False, *, verify
     supplement = proof.get('supplementary',{})
     urls = {url,initial_url,proof['source_url'],*[r['url'] for r in proof['sections']]}
     if supplement: urls.update({supplement['source_url'],*[r['url'] for r in supplement['sections']]})
+    urls.update(source['url'] for source in proof.get('band_support_sources',[]))
     for source_url in urls:
         cache = Path(raw_dir)/'dart_connection_sources'/(hashlib.sha256(source_url.encode()).hexdigest()+'.json')
         record = json.loads(cache.read_text())

@@ -1,5 +1,19 @@
 {
   "description": "Official DART original-table references reviewed 2026-09-09 and 2026-11-06. New aggregate quantity references: Melcon 748389000/2074742000; EST 2489000/1039659000; SK14 14625000/5988330000. Numerator plus noncommitment quantity reconciles to the independently disclosed demand quantity. Ratios use fractions; demand uses x:1. Null means expected absence or ambiguous correction in this selected section, not issuer-wide source absence. This is not production/model approval.",
+  "band_origin_samples": [
+    {"company":"대원","event_id":"krx_kind|7680|20171201|대원",
+     "complete_receipt":"20171121000228","band_receipt":"20171121000233",
+     "expected_band":[13000,15000],"expected_post_position":1.0,
+     "review_note":"The after-only note has an explicit empty-before overview. Its own issuer hope-price table prints 13,000 to 15,000 won. The complete prospectus has scalar final price 15,000 won, not a replacement range."},
+    {"company":"현대사료","event_id":"krx_kind|16790|20180601|현대사료",
+     "complete_receipt":"20180521000392","band_receipt":"20180509000036",
+     "expected_band":[5700,6600],"expected_post_position":1.0,
+     "review_note":"The last pre-bookbuilding prospectus announces the May 16-17 period and 5,700 to 6,600 won range. Later linked full documents and active amendments must be checked; scalar final 6,600 won is not a new indicative range."},
+    {"company":"알피바이오","event_id":"krx_kind|314140|20220929|알피바이오",
+     "complete_receipt":"20220919000288","band_receipt":"20220908000052",
+     "expected_band":[10000,13000],"expected_post_position":1.0,
+     "review_note":"The last pre-bookbuilding prospectus announces September 15-16 and the 10,000 to 13,000 won range. The confirmed price 13,000 belongs to the later source. Never require or approve a confirmed price from the earlier indicative-band source."}
+  ],
   "stage_selection_samples": [
     {"company":"힘스","event_id":"krx_kind|238490|20170720|힘스",
      "complete_receipt":"20170707000208","current_registration_receipt":"20170707000203",

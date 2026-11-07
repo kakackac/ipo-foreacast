@@ -9,6 +9,7 @@ import tempfile
 from pathlib import Path
 
 import pandas as pd
+from requests import RequestException
 
 
 BAND_FIELDS = ('price_band_low', 'price_band_high', 'price_band_parse_method',
@@ -42,6 +43,48 @@ def confirmed_price(document, price):
             and document.get('offering_price') == price)
 
 
+def verified_after_view(view):
+    if not isinstance(view,dict):return False
+    if view.get('rule')=='explicit_marker_before_after_sections_v1':return True
+    if view.get('rule')!='explicit_overview_empty_before_additions_v1':return False
+    notes=view.get('empty_before_notes');pairs=view.get('pair_count');original=view.get('original_paired_sections')
+    if (not isinstance(notes,dict) or not notes or type(pairs) is not int or type(original) is not int
+            or original<0 or pairs!=original+len(notes)
+            or view.get('strict_section_rejection')!='correction_after_without_matching_before'):
+        return False
+    if not all(isinstance(view.get(k),str) and re.fullmatch(r'[a-f0-9]{64}',view[k])
+               for k in ['original_sha256','selected_sha256','empty_before_expansion_sha256']):return False
+    for note,proof in notes.items():
+        if not re.fullmatch(r'[1-9][0-9]*',str(note)) or not isinstance(proof,dict):return False
+        cells=proof.get('cells',[])
+        if (len(cells)!=3 or re.sub(r'\s+','',cells[1])!='-'
+                or re.sub(r'\s+','',cells[2])!='주'+str(note)+')'
+                or any(type(proof.get(k)) is not int or proof[k]<0 for k in ['table','row'])):return False
+    return True
+
+
+def superseded_terms_evidence(day, chosen):
+    active=[item for item in day if '증권신고서' in item[0].get('report_nm','')
+        and '지분증권' in item[0].get('report_nm','')
+        and item[0]['rcept_no'] in chosen[2].get('related_receipts',[])
+        and chosen[0]['rcept_no'] in item[2].get('related_receipts',[])
+        and item[2]['corp_code']==chosen[2]['corp_code']]
+    if len(active)!=1 or '투자설명서' not in chosen[0].get('report_nm',''):return {}
+    latest=active[0];result={}
+    for m,body,proof in sorted(day,key=lambda item:item[0]['rcept_no']):
+        if (proof.get('content_scope','full')!='full' and '발행조건확정' in m.get('report_nm','')
+                and m['rcept_no']<min(latest[0]['rcept_no'],chosen[0]['rcept_no'])
+                and m['rcept_no'] not in chosen[2].get('related_receipts',[])
+                and proof['corp_code']==chosen[2]['corp_code']
+                and {latest[0]['rcept_no'],chosen[0]['rcept_no']}.issubset(proof.get('related_receipts',[]))):
+            result[m['rcept_no']]={'receipt':m['rcept_no'],'replacement_receipt':latest[0]['rcept_no'],
+                'complete_receipt':chosen[0]['rcept_no'],'published_at':m['rcept_dt'],
+                'rule':'same_day_explicit_active_related_terms_pair_v1',
+                'prior_related_receipts':proof['related_receipts'],
+                'complete_related_receipts':chosen[2]['related_receipts']}
+    return result
+
+
 def select_notice_band(complete, notices, price, *, complete_receipt=None):
     """A verified after-notice can fill an absent band, never override a conflict."""
     checks = []
@@ -51,8 +94,7 @@ def select_notice_band(complete, notices, price, *, complete_receipt=None):
         check = {'receipt':item['receipt'], 'linked':item['linked'],
                  'explicit_after_view':bool(item.get('view')), 'band':currency_band(document)}
         checks.append(check)
-        if not (item['linked'] and item.get('view')
-                and item['view'].get('rule') == 'explicit_marker_before_after_sections_v1'
+        if not (item['linked'] and verified_after_view(item.get('view'))
                 and confirmed_price(complete, price) and confirmed_price(document, price)):
             check['status'] = 'notice_link_view_or_confirmed_price_unverified'
             continue
@@ -79,10 +121,92 @@ def select_notice_band(complete, notices, price, *, complete_receipt=None):
     return complete, None, checks
 
 
+def historical_indicative_band(chosen, family, load, analyse, cutoff):
+    """Retain the last pre-bookbuilding range only through a checked filing lineage."""
+    from data.pipelines.stage_snapshots import available, local, demand_schedule, amendment_view, added_note_after_view
+
+    meta,body,origin=chosen
+    evidence={'rule':'pre_bookbuilding_band_checked_lineage_v1','checks':[]}
+    donor=None
+    try:
+        if available(meta)>=local(cutoff):raise ValueError('historical_band_final_document_not_available_at_cutoff')
+        start,end,schedule=demand_schedule(body)
+        pre_cutoff=local(start).normalize()-pd.Timedelta(hours=24 if 'scoped_windows' in schedule else 3)
+        ordered=sorted({m['rcept_no']:m for m in family if available(m)<local(cutoff)}.values(),
+                       key=lambda m:(m['rcept_dt'],m['rcept_no']))
+        terms=[m for m in ordered if re.search(r'증권신고서.*지분증권|투자설명서',m['report_nm'])]
+        eligible=[m for m in terms if available(m)<pre_cutoff]
+        if not eligible:raise ValueError('historical_band_pre_period_source_missing')
+        candidate=eligible[-1]
+        if any(re.search(r'철회|취소',m['report_nm']) and m['rcept_dt']>=candidate['rcept_dt'] for m in ordered):
+            raise ValueError('historical_band_withdrawal_crosses_lineage')
+        earlier_body,earlier_origin=load(candidate)
+        if (earlier_origin.get('content_scope','full')!='full'
+                or earlier_origin['corp_code']!=origin['corp_code']
+                or meta['rcept_no'] not in earlier_origin.get('related_receipts',[])):
+            raise ValueError('historical_band_pre_period_identity_or_scope_unverified')
+        announced_start,announced_end,announced_schedule=demand_schedule(earlier_body)
+        if (announced_start,announced_end)!=(start,end):
+            raise ValueError('historical_band_demand_round_conflict')
+        parsed=analyse(candidate,earlier_body,origin['corp_code'])['offering']
+        pair=currency_band(parsed)
+        if pair is None:raise ValueError('historical_band_latest_pre_period_range_unverified')
+        evidence.update(candidate_receipt=candidate['rcept_no'],candidate_origin=earlier_origin,
+            demand_start=str(start.date()),demand_end=str(end.date()),
+            pre_cutoff=pre_cutoff.isoformat(),announced_schedule=announced_schedule)
+        # Check the later full documents and every non-superseded after-view.
+        # A scalar final price is not an indicative range and cannot replace it.
+        days={}
+        for m in terms:
+            if (m['rcept_dt'],m['rcept_no'])<(candidate['rcept_dt'],candidate['rcept_no']):continue
+            b,p=load(m);days.setdefault(m['rcept_dt'],[]).append((m,b,p))
+        for day in days.values():
+            selected=next((item for item in day if item[0]['rcept_no']==meta['rcept_no']),None)
+            if selected is None:
+                full=[item for item in day if item[2].get('content_scope','full')=='full'
+                      and '투자설명서' in item[0].get('report_nm','')]
+                selected=max(full,key=lambda item:item[0]['rcept_no']) if full else None
+            superseded=superseded_terms_evidence(day,selected) if selected else {}
+            for m,b,p in day:
+                check={'receipt':m['rcept_no'],'origin':p};evidence['checks'].append(check)
+                if p['corp_code']!=origin['corp_code']:raise ValueError('historical_band_company_conflict')
+                if m['rcept_no']!=meta['rcept_no'] and meta['rcept_no'] not in p.get('related_receipts',[]):
+                    raise ValueError('historical_band_lineage_not_linked')
+                if m['rcept_no'] in superseded:
+                    check.update(status='explicitly_superseded_terms',supersession=superseded[m['rcept_no']]);continue
+                view=None
+                if p.get('content_scope','full')!='full':
+                    try:b,view=amendment_view(b)
+                    except ValueError as exc:
+                        if str(exc)!='correction_after_without_matching_before':raise
+                        b,view=added_note_after_view(b);view['strict_section_rejection']=str(exc)
+                    if not verified_after_view(view):raise ValueError('historical_band_after_view_unverified')
+                current=analyse(m,b,p['corp_code'])['offering'];current_pair=currency_band(current)
+                check.update(band=current_pair,after_view=view)
+                if (current.get('price_band_validation_status')=='conflicting_bands_review_required'
+                        or any(current.get(f) is not None for f in BAND_FIELDS[:2]) and current_pair is None):
+                    raise ValueError('historical_band_later_range_ambiguous')
+                if current_pair is not None and current_pair!=pair:
+                    raise ValueError('historical_band_later_range_conflict')
+                if p.get('content_scope','full')=='full':
+                    later_start,later_end,_=demand_schedule(b)
+                    if (later_start,later_end)!=(start,end):raise ValueError('historical_band_demand_round_conflict')
+                check['status']='same_indicative_range' if current_pair else 'no_replacement_range_in_checked_document'
+        donor={'metadata':candidate,'origin':earlier_origin,'document':parsed,'view':None,
+               'history':evidence}
+        evidence['status']='verified_historical_indicative_band'
+    except ValueError as exc:
+        evidence.update(status='historical_band_review_required',reason=str(exc))
+        if getattr(exc,'url',None):evidence['failed_url']=exc.url
+    except RequestException:
+        evidence.update(status='historical_band_review_required',reason='source_access_failed')
+    return donor,evidence
+
+
 def resolve_offering_band(raw, metadata, proof, price, listing_date, dart, *,
                           parsed_documents=None, primary_body=None):
     from data.pipelines.lockup_reconciliation import documents, original_body
-    from data.pipelines.stage_snapshots import amendment_view, document_analysis
+    from data.pipelines.stage_snapshots import amendment_view, added_note_after_view, document_analysis
 
     record = {'rcept_no':metadata['rcept_no'], 'corp_code':proof['corp_code'],
               'offering_price':price}
@@ -117,7 +241,12 @@ def resolve_offering_band(raw, metadata, proof, price, listing_date, dart, *,
     view_failure = None
     if same_day:
         try:
-            body,view = amendment_view(original_body(Path(raw),proof) if primary_body is None else primary_body)
+            original=original_body(Path(raw),proof) if primary_body is None else primary_body
+            try:body,view=amendment_view(original)
+            except ValueError as exc:
+                if str(exc)!='correction_after_without_matching_before':raise
+                body,view=added_note_after_view(original)
+                view['strict_section_rejection']=str(exc)
             notice = (document_analysis(dart,body,metadata['rcept_no'],str(proof['corp_code']),raw)['offering']
                       if parsed_documents is None else dart._parse_offering_html(body,metadata['rcept_no']))
             notices.append({'receipt':metadata['rcept_no'], 'document':notice, 'origin':proof,
@@ -125,6 +254,29 @@ def resolve_offering_band(raw, metadata, proof, price, listing_date, dart, *,
         except ValueError as exc:
             view_failure = str(exc)
     selected, donor, checks = select_notice_band(document,notices,price,complete_receipt=meta['rcept_no'])
+    history=None
+    if (currency_band(selected) is None and confirmed_price(selected,price)
+            and selected.get('price_band_validation_status')!='conflicting_bands_review_required'
+            and all(selected.get(f) is None for f in BAND_FIELDS[:2])):
+        from data.pipelines.stage_snapshots import read_document
+        family={m['rcept_no']:m for bundle in (proof,extra) for m in bundle.get('family',[])}
+        def load(m):return read_document(dart,raw,m,str(proof['corp_code']),True)
+        analyse=lambda m,b,c:document_analysis(dart,b,m['rcept_no'],c,raw)
+        try:
+            b,p=load(meta)
+            donor,history=historical_indicative_band((meta,b,p),family.values(),load,analyse,cutoff)
+        except (ValueError,RequestException) as exc:
+            history={'rule':'pre_bookbuilding_band_checked_lineage_v1','checks':[],
+                'status':'historical_band_review_required',
+                'reason':str(exc) if isinstance(exc,ValueError) else 'source_access_failed'}
+            if getattr(exc,'url',None):history['failed_url']=exc.url
+        if donor:
+            selected={**selected,**{f:donor['document'].get(f) for f in BAND_FIELDS}}
+        support=[]
+        for source in [history.get('candidate_origin'),*[c.get('origin') for c in history['checks']]]:
+            if source:
+                support.extend([{'url':source['source_url'],'sha256':source['index_sha256']},*source['sections']])
+        proof['band_support_sources']=list({s['url']:s for s in support}.values())
     result = dict.fromkeys((*BAND_FIELDS,'price_band_rcept_no','price_band_rcept_dt',
                            'price_band_source_url','price_band_source_sha256'))
     valid = currency_band(selected) is not None and confirmed_price(selected,price)
@@ -142,7 +294,7 @@ def resolve_offering_band(raw, metadata, proof, price, listing_date, dart, *,
     result['price_band_resolution_evidence'] = json.dumps({'checks':checks,
         'notice_view_failure':view_failure,'selected_after_view':donor['view'] if donor else None,
         'complete_receipt':base[0]['rcept_no'],'complete_band':currency_band(document),
-        'confirmed_price':price},ensure_ascii=False)
+        'confirmed_price':price,'historical_band':history},ensure_ascii=False)
     return result
 
 
@@ -172,7 +324,21 @@ def refresh_cached_band(raw_dir, processed_dir, dart=None):
                                                cwd=Path(__file__).parents[3])
             if hashlib.sha256(original).hexdigest() != previous[key]: return None
     else:
-        if any(previous.get(k) != contract[k] for k in {'record','resolver'}): return None
+        if previous.get('record') != contract['record']: return None
+        if previous.get('resolver') != contract['resolver']:
+            from data.pipelines.lockup_reconciliation import parser_snapshot
+            original=parser_snapshot(raw,previous['resolver'])
+            if original is None:return None
+            old_tree=ast.parse(original)
+            tree=ast.parse(Path(__file__).with_name('event_disclosures.py').read_text())
+            target=ast.parse("urls.update(source['url'] for source in proof.get('band_support_sources',[]))").body[0]
+            removed=0
+            for function in tree.body:
+                if isinstance(function,ast.FunctionDef) and function.name=='connect_event':
+                    before=len(function.body)
+                    function.body=[n for n in function.body if ast.dump(n,include_attributes=False)!=ast.dump(target,include_attributes=False)]
+                    removed+=before-len(function.body)
+            if removed!=1 or ast.dump(old_tree,include_attributes=False)!=ast.dump(tree,include_attributes=False):return None
         if previous['adapter'] != contract['adapter']:
             from data.pipelines.lockup_reconciliation import parser_snapshot
             source = parser_snapshot(raw,previous['adapter'])
@@ -195,7 +361,7 @@ def refresh_cached_band(raw_dir, processed_dir, dart=None):
     version = hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:20]
     checkpoints = raw/'band_field_repairs'/version
     dart = dart or DARTCollector(api_key='unused')
-    audit = []
+    audit = [];archive={}
     for index,row in rows.iterrows():
         old,proof = json.loads(row.record),json.loads(row.proof)
         capture_sources(raw,proof.get('sources',[]),{})
@@ -207,6 +373,14 @@ def refresh_cached_band(raw_dir, processed_dir, dart=None):
         else:
             metadata = next(m for m in proof['family'] if m['rcept_no'] == old['rcept_no'])
             resolved = resolve_offering_band(raw,metadata,proof,old['offering_price'],old['listing_date'],dart)
+            sources={s['url']:s for s in proof.get('sources',[])}
+            for source in proof.get('band_support_sources',[]):
+                cache=raw/'dart_connection_sources'/(hashlib.sha256(source['url'].encode()).hexdigest()+'.json')
+                saved=json.loads(cache.read_text())
+                if saved['url']!=source['url'] or hashlib.sha256(saved['text'].encode()).hexdigest()!=source['sha256']:
+                    raise RuntimeError('band_support_source_integrity_failed')
+                sources[source['url']]={'url':source['url'],'sha256':source['sha256'],'collected_at':saved.get('collected_at')}
+            proof['sources']=sorted(sources.values(),key=lambda s:s['url'])
             updated = {k:v for k,v in old.items() if not k.startswith('price_band_')}
             updated.update(resolved)
             proof['resolved_band'] = resolved
@@ -220,6 +394,8 @@ def refresh_cached_band(raw_dir, processed_dir, dart=None):
             atomic_json(path,{'event_id':row.event_id,'payload':payload,
                 'sha256':hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()})
         updated = payload['record']
+        old_urls={s['url'] for s in json.loads(row.proof).get('sources',[])}
+        capture_sources(raw,[s for s in payload['proof'].get('sources',[]) if s['url'] not in old_urls],archive)
         if {k:v for k,v in old.items() if not k.startswith('price_band_')} != {
                 k:v for k,v in updated.items() if not k.startswith('price_band_')}:
             raise RuntimeError('band_field_unrelated_value_changed')
@@ -240,7 +416,7 @@ def refresh_cached_band(raw_dir, processed_dir, dart=None):
         pd.read_parquet(parent/'events.parquet').to_parquet(staging/'events.parquet',index=False)
         feature_tasks(rows.to_dict('records')).to_parquet(staging/'feature_tasks.parquet',index=False)
         pd.DataFrame(audit).to_parquet(staging/'band_reprocessing.parquet',index=False)
-        atomic_json(staging/'source_documents.json',{})
+        atomic_json(staging/'source_documents.json',archive)
         amended = {**report,'version':version,'amendment':identity,'replay_contract':contract,
             'source_archive_policy':'parent_manifest_archive_plus_amendment_originals',
             'band_field_reprocessing':{'processed':len(rows),'unrelated_fields_unchanged':True,

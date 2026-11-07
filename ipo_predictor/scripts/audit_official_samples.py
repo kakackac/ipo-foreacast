@@ -166,11 +166,55 @@ def verify_record(record, reference):
     return problems
 
 
+def audit_band_origins():
+    """Replay reviewed band-source connections from cached official originals."""
+    import pandas as pd
+    from data.pipelines.reconciled_dataset import pin_connections
+    from data.pipelines.stage_snapshots import read_document, document_analysis, stage_documents, values_from_document
+    from data.pipelines.band_source_resolver import resolve_offering_band, currency_band
+    from data.pipelines.financial_history import atomic_json
+
+    root=Path(__file__).resolve().parents[1]
+    raw=root/'data/raw';processed=root/'data/processed'
+    source,_=pin_connections(processed)
+    rows=pd.read_parquet(source/'connection_results.parquet').set_index('event_id')
+    references=json.loads(Path(__file__).with_name('official_sample_expectations.json').read_text())['band_origin_samples']
+    collector=DARTCollector(api_key='unused');checks=[]
+    for sample in references:
+        row=rows.loc[sample['event_id']];record=json.loads(row.record);proof=json.loads(row.proof)
+        family={m['rcept_no']:m for bundle in (proof,proof.get('supplementary',{})) for m in bundle.get('family',[])}
+        def load(m):return read_document(collector,raw,m,str(record['corp_code']),True)
+        analyse=lambda m,b,c:document_analysis(collector,b,m['rcept_no'],c,raw)
+        post=stage_documents(list(family.values()),load,record['listing_date'],analyse=analyse)['post_demand']
+        if post['status']!='historical_document_selected':raise ValueError('sample_post_document_not_selected')
+        values,_=values_from_document(collector,post,str(record['corp_code']),'post_demand')
+        main=resolve_offering_band(raw,family[record['rcept_no']],proof,record['offering_price'],record['listing_date'],collector)
+        expected=tuple(sample['expected_band'])
+        if (currency_band(main)!=expected or currency_band(post['analysis']['offering'])!=expected
+                or main['price_band_rcept_no']!=sample['band_receipt']
+                or post['metadata']['rcept_no']!=sample['complete_receipt']
+                or post['proof']['result_field_sources']['price_band_low']['receipt']!=sample['band_receipt']
+                or not math.isclose(values['offering_price_band_position'],sample['expected_post_position'],abs_tol=1e-12)):
+            raise ValueError('official_band_origin_sample_mismatch:'+sample['company'])
+        checks.append({'company':sample['company'],'event_id':sample['event_id'],
+            'band':list(expected),'band_receipt':sample['band_receipt'],
+            'post_receipt':post['metadata']['rcept_no'],'main_evidence':json.loads(main['price_band_resolution_evidence']),
+            'post_band_origin':post['proof']['result_field_sources']['price_band_low']})
+    result={'samples_checked':len(checks),'checks':checks,'cached_only':True,'passed':True,
+        'training_executed':False,'deployment_authorized':False}
+    atomic_json(processed/'band_origin_sample_audit.json',result)
+    print(json.dumps({k:v for k,v in result.items() if k!='checks'},ensure_ascii=False))
+
+
 def main():
     arguments = argparse.ArgumentParser(description=__doc__)
     arguments.add_argument("--cached-only", action="store_true")
     arguments.add_argument("--sample", choices=SAMPLES, action="append")
+    arguments.add_argument("--band-origins", action="store_true", help="Replay the reviewed cached band-origin cases only")
     args = arguments.parse_args()
+    if args.band_origins:
+        if args.sample or not args.cached_only:arguments.error('--band-origins requires --cached-only without --sample')
+        audit_band_origins();return
     output = Path(__file__).resolve().parents[1] / "data/raw/official_sample_audit"
     output.mkdir(parents=True, exist_ok=True)
     collector = DARTCollector(api_key="unused_public_audit")

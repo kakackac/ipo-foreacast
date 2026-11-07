@@ -238,26 +238,13 @@ def result_day_document(metadata, terms, load, analyse=None):
             'comparison':'linked_same_day_registration_not_silently_skipped',
             'price_finality':other_price.get('offering_price_finality'),
             'institutional_status':other_demand.get('institutional_demand_parser_validation_status')})
-    active=[item for item in day if '증권신고서' in item[0].get('report_nm','')
-        and '지분증권' in item[0].get('report_nm','')
-        and item[0]['rcept_no'] in chosen[2].get('related_receipts',[])
-        and chosen[0]['rcept_no'] in item[2].get('related_receipts',[])
-        and item[2]['corp_code']==chosen[2]['corp_code']]
+    from data.pipelines.band_source_resolver import superseded_terms_evidence
+    prior_terms=superseded_terms_evidence(day,chosen)
     superseded=[]
-    latest=active[0] if len(active)==1 else None
     for m,body,proof in sorted(day,key=lambda item:item[0]['rcept_no']):
         if proof.get('content_scope','full')=='full':continue
-        if (latest is not None and '발행조건확정' in m.get('report_nm','')
-                and '투자설명서' in chosen[0].get('report_nm','')
-                and m['rcept_no']<min(latest[0]['rcept_no'],chosen[0]['rcept_no'])
-                and m['rcept_no'] not in chosen[2].get('related_receipts',[])
-                and proof['corp_code']==chosen[2]['corp_code']
-                and {latest[0]['rcept_no'],chosen[0]['rcept_no']}.issubset(proof.get('related_receipts',[]))):
-            superseded.append({'receipt':m['rcept_no'],'replacement_receipt':latest[0]['rcept_no'],
-                'complete_receipt':chosen[0]['rcept_no'],'published_at':m['rcept_dt'],
-                'rule':'same_day_explicit_active_related_terms_pair_v1',
-                'prior_related_receipts':proof['related_receipts'],
-                'complete_related_receipts':chosen[2]['related_receipts']})
+        if m['rcept_no'] in prior_terms:
+            superseded.append(prior_terms[m['rcept_no']])
             continue
         linked=(m['rcept_no'] in chosen[2].get('related_receipts',[])
                 and chosen[0]['rcept_no'] in proof.get('related_receipts',[])
@@ -567,6 +554,30 @@ def stage_documents(family, load, listing, anchor=None, analyse=None):
                 if (analysis['demand'].get('institutional_demand_parser_validation_status')!='structurally_verified'
                         or analysis['offering'].get('offering_price_finality')!='confirmed_price_language'):
                     raise ValueError('later_pre_prediction_amendment_not_verified')
+            from data.pipelines.band_source_resolver import historical_indicative_band, currency_band, BAND_FIELDS
+            offering=analysis['offering']
+            if (currency_band(offering) is None
+                    and offering.get('price_band_validation_status')!='conflicting_bands_review_required'
+                    and all(offering.get(f) is None for f in BAND_FIELDS[:2])):
+                analyser=analyse or (lambda m,b,c:document_analysis(DARTCollector(api_key='unused'),b,m['rcept_no'],c))
+                donor,history=historical_indicative_band((metadata,body,proof),ordered,load,analyser,cutoff)
+                proof['historical_band_selection']=history
+                if donor:
+                    offering.update({f:donor['document'].get(f) for f in BAND_FIELDS})
+                    def component(origin):
+                        return {k:origin[k] for k in ('receipt','corp_code','published_at','available_at',
+                                                     'source_url','index_sha256','sections')}
+                    band_origin={**component(donor['origin']),'band_after_view':None,
+                        'source_selection_rule':history['rule'],'band_history':history}
+                    sources=proof.setdefault('result_field_sources',{})
+                    for f in ('price_band_low','price_band_high'):sources[f]=band_origin
+                    price_origin=component(proof)
+                    sections={s['url']:s for source in (price_origin,band_origin) for s in source['sections']}
+                    for f in ('offering_price_band_position','band_exceeded'):
+                        sources[f]={**price_origin,'sections':list(sections.values()),
+                            'available_at':max(local(price_origin['available_at']),local(band_origin['available_at'])).isoformat(),
+                            'component_sources':{'band':band_origin,'price':price_origin},
+                            'source_selection_rule':'band_and_confirmed_price_independent_origins_v1'}
             output['post_demand'] = {'status':'historical_document_selected','metadata':metadata,
                 'html':body,'proof':proof,'analysis':analysis,'prediction_at':cutoff,
                 'demand_result_available_at':result_available,'post_stage_not_before':post_not_before,

@@ -96,7 +96,7 @@ def connection_contract():
     import ast
     selection = {}
     for filename,names in [('lockup_reconciliation.py',{'documents','original_body'}),
-                           ('stage_snapshots.py',{'amendment_view'})]:
+                           ('stage_snapshots.py',{'amendment_view','added_note_after_view'})]:
         tree = ast.parse(here.with_name(filename).read_text())
         selected = {node.name:ast.dump(node,include_attributes=False) for node in tree.body
                     if isinstance(node,ast.FunctionDef) and node.name in names}
