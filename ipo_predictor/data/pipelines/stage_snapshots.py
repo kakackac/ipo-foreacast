@@ -22,7 +22,7 @@ from data.collectors.dart_collector import DARTCollector, _TableRowParser
 from data.pipelines.data_delivery import checked_artifact, digest
 from data.pipelines.disclosure_connections import public_text, viewer_identity
 from data.pipelines.financial_history import atomic_json, summarize_asof, FINANCIAL_STATUS
-from data.pipelines.disclosure_financials import select_financial_node, parse_disclosure_financials, validate_financial_section_response, financial_records
+from data.pipelines.disclosure_financials import select_financial_node, parse_disclosure_financials, validate_financial_section_response, financial_records, financial_document_structure_contract
 from data.pipelines.reconciled_dataset import pin_connections
 from data.pipelines.underwriter_source import parse_underwriters
 from features.model_profiles import get_model_profile
@@ -789,6 +789,7 @@ def financials_from_selected_document(dart,raw,selected,corp,cached_only):
         raise ValueError('stage_financial_section_identity_invalid')
     html,sha=section_text(dart,source,cache,cached_only,financial=True)
     identity={'body':sha,'receipt':receipt,'corp_code':corp,'published_at':origin['published_at'],
+              'document_structure':financial_document_structure_contract(),
               'parser':digest(Path(__file__).with_name('disclosure_financials.py'))}
     parsed_cache=Path(raw)/'stage_financial_analyses'/(hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()+'.json')
     if parsed_cache.exists():
@@ -797,7 +798,8 @@ def financials_from_selected_document(dart,raw,selected,corp,cached_only):
             raise RuntimeError('stage_financial_analysis_integrity_failed')
         return pd.DataFrame(result['records']),result['evidence']
     diagnostics={}
-    frame=parse_disclosure_financials(html,corp,receipt,origin['published_at'],source,diagnostics)
+    frame=parse_disclosure_financials(html,corp,receipt,origin['published_at'],source,diagnostics,
+        document_cache=Path(raw)/'financial_document_geometry')
     if not frame.empty:
         stored=json.loads((cache/(hashlib.sha256(source.encode()).hexdigest()+'.json')).read_text())
         frame['source_collected_at']=stored.get('collected_at')
@@ -847,6 +849,7 @@ def stage_checkpoint_identity(event, identity, index_hash, annual_history, targe
         'index':index_hash,
         'annual':hashlib.sha256(annual_history.to_json(orient='records',date_format='iso').encode()).hexdigest(),
         'annual_parser_reusable':bool(reusable_annual_parser),
+        'document_structure':identity.get('financial_document_structure'),
         'target':target[['offering_price','open_return_pct','close_return_pct','listing_date']].to_json(date_format='iso')}
 
 
@@ -913,6 +916,7 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
     accounts=pd.read_parquet(accounts_path)
     dart=dart or DARTCollector();rows=[];ledger=[];attempts=[];milestones=[]
     identity={'policy':POLICY,'sources':digest(source/'manifest.json'),'dataset':digest(dataset),
+              'financial_document_structure':financial_document_structure_contract(),
               'accounts':digest(accounts_path),'builder':digest(__file__), 'parser':digest(Path(__file__).parents[1]/'collectors/dart_collector.py')}
     dependencies={'time_contract':Path(__file__).parents[2]/'features/prediction_time_contract.py',
         'profiles':Path(__file__).parents[2]/'features/model_profiles.py',
@@ -1065,6 +1069,7 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
             'sha256':hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()})
         if len(rows)%100==0:print(json.dumps({'stage_events_processed':len(rows)//2,'population':len(records)}),flush=True)
     if (pointer_hashes!={name:digest(processed/name) for name in pointer_names}
+            or identity['financial_document_structure']!=financial_document_structure_contract()
             or identity['builder']!=digest(__file__)
             or identity['parser']!=digest(Path(__file__).parents[1]/'collectors/dart_collector.py')
             or identity['dependency_sha256']!={name:digest(path) for name,path in dependencies.items()}):

@@ -11,8 +11,20 @@ from data.pipelines.financial_history import atomic_json, summarize_asof
 from data.pipelines.disclosure_connections import viewer_identity
 
 
-# Amounts below were read from the original summary tables, not parser output.
+# Amounts below were read from original issuer statements, not parser output.
 SAMPLES = [
+    ('디앤씨미디어', '01186404', '20170721000127', '2017-07-31 21:00', 2016,
+     [18893266114, 3693827393, 9632000000, 2864000000, 6769000000, 3011991038]),
+    ('우진아이엔에스', '00143262', '20180904000072', '2018-09-13 21:00', 2017,
+     [140446264438, 22811552380, 97690983885, 20686984883, 77003999002, 16845827865]),
+    ('클리노믹스', '01201970', '20201120000295', '2020-12-03 21:00', 2019,
+     [4101115062, -4492065268, 26935607774, 21885905205, 5049702569, -5760155545]),
+    ('한켐', '01016309', '20241002000206', '2024-10-21 21:00', 2023,
+     [26940818816, 5021083704, 30916487835, 10212029630, 20704458205, 4160972900]),
+    ('명인제약', '00179489', '20250917000213', '2025-09-30 21:00', 2024,
+     [269434788789, 92754381974, 581691991637, 49871470841, 531820520796, 68670651454]),
+    ('달바글로벌', '01649204', '20250508000654', '2025-05-21 21:00', 2024,
+     [309063000000, 59845000000, 136108000000, 34039000000, 102069000000, 15409000000]),
     ('엔에스쇼핑', '00406392', '20150312000834', '2015-03-26 21:00', 2013,
      [347135000000, 69534000000, 336642000000, 109236000000, 227406000000, 54619000000]),
     ('파멥신', '00972293', '20181108000408', '2018-11-20 21:00', 2017,
@@ -36,6 +48,24 @@ SAMPLES = [
 # Reviewed original annual cells: scope, year, revenue, operating income, assets.
 # A None income pair explicitly checks that interim-only income stays absent.
 BASIS_SAMPLES = [
+    ('전진건설로봇', '00372129', '20240807000292',
+     '48f65bca5496a43df10f469a9da642138d5a4a79108ed1fca8d115db44fe1f1b',
+     [('CFS', 2023, 158370290546, 32904822481, 158316498662),
+      ('OFS', 2023, 158079710420, 32920653826, 157583434174)], {2023}),
+    ('두올', '00119672', '20160715000252',
+     'c6f66ec26bed267290919d2cf759e36eb6c46862277eb37621757577f66224a9',
+     [('CFS', 2015, 366288000000, 26056000000, 230283000000),
+      ('CFS', 2014, 316832000000, 18397000000, 208984000000),
+      ('OFS', 2015, 197562000000, 2553000000, 184920000000)], {2014, 2015}),
+    ('앤디포스', '00942131', '20160929000463',
+     'daa4ed23055912bc57747606e7feef7a1e3c7331296676c7e8ba150de2bf2d92',
+     [('OFS', 2015, 57457561947, 16343803656, 34925025091)], {2015}),
+    ('LG에너지솔루션', '01515323', '20220114000408',
+     'dbdcd980a3eeeb9100fa42d6d631371cd97acb759c1179e2203a527165ce0913',
+     [('CFS', 2020, None, None, 19941795000000)], {2020}),
+    ('디티에스', '00534729', '20261012000323',
+     'e83b38f7b396005341134dc3d4d31fdeb4fc77b1c20e9020484c011ee5d75e22',
+     [('OFS', 2025, None, None, 167871407282)], {2025}),
     ('에치디프로', '00820389', '20150930000232',
      'e4d81fded831a7617feb383ab9fe0b47ddc466653fc17c1c906020b77aef4d37',
      [('OFS', 2014, 66063000000, 3738000000, 32094000000),
@@ -53,8 +83,8 @@ BASIS_SAMPLES = [
       ('OFS', 2023, 5112688400000, 373164112000, 3689410848000)], {2023}),
     ('미래에셋생명', '00112332', '20150626000234',
      '10b651330dd54a4fa8dddb91b0b1a2fb7e2b2fe90a04da3720baf79a5ba0ca6f',
-     [('CFS', 2014, None, None, 24681134224854),
-      ('OFS', 2014, None, None, 24080044889046)], {2014}),
+     [('CFS', 2014, 3928349000000, 151667000000, 24681134000000),
+      ('OFS', 2014, 3692466000000, 84574000000, 24080045000000)], {2014}),
     ('명인제약', '00179489', '20250917000213',
      'eae5a6093be90a853c9b6939fa1c5ca7bf17feaacc7015337f593dd99989c5e2',
      [('CFS', 2024, 269434788789, 92754381974, 581691991637),
@@ -114,7 +144,12 @@ def main():
                       for key, value in zip(fields, expected) if result.get(key) != value}
         if result.get('financial_as_of_year') != year:
             mismatches['financial_as_of_year'] = {'expected': year, 'actual': result.get('financial_as_of_year')}
-        if digest != payload.get('sha256') or payload.get('issuer') != issuer:
+        index=json.loads((cache.parent/'dart_connection_sources'/
+                          (hashlib.sha256(payload['index_url'].encode()).hexdigest()+'.json')).read_text())
+        viewer_identity(index['text'],receipt,corp,payload['official_publication_date'])
+        if (digest != payload.get('sha256') or payload.get('official_corp_code') != corp
+                or hashlib.sha256(index['text'].encode()).hexdigest()!=index['sha256']
+                or index['sha256']!=payload['index_sha256']):
             mismatches['source_integrity'] = False
         failed |= bool(mismatches)
         record = {'issuer': issuer, 'receipt': receipt, 'source_url': payload['source_url'],

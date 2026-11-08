@@ -3,7 +3,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
@@ -43,6 +43,44 @@ def financial_index(receipt='20230315000001',date='2023.03.15',corp='12345678',n
 
 
 class DisclosureFinancialTests(unittest.TestCase):
+    def test_document_geometry_reuse_does_not_reuse_financial_approval(self):
+        from data.pipelines import disclosure_financials as module
+        body='1. 요약별도재무정보 (단위: 원)'+table(summary())
+        with tempfile.TemporaryDirectory() as root,patch.object(module,'BeautifulSoup',wraps=module.BeautifulSoup) as soup,patch.object(
+                module,'primary_annual_balances',wraps=module.primary_annual_balances) as interpretation:
+            first=module.parse_disclosure_financials(body,'12345678','20230315000001','2023-03-15','official',document_cache=root)
+            second=module.parse_disclosure_financials(body,'12345678','20230315000001','2023-03-15','official',document_cache=root)
+            pd.testing.assert_frame_equal(first,second)
+            self.assertEqual(soup.call_count,1);self.assertEqual(interpretation.call_count,2)
+
+    def test_document_geometry_invalidates_changed_body_or_contract_and_rejects_corruption(self):
+        from data.pipelines import disclosure_financials as module
+        with tempfile.TemporaryDirectory() as root:
+            module.financial_document_structure('<table><tr><td>one</td></tr></table>',root)
+            module.financial_document_structure('<table><tr><td>two</td></tr></table>',root)
+            self.assertEqual(len(list(Path(root).glob('*.json'))),2)
+            with patch.object(module,'financial_document_structure_contract',return_value='changed'):
+                module.financial_document_structure('<table><tr><td>one</td></tr></table>',root)
+            self.assertEqual(len(list(Path(root).glob('*.json'))),3)
+            for path in Path(root).glob('*.json'):
+                saved=json.loads(path.read_text());saved['result']['tables']=[];path.write_text(json.dumps(saved))
+            with self.assertRaisesRegex(RuntimeError,'document_structure_integrity_failed'):
+                module.financial_document_structure('<table><tr><td>one</td></tr></table>',root)
+
+    def test_document_geometry_contract_excludes_approval_rules_but_tracks_normalizer_and_runtime(self):
+        from data.pipelines import disclosure_financials as module
+        before=module.financial_document_structure_contract()
+        with patch.object(module,'ifrs_preparation_statements',return_value=[]):
+            self.assertEqual(module.financial_document_structure_contract(),before)
+        original=module.clean
+        def changed(value):return original(value)
+        with patch.object(module,'clean',changed):
+            self.assertNotEqual(module.financial_document_structure_contract(),before)
+        with patch.object(module.bs4,'__version__','changed'):
+            self.assertNotEqual(module.financial_document_structure_contract(),before)
+        with patch.dict(module.ACCOUNTS,{'새계정':'net_income'}):
+            self.assertNotEqual(module.financial_document_structure_contract(),before)
+
     def interim_comparative(self):
         html='2. 연결재무제표 연결재무상태표 '
         html+='제14기 3분기 2023년 9월 30일 현재 제13기 2022년 12월 31일 현재 (단위: 원)'
@@ -74,6 +112,71 @@ class DisclosureFinancialTests(unittest.TestCase):
             with self.subTest(replacement=replacement):
                 html=self.interim_comparative().replace(original,replacement)
                 self.assertTrue(parse_disclosure_financials(html,'12345678','20231101000001','2023-11-01','official').empty)
+
+    def test_statutory_issuer_preparation_keeps_scope_and_annual_columns(self):
+        base='1. 요약연결재무정보 (단위: 원)'+table(summary(standard=False))
+        note=('연결실체는 주식회사의외부감사에관한법률 제13조에서 규정하고 있는 '
+              '국제회계기준위원회의 기준을 채택하여 정한 한국채택국제회계기준에 따라 연결재무제표를 작성하였습니다.')
+        frame=parse(base+note)
+        self.assertEqual(len(frame),6);self.assertEqual(set(frame.fs_div),{'CFS'})
+        self.assertEqual(len(parse(base+'종속기업의 현황은 주석4에서 설명하고 있습니다. 2. 재무제표 작성기준 '+note)),6)
+        for body in [base.replace('요약연결','요약별도')+note,
+                     base+note.replace('작성하였습니다','작성할 예정입니다'),
+                     base+note.replace('연결실체는','비교회사의 연결실체는'),
+                     base+note.replace('연결실체는','종속회사인 회사는')]:
+            with self.subTest(body=body[-120:]):self.assertTrue(parse(body).empty)
+        ofs='1. 요약별도재무정보 (단위: 원)'+table(summary(standard=False))
+        self.assertEqual(len(parse(ofs+note.replace('연결실체는','당사는').replace('연결재무제표','재무제표'))),6)
+        self.assertTrue(parse(base.replace('2022년','2022년 반기')+note).empty)
+
+    def test_consolidated_total_net_income_is_not_owner_specific_income(self):
+        body='1. 요약연결재무정보 (단위: 원)'+table(summary())
+        total=body.replace('당기순이익','연결총당기순이익')
+        frame=parse(total)
+        self.assertEqual(frame.loc[frame.account_name_en.eq('net_income'),'amount'].tolist(),[-60])
+        for label in ['지배기업소유주에게귀속되는당기순이익','비지배지분당기순이익']:
+            self.assertNotIn('net_income',parse(body.replace('당기순이익',label)).account_name_en.tolist())
+
+    def test_interim_1034_parentheses_and_annual_period_wording(self):
+        html=self.interim_comparative().replace(
+            '한국채택국제회계기준','한국채택국제회계기준 기업회계기준서 제1034호(중간재무보고)')
+        html=html.replace('종료하는 회계연도','종료되는 회계기간')
+        frame=parse_disclosure_financials(html,'12345678','20231101000001','2023-11-01','official')
+        self.assertEqual(len(frame),6);self.assertEqual(set(frame.year),{2022})
+        for original,replacement in [('제1034호','제9999호'),('연차연결재무제표','연차별도재무제표'),
+                ('2022년 12월 31일로','2021년 12월 31일로'),('연차연결재무제표','분기연결재무제표'),
+                ('따라 작성되었습니다','따라 작성할 예정입니다')]:
+            with self.subTest(replacement=replacement):
+                self.assertTrue(parse_disclosure_financials(html.replace(original,replacement),
+                    '12345678','20231101000001','2023-11-01','official').empty)
+        no_label=html.replace('요약분기연결','중간요약연결').replace('(중간재무보고)','')
+        self.assertEqual(len(parse_disclosure_financials(no_label,'12345678','20231101000001','2023-11-01','official')),6)
+
+    def test_explicit_previous_annual_reference_without_end_suffix(self):
+        html=self.interim_comparative().replace('2022년 12월 31일로 종료하는 회계연도에 대한 연차연결재무제표',
+                                              '전기 연차연결재무제표')
+        frame=parse_disclosure_financials(html,'12345678','20231101000001','2023-11-01','official')
+        self.assertEqual(len(frame),6);self.assertEqual(set(frame.year),{2022})
+        for original,replacement in [('전기 연차연결','전기 연결'),('전기 연차연결','전기 연차별도'),
+                ('한국채택국제회계기준','일반기업회계기준')]:
+            with self.subTest(replacement=replacement):
+                self.assertTrue(parse_disclosure_financials(html.replace(original,replacement),
+                    '12345678','20231101000001','2023-11-01','official').empty)
+
+    def test_verified_primary_annual_framework_reaches_summary_when_primary_columns_are_unhandled(self):
+        summary_html='1. 요약연결재무정보 (단위: 원)'+table(summary(standard=False))
+        primary=self.interim_comparative().replace('<td>제13기</td>','<td>전기</td>')
+        html=summary_html+primary
+        frame=parse_disclosure_financials(html,'12345678','20231101000001','2023-11-01','official')
+        self.assertEqual(len(frame),6);self.assertEqual(set(frame.year),{2022})
+        self.assertTrue(frame.extraction_rule_id.eq('summary_issuer_statement_scope_v2').all())
+        self.assertTrue(frame.accounting_standard_evidence.str.contains('same_scope_ifrs_interim_prior_annual_comparative_v1').all())
+        for body in [html.replace('요약연결재무정보','요약별도재무정보'),
+                     html.replace('2022년 12월 31일로 종료하는','2021년 12월 31일로 종료하는'),
+                     html.replace('요약연결재무정보','요약연결재무정보 K-GAAP'),
+                     html.replace('따라 작성되었습니다','따라 작성할 예정입니다')]:
+            with self.subTest(body=body[-100:]):
+                self.assertTrue(parse_disclosure_financials(body,'12345678','20231101000001','2023-11-01','official').empty)
 
     def test_interim_comparative_cannot_override_explicit_gaap_or_invent_full_year_income(self):
         html=self.interim_comparative().replace("<td>제13기</td>","<td>제13기 K-GAAP</td>")
@@ -334,6 +437,16 @@ class DisclosureFinancialTests(unittest.TestCase):
         html='<p>2. 연결재무제표</p><p>3. 연결재무제표 주석</p><p>연결재무제표는 한국채택국제회계기준에 따라 작성되었습니다.</p>'+body
         self.assertTrue(parse(html).empty)
 
+    def test_intertable_scope_boundaries_do_not_reassign_previous_notes(self):
+        balance=table([['재무상태표'],['제13기 2022년 12월 31일 현재'],['회사 (단위: 원)']])
+        balance+=table([['과목','제13기말'],['자산총계','300'],['부채총계','100'],['자본총계','200']])
+        note='재무제표는 한국채택국제회계기준에 따라 작성되었습니다.'
+        crossing='2. 연결재무제표 3. 연결재무제표 주석 '+note+'4. 재무제표 '+balance
+        self.assertTrue(parse(crossing).empty)
+        cfs='2. 연결재무제표 '+balance+'3. 연결재무제표 주석 4. 재무제표 작성기준 '+note
+        frame=parse(cfs)
+        self.assertEqual(set(frame.fs_div),{'CFS'});self.assertEqual(len(frame),3)
+
     def test_partial_summary_does_not_prevent_a_coherent_primary_statement_group(self):
         balance=table([['재무상태표'],['제13기 2022년 12월 31일 현재'],['회사 (단위: 원)']])
         balance+=table([['과목','제13기말'],['자산총계','300000001'],['부채총계','100000001'],['자본총계','200000000']])
@@ -352,6 +465,50 @@ class DisclosureFinancialTests(unittest.TestCase):
         self.assertEqual(len(details['official_statement_amount_conflicts']),1)
         predecessor=parse(html.replace('제13기 2022','제13기(분할전) 2022'))
         self.assertNotIn('revenue',predecessor.get('account_name_en',pd.Series(dtype=str)).tolist())
+
+    def test_complete_precise_primary_group_is_not_replaced_by_rounded_summary(self):
+        summary_rows=summary(standard=False);summary_rows[-2]=['영업이익','50'];summary_rows[-1]=['당기순이익','40']
+        summary_html='1. 요약연결재무정보 (단위: 백만원)'+table(summary_rows)
+        primary=self.interim_comparative()
+        for old,new in [('300','300000001'),('100','100000001'),('200','200000000'),
+                        ('1000','1000000000'),('50','50000000'),('40','40000000')]:
+            primary=primary.replace('<td>'+old+'</td>','<td>'+new+'</td>')
+        frame=parse(summary_html+primary)
+        self.assertEqual(frame.loc[frame.account_name_en.eq('total_assets'),'amount'].tolist(),[300000001])
+        self.assertTrue(frame.extraction_rule_id.eq('detailed_annual_period_and_basis_v1').all())
+        incomplete=primary.replace('<tr><td>당기순이익</td><td>36</td><td>40000000</td></tr>','')
+        frame=parse(summary_html+incomplete)
+        self.assertEqual(frame.loc[frame.account_name_en.eq('total_assets'),'amount'].tolist(),[300000000])
+        self.assertEqual(frame.loc[frame.account_name_en.eq('net_income'),'amount'].tolist(),[40000000])
+
+    def test_partial_verified_summary_does_not_hide_complete_primary_income(self):
+        summary_rows=summary(standard=False)
+        summary_rows[-2]=['영업이익','50']
+        summary_rows=summary_rows[:-1]
+        head='1. 요약연결재무정보 (단위: 원)'+table(summary_rows)
+        primary=self.interim_comparative()
+        frame=parse(head+primary)
+        income=frame[frame.account_name_en.isin(['revenue','operating_income','net_income'])]
+        self.assertEqual(set(income.account_name_en),{'revenue','operating_income','net_income'})
+        self.assertTrue(income.extraction_rule_id.eq('detailed_annual_period_and_basis_v1').all())
+        self.assertEqual(income[income.account_name_en.eq('net_income')].amount.tolist(),[40])
+        conflict=primary.replace('<td>50</td>','<td>500</td>')
+        self.assertTrue(parse(head+conflict).empty)
+
+    def test_shared_primary_framework_retains_precision_for_both_statement_scopes(self):
+        rows=summary(standard=False);rows[-2]=['영업이익','50'];rows[-1]=['당기순이익','40']
+        head='1. 요약연결재무정보 (단위: 백만원)'+table(rows)
+        head+='나. 요약별도재무정보 (단위: 백만원)'+table(rows)
+        cfs=self.interim_comparative()
+        for old,new in [('300','300000001'),('100','100000001'),('200','200000000'),
+                        ('1000','1000000000'),('50','50000000'),('40','40000000')]:
+            cfs=cfs.replace('<td>'+old+'</td>','<td>'+new+'</td>')
+        ofs=cfs.replace('2. 연결재무제표','4. 재무제표').replace('3. 연결재무제표 주석','5. 재무제표 주석').replace('연결','')
+        frame=parse(head+cfs+ofs)
+        for scope in ['CFS','OFS']:
+            with self.subTest(scope=scope):
+                assets=frame[frame.fs_div.eq(scope)&frame.account_name_en.eq('total_assets')]
+                self.assertEqual(assets.amount.tolist(),[300000001])
 
     def test_adjacent_explicit_ifrs_preparation_basis_variant(self):
         html='1. 요약연결재무정보 (단위: 원)'+table(summary(standard=False))
