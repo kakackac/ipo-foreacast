@@ -1,6 +1,9 @@
 """Reprocess official annual sections without replacing the production version."""
 import hashlib
 import json
+import errno
+import os
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -8,9 +11,10 @@ import pandas as pd
 
 from data.collectors.dart_collector import DARTCollector
 from data.pipelines.data_delivery import checked_artifact, digest
-from data.pipelines.disclosure_financials import collect_disclosure_financials
+from data.pipelines.disclosure_financials import collect_disclosure_financials, financial_document_structure_contract
 from data.pipelines.financial_history import FINANCIAL_STATUS, atomic_json, get_annual_history, summarize_asof
 from data.pipelines.historical_reconciliation import load_inputs
+from data.pipelines.reconciliation_publication import reference_path
 
 
 def missing_category(status, details):
@@ -39,7 +43,7 @@ def missing_category(status, details):
 
 def unresolved_event_ids(processed, fallback):
     """Use the latest verified cohort, not the original 632-row repair's hold list."""
-    pointer=Path(processed)/'current_reconciliation_run.json'
+    pointer=reference_path(Path(processed)/'current_reconciliation_run.json')
     if not pointer.exists():return set(fallback.loc[fallback.missing_category.ne('not_missing'),'event_id']),set(fallback.event_id),fallback
     reference=json.loads(pointer.read_text());manifest=(Path(processed)/reference['manifest']).resolve()
     if not manifest.is_relative_to(Path(processed).resolve()/'reconciliation_runs') or digest(manifest)!=reference['sha256']:
@@ -66,6 +70,57 @@ def connected_lineage(connections):
     return pd.DataFrame(rows).drop_duplicates(['event_id','corp_code','rcept_no'])
 
 
+def reuse_inputs(raw, targets, records, lineage, inputs, code):
+    events=[{'event_id':r.event_id,'corp_code':str(records.loc[r.event_id].corp_code),
+             'corp_name':r.corp_name,'listing_date':pd.Timestamp(r.listing_date).isoformat()}
+            for r in targets.sort_values('event_id').itertuples(index=False)]
+    files={};future_cache=False
+    for folder in ('dart_connection_sources','dart_ipo_financial_sections','dart_financial_sources',
+                   'dart_financial_parsed','financial_document_geometry'):
+        for path in sorted((raw/folder).rglob('*.json')):
+            files[str(path.relative_to(raw))]=digest(path)
+            if folder=='dart_financial_sources':
+                try:
+                    stamp=pd.to_datetime(json.loads(path.read_text()).get('collected_at'),utc=True)
+                    future_cache=future_cache or bool(pd.notna(stamp) and stamp>pd.Timestamp.now(tz='UTC'))
+                except (ValueError,TypeError,KeyError):
+                    pass
+    lineage_json=lineage.sort_values(['event_id','corp_code','rcept_no']).to_json(orient='records',date_format='iso')
+    return {'schema':1,'inputs':inputs,'code':code,
+            'events_sha256':hashlib.sha256(json.dumps(events,sort_keys=True).encode()).hexdigest(),
+            'lineage_sha256':hashlib.sha256(lineage_json.encode()).hexdigest(),
+            'raw_sources_sha256':hashlib.sha256(json.dumps(files,sort_keys=True).encode()).hexdigest(),
+            'raw_files':len(files),'future_annual_cache_present':future_cache}
+
+
+def reuse_financials(processed, signature, connection_hash):
+    pointer=reference_path(processed/'current_reconciliation_run.json')
+    if not pointer.exists():return None
+    from data.pipelines.reconciliation_publication import committed_reconciliation
+    previous=committed_reconciliation(processed,reference=json.loads(pointer.read_text()))
+    parent=previous['paths']['financial'];report=checked_artifact(parent)
+    if (not report.get('reuse_eligible') or report.get('reuse_inputs')!=signature
+            or signature['future_annual_cache_present']):return None
+    if report['connection_manifest']==connection_hash:
+        return {**report,'path':str(parent),'reused':True,'reused_events':report['population']}
+    identity={'parent_manifest':digest(parent/'manifest.json'),'connection_manifest':connection_hash,
+              'reuse_inputs':signature,'policy':'unchanged_financial_dependencies_rebound_v1'}
+    version=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:20]
+    destination=processed/'historical_financial_reconciliations'/version
+    if not destination.exists():
+        staging=Path(tempfile.mkdtemp(prefix='.financial-reuse.',dir=destination.parent))
+        for name in report['output_sha256']:
+            try:os.link(parent/name,staging/name)
+            except OSError as exc:
+                if exc.errno!=errno.EXDEV:raise
+                shutil.copyfile(parent/name,staging/name)
+        atomic_json(staging/'manifest.json',{**report,'version':version,'connection_manifest':connection_hash,
+            'rebound_from':str(parent.relative_to(processed)),'rebound_parent_sha256':identity['parent_manifest'],
+            'reuse_reason':identity['policy']})
+        staging.rename(destination)
+    return {**checked_artifact(destination),'path':str(destination),'reused':True,'reused_events':report['population']}
+
+
 def run(raw_dir, processed_dir, *, unresolved_only=False, dart=None):
     raw,processed=Path(raw_dir).resolve(),Path(processed_dir).resolve()
     inputs=load_inputs(raw,processed)
@@ -73,7 +128,7 @@ def run(raw_dir, processed_dir, *, unresolved_only=False, dart=None):
     records=inputs['records'].set_index('event_id')
     events=inputs['events']
     targets=events[events.event_class.eq('general_ipo') & events.event_id.isin(records.index)].copy()
-    pointer=json.loads((processed/'current_historical_source_connections.json').read_text())
+    pointer=json.loads(reference_path(processed/'current_historical_source_connections.json').read_text())
     manifest=(processed/pointer['manifest']).resolve()
     if not manifest.is_relative_to(processed/'historical_reconciliations') or digest(manifest)!=pointer['sha256']:
         raise RuntimeError('financial_connection_pointer_invalid')
@@ -92,8 +147,26 @@ def run(raw_dir, processed_dir, *, unresolved_only=False, dart=None):
         scope='latest_financial_unresolved_only_not_full_version'
     dart=dart or DARTCollector()
     parser=Path(__file__).with_name('disclosure_financials.py')
-    code={'parser':digest(parser),'summary':digest(Path(__file__).with_name('financial_history.py')),'runner':digest(Path(__file__)),
-          'source_selection':digest(Path(__file__).with_name('financial_source_selection.py'))}
+    code_paths={'parser':parser,'summary':Path(__file__).with_name('financial_history.py'),'runner':Path(__file__),
+                'source_selection':Path(__file__).with_name('financial_source_selection.py'),
+                'source_identity':Path(__file__).with_name('disclosure_connections.py'),
+                'correction_views':Path(__file__).with_name('correction_views.py'),
+                'source_contracts':Path(__file__).parents[2]/'features/source_contracts.py',
+                'publication':Path(__file__).with_name('reconciliation_publication.py')}
+    code={name:digest(path) for name,path in code_paths.items()}
+    code['document_structure']=financial_document_structure_contract()
+    code['pandas_version']=pd.__version__
+    signature=reuse_inputs(raw,targets,records,lineage,inputs['input_sha256'],code)
+    if not unresolved_only:
+        reused=reuse_financials(processed,signature,connection_hash)
+        if (reused is not None and signature==reuse_inputs(raw,targets,records,lineage,inputs['input_sha256'],code)
+                and all(code[name]==digest(path) for name,path in code_paths.items())
+                and code['document_structure']==financial_document_structure_contract()
+                and code['pandas_version']==pd.__version__
+                and inputs['input_sha256']==load_inputs(raw,processed)['input_sha256']):
+            print(json.dumps({'financial_reused':reused['reused_events'],'financial_version':reused['version'],
+                              'calculation_repeated':False}),flush=True)
+            return reused
     rows,accounts,summaries,originals=[],[],[],{}
     started=pd.Timestamp.now(tz='Asia/Seoul').isoformat()
     for event in targets.sort_values(['listing_date','event_id']).itertuples(index=False):
@@ -142,12 +215,17 @@ def run(raw_dir, processed_dir, *, unresolved_only=False, dart=None):
         if len(rows)%10==0 or len(rows)==len(targets):
             print(json.dumps({'financial_processed':len(rows),'population':len(targets),
                 'status_counts':pd.Series([r['result_status'] for r in rows]).value_counts().to_dict()},ensure_ascii=False),flush=True)
-    if (code['parser']!=digest(parser) or code['summary']!=digest(Path(__file__).with_name('financial_history.py'))
-            or code['source_selection']!=digest(Path(__file__).with_name('financial_source_selection.py'))
-            or code['runner']!=digest(Path(__file__)) or inputs['input_sha256']!=load_inputs(raw,processed)['input_sha256']):
+    if (any(code[name]!=digest(path) for name,path in code_paths.items())
+            or code['document_structure']!=financial_document_structure_contract()
+            or code['pandas_version']!=pd.__version__
+            or inputs['input_sha256']!=load_inputs(raw,processed)['input_sha256']):
         raise RuntimeError('financial_reconciliation_code_changed')
+    after_signature=reuse_inputs(raw,targets,records,lineage,inputs['input_sha256'],code)
+    eligible=(not unresolved_only and signature==after_signature and not signature['future_annual_cache_present']
+              and all(r['missing_category'] in {'not_missing','official_statement_amount_conflict_requires_review',
+                                                'official_statement_unit_conflict_requires_review'} for r in rows))
     identity={'inputs':inputs['input_sha256'],'connection_manifest':connection_hash,'code':code,'scope':scope,
-              'resolutions':rows,'summaries':summaries}
+              'resolutions':rows,'summaries':summaries,'reuse_inputs':after_signature,'reuse_eligible':eligible}
     version=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:20]
     destination=processed/'historical_financial_reconciliations'/version
     if not destination.exists():
@@ -159,6 +237,7 @@ def run(raw_dir, processed_dir, *, unresolved_only=False, dart=None):
         atomic_json(staging/'source_documents.json',originals)
         manifest={'version':version,'scope':scope,'population':len(targets),'processed':len(rows),
             'inputs':inputs['input_sha256'],'connection_manifest':connection_hash,'code':code,
+            'reuse_inputs':after_signature,'reuse_eligible':eligible,
             'status_counts':pd.Series([r['result_status'] for r in rows]).value_counts().to_dict(),
             'missing_categories':pd.Series([r['missing_category'] for r in rows]).value_counts().to_dict(),
             'started_at':started,'finished_at':pd.Timestamp.now(tz='Asia/Seoul').isoformat(),

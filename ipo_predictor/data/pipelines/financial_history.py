@@ -16,7 +16,8 @@ CACHE_VERSION = 1
 
 
 def atomic_json(path, payload):
-    path = Path(path)
+    from data.pipelines.reconciliation_publication import reference_path
+    path = reference_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
                                      suffix=".tmp", delete=False) as handle:

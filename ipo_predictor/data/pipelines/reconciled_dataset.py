@@ -69,8 +69,10 @@ def prior_targets_asof(features):
     return features
 
 
-def pin_connections(processed):
-    pointer=json.loads((processed/'current_historical_source_connections.json').read_text())
+def pin_connections(processed, pointer=None):
+    from data.pipelines.reconciliation_publication import reference_path
+    if pointer is None:
+        pointer=json.loads(reference_path(processed/'current_historical_source_connections.json').read_text())
     path=(processed/pointer['manifest']).resolve()
     if not path.is_relative_to(processed/'historical_reconciliations') or digest(path)!=pointer['sha256']:
         raise RuntimeError('reconciled_connection_pointer_invalid')
@@ -174,6 +176,7 @@ def run(raw_dir,processed_dir,financial_version):
            'model_profiles':Path(__file__).parents[2]/'features/model_profiles.py',
            'feature_definitions':Path(__file__).parents[2]/'features/definitions.py',
            'underwriter_source':Path(__file__).with_name('underwriter_source.py'),
+           'publication':Path(__file__).with_name('reconciliation_publication.py'),
            'kospi':raw/'kospi_index.parquet','kosdaq':raw/'kosdaq_index.parquet'}
     pinned={k:digest(p) for k,p in paths.items()}
     source_path,source_report=pin_connections(processed)

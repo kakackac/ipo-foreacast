@@ -905,11 +905,12 @@ def run(raw_dir, processed_dir, *, cached_only=True, event_limit=None, event_ids
 
 def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
     raw, processed = Path(raw_dir).resolve(), Path(processed_dir).resolve()
-    source, source_report = pin_connections(processed)
-    pointer_names=('current_historical_source_connections.json','current_reconciled_data.json','current_reconciliation_run.json')
-    pointer_hashes={name:digest(processed/name) for name in pointer_names}
-    ptr=json.loads((processed/'current_reconciled_data.json').read_text());dataset=processed/ptr['manifest']
-    if digest(dataset)!=ptr['sha256']:raise RuntimeError('stage_dataset_pointer_invalid')
+    from data.pipelines.reconciliation_publication import committed_reconciliation, RUN
+    release=committed_reconciliation(processed)
+    source, source_report = pin_connections(processed, release['references']['current_historical_source_connections.json'])
+    pointer_names=(RUN,)
+    pointer_hashes={RUN:release['pointer_sha256']}
+    dataset=release['paths']['dataset']/'manifest.json'
     report=checked_artifact(dataset.parent)
     if report['inputs']['sources']!=digest(source/'manifest.json'):raise RuntimeError('stage_source_dataset_version_mismatch')
     records=pd.read_parquet(source/'connection_results.parquet').sort_values('event_id')
@@ -923,10 +924,7 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
     targets=pd.read_parquet(dataset.parent/'features_all.parquet').set_index('event_id',drop=False)
     index=pd.read_parquet(dataset.parent/'kospi_index_snapshot.parquet').sort_values('date')
     index['available_at']=index.date.map(lambda x:local(x).normalize()+pd.Timedelta(days=1))
-    run_pointer=json.loads((processed/'current_reconciliation_run.json').read_text())
-    financial=processed/run_pointer['manifest']
-    if digest(financial)!=run_pointer['sha256']:raise RuntimeError('stage_run_pointer_invalid')
-    run_report=json.loads(financial.read_text());accounts_path=Path(run_report['financial'])/'accounts.parquet'
+    run_report=release['run'];accounts_path=release['paths']['financial']/'accounts.parquet'
     finance_report=checked_artifact(accounts_path.parent)
     if (run_report['input_sha256']['dataset']!=digest(dataset)
             or run_report['input_sha256']['financial']!=digest(accounts_path.parent/'manifest.json')):
@@ -938,6 +936,7 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
               'accounts':digest(accounts_path),'builder':digest(__file__), 'parser':digest(Path(__file__).parents[1]/'collectors/dart_collector.py')}
     dependencies={'time_contract':Path(__file__).parents[2]/'features/prediction_time_contract.py',
         'profiles':Path(__file__).parents[2]/'features/model_profiles.py',
+        'source_contracts':Path(__file__).parents[2]/'features/source_contracts.py',
         'underwriters':Path(__file__).with_name('underwriter_source.py'),
         'tier_mapping':Path(__file__).parents[1]/'processors/feature_engineer.py',
         'financial_summary':Path(__file__).with_name('financial_history.py'),
@@ -946,7 +945,8 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
         'band_sources':Path(__file__).with_name('band_source_resolver.py'),
         'financial_parser':Path(__file__).with_name('disclosure_financials.py'),
         'financial_source_selection':Path(__file__).with_name('financial_source_selection.py'),
-        'float_tables':Path(__file__).parents[1]/'collectors/float_tables.py'}
+        'float_tables':Path(__file__).parents[1]/'collectors/float_tables.py',
+        'publication':Path(__file__).with_name('reconciliation_publication.py')}
     identity['dependency_sha256']={name:digest(path) for name,path in dependencies.items()}
     reusable_annual_parser=annual_history_contract_matches(finance_report['code'],identity['dependency_sha256'])
     accounts=current_annual_history(accounts,reusable_annual_parser)
