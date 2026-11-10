@@ -11,7 +11,11 @@ import tempfile
 SOURCE = 'current_historical_source_connections.json'
 DATASET = 'current_reconciled_data.json'
 RUN = 'current_reconciliation_run.json'
+STAGES = 'current_stage_snapshots.json'
 ALIASES = (SOURCE, DATASET, RUN)
+WORKING_ALIASES = (*ALIASES, STAGES)
+BASE_SCOPE = 'stored_general_ipo_listing_eve_not_product_stage_or_live_scheduler'
+COMPLETE_SCOPE = 'stored_general_ipo_pre_post_inputs_not_live_scheduler'
 JOURNAL = 'reconciliation_publication.json'
 _working = ContextVar('reconciliation_working_references', default=None)
 logger = logging.getLogger(__name__)
@@ -20,7 +24,7 @@ logger = logging.getLogger(__name__)
 def reference_path(path):
     path = Path(path)
     transaction = _working.get()
-    if (transaction is not None and path.name in ALIASES
+    if (transaction is not None and path.name in WORKING_ALIASES
             and path.parent.resolve() == transaction.processed):
         return transaction.directory / path.name
     return path
@@ -58,7 +62,7 @@ def committed_reconciliation(processed_dir, *, reference=None, verify_outputs=Fa
     run = json.loads(manifest.read_text())
     if (run.get('status') != 'complete_with_recorded_feature_holds'
             or run.get('version') != manifest.parent.name
-            or run.get('scope') != 'stored_general_ipo_listing_eve_not_product_stage_or_live_scheduler'
+            or run.get('scope') != (COMPLETE_SCOPE if 'stages' in run else BASE_SCOPE)
             or run.get('training_executed') is not False
             or run.get('deployment_authorized') is not False):
         raise RuntimeError('committed_reconciliation_status_invalid')
@@ -95,18 +99,52 @@ def committed_reconciliation(processed_dir, *, reference=None, verify_outputs=Fa
             or any(validation.get(key) != 0 for key in
                    ('time_violations', 'value_violations', 'non_general_model_observations'))):
         raise RuntimeError('committed_reconciliation_dataset_invalid')
+    if 'stages' in run:
+        root=Path(run['stages']).resolve()
+        if (not root.is_relative_to(processed/'stage_snapshots')
+                or _digest(root/'manifest.json')!=run['input_sha256'].get('stages')):
+            raise RuntimeError('committed_reconciliation_stage_invalid')
+        stage=json.loads((root/'manifest.json').read_text())
+        from data.pipelines.stage_snapshots import INPUT_POLICY
+        from features.model_profiles import get_model_profile
+        profiles={name:{'features':list(get_model_profile(name).feature_names),
+                        'critical_features':list(get_model_profile(name).critical_features)}
+                  for name in ('pre_demand','post_demand')}
+        required={'stages.parquet','observations.parquet','milestones.parquet','source_attempts.parquet',
+                  'pre_demand_inputs.parquet','post_demand_inputs.parquet'}
+        if (stage.get('scope')!='all_connected_general_ipo' or stage.get('events')!=population
+                or stage.get('input_policy')!=INPUT_POLICY or stage.get('input_profiles')!=profiles
+                or stage.get('version')!=root.name or stage.get('training_executed') is not False
+                or stage.get('deployment_authorized') is not False
+                or set(stage.get('output_sha256',{}))!=required
+                or stage.get('inputs',{}).get('dataset')!=run['input_sha256']['dataset']
+                or stage['inputs'].get('sources')!=run['input_sha256']['sources']
+                or stage['inputs'].get('accounts')!=_digest(paths['financial']/'accounts.parquet')
+                or set(stage.get('stages',{}))!={'pre_demand','post_demand'}
+                or any(stage['stages'][name].get('rows')!=population
+                       or not isinstance(stage['stages'][name].get('ready_rows'),int)
+                       or not 0<=stage['stages'][name]['ready_rows']<=population for name in stage['stages'])):
+            raise RuntimeError('committed_reconciliation_stage_not_connected')
+        if verify_outputs:
+            from data.pipelines.data_delivery import checked_artifact
+            checked_artifact(root)
+        paths['stages']=root;reports['stages']=stage
     references = {RUN: pointer}
     for alias, key in [(SOURCE, 'sources'), (DATASET, 'dataset')]:
         references[alias] = {'manifest': str((paths[key] / 'manifest.json').relative_to(processed)),
                              'sha256': run['input_sha256'][key]}
     references[DATASET].update(training_authorized=False, deployment_authorized=False)
+    if 'stages' in paths:
+        references[STAGES]={'manifest':str((paths['stages']/'manifest.json').relative_to(processed)),
+                            'sha256':run['input_sha256']['stages']}
     return {'run': run, 'pointer': pointer, 'manifest': manifest, 'paths': paths,
             'pointer_sha256': hashlib.sha256(payload).hexdigest() if payload is not None else None,
             'references': references, 'reports': reports}
 
 
 def _sync_aliases(processed, release):
-    for name in (SOURCE, DATASET):
+    for name in (SOURCE, DATASET, STAGES):
+        if name not in release['references']:continue
         path, value = processed / name, release['references'][name]
         if not path.exists() or json.loads(path.read_text()) != value:
             _direct_json(path, value)
@@ -161,7 +199,7 @@ class ReconciliationPublication:
         root.mkdir(parents=True, exist_ok=True)
         self.directory = Path(tempfile.mkdtemp(prefix='candidate_', dir=root))
         self.previous = (self.processed / RUN).read_bytes() if (self.processed / RUN).exists() else None
-        for name in ALIASES:
+        for name in WORKING_ALIASES:
             path = self.processed / name
             if path.exists():
                 _direct_json(self.directory / name, json.loads(path.read_text()))
@@ -174,14 +212,24 @@ class ReconciliationPublication:
     def commit(self):
         pointer = json.loads((self.directory / RUN).read_text())
         release = committed_reconciliation(self.processed, reference=pointer, verify_outputs=True)
-        for name in (SOURCE, DATASET):
+        for name in (SOURCE, DATASET, STAGES):
+            if name not in release['references']:continue
             actual = json.loads((self.directory / name).read_text())
             if actual != release['references'][name]:
                 raise RuntimeError('reconciliation_candidate_aliases_not_connected')
+        if STAGES in release['references']:
+            from data.pipelines.stage_snapshots import load_stage_model_inputs
+            for stage in ('pre_demand','post_demand'):
+                load_stage_model_inputs(self.processed,stage,reference=release['references'][STAGES],
+                                        reconciliation_reference=pointer)
         root = self.processed / RUN
         current = root.read_bytes() if root.exists() else None
         if current != self.previous:
             raise RuntimeError('reconciliation_committed_run_changed_during_build')
+        if self.previous is not None:
+            previous=committed_reconciliation(self.processed)
+            if 'stages' in previous['paths'] and 'stages' not in release['paths']:
+                raise RuntimeError('complete_collection_cannot_downgrade_to_base_only')
         self.journal['commit_candidate_sha256'] = _digest(self.directory / RUN)
         _direct_json(self.processed / JOURNAL, self.journal)
         try:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from data.pipelines.data_delivery import digest
 from data.pipelines.financial_history import atomic_json
-from data.pipelines.reconciliation_publication import SOURCE, DATASET, RUN
+from data.pipelines.reconciliation_publication import SOURCE, DATASET, RUN, STAGES, BASE_SCOPE, COMPLETE_SCOPE
 
 
 def components(processed, tag):
@@ -33,7 +33,7 @@ def references(processed, paths):
     return {alias: {'manifest': str((paths[key] / 'manifest.json').relative_to(processed)),
                      'sha256': digest(paths[key] / 'manifest.json'),
                      **({'training_authorized': False, 'deployment_authorized': False} if alias == DATASET else {})}
-            for alias, key in [(SOURCE, 'sources'), (DATASET, 'dataset')]}
+            for alias, key in [(SOURCE, 'sources'), (DATASET, 'dataset'), *([(STAGES,'stages')] if 'stages' in paths else [])]}
 
 
 def complete_run(processed, paths):
@@ -43,7 +43,7 @@ def complete_run(processed, paths):
     atomic_json(manifest, {'version': version, 'status': 'complete_with_recorded_feature_holds',
         'input_sha256': hashes, **{key: str(path) for key, path in paths.items()},
         'training_executed': False, 'deployment_authorized': False,
-        'scope': 'stored_general_ipo_listing_eve_not_product_stage_or_live_scheduler'})
+        'scope': COMPLETE_SCOPE if 'stages' in paths else BASE_SCOPE})
     return {'manifest': str(manifest.relative_to(processed)), 'sha256': digest(manifest)}
 
 

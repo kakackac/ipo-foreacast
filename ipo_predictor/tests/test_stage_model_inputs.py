@@ -183,7 +183,8 @@ class StageModelInputTests(unittest.TestCase):
             frame,audit=self.fixture();inputs=stages.build_stage_model_inputs(frame,audit)
             for stage,table in inputs.items():table.to_parquet(root/(stage+'_inputs.parquet'),index=False)
             audit.to_parquet(root/'observations.parquet',index=False)
-            report={'version':'fixture','scope':'all_connected_general_ipo','input_policy':stages.INPUT_POLICY,
+            frame.to_parquet(root/'stages.parquet',index=False)
+            report={'version':'fixture','scope':'all_connected_general_ipo','events':1,'input_policy':stages.INPUT_POLICY,
                 'training_executed':False,'deployment_authorized':False,
                 'input_profiles':{s:{'features':list(get_model_profile(s).feature_names),
                     'critical_features':list(get_model_profile(s).critical_features)} for s in inputs},
@@ -196,7 +197,8 @@ class StageModelInputTests(unittest.TestCase):
             atomic_json(root/'manifest.json',report)
             ref={'manifest':str((root/'manifest.json').relative_to(processed)),'sha256':digest(root/'manifest.json')}
             atomic_json(processed/'current_stage_snapshots.json',ref)
-            parent={'run':{'input_sha256':{'dataset':'dataset','sources':'sources'}},'paths':{'financial':finance}}
+            parent={'run':{'input_sha256':{'dataset':'dataset','sources':'sources'}},'paths':{'financial':finance},
+                    'reports':{'sources':{'population':1}}}
             with patch('data.pipelines.reconciliation_publication.committed_reconciliation',return_value=parent):
                 table,evidence,_=stages.load_stage_model_inputs(processed,'pre_demand')
                 self.assertEqual(table.attrs['stage_snapshot_reference'],ref)

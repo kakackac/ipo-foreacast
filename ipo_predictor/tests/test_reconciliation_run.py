@@ -39,9 +39,9 @@ class ReconciliationRunTests(unittest.TestCase):
                     patch('data.pipelines.reconciliation_run.collect_connections',side_effect=source), \
                     patch('data.pipelines.reconciliation_run.reconcile_financials',return_value={'path':str(paths['financial'])}), \
                     patch('data.pipelines.reconciliation_run.build_dataset',side_effect=dataset) as build:
-                first=run(root/'raw',root/'processed',dart=Mock())
+                first=run(root/'raw',root/'processed',dart=Mock(),include_stages=False)
                 pointer=(root/'processed/current_reconciliation_run.json').read_bytes()
-                second=run(root/'raw',root/'processed',dart=Mock())
+                second=run(root/'raw',root/'processed',dart=Mock(),include_stages=False)
             self.assertEqual(first['version'],second['version'])
             self.assertEqual(pointer,(root/'processed/current_reconciliation_run.json').read_bytes())
             self.assertEqual(build.call_args.args[2],str(paths['financial']))

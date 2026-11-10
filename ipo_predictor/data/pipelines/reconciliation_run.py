@@ -2,6 +2,7 @@
 import fcntl
 import hashlib
 import json
+from contextlib import ExitStack
 from pathlib import Path
 
 from data.collectors.dart_collector import DARTCollector
@@ -10,15 +11,23 @@ from data.pipelines.financial_history import atomic_json
 from data.pipelines.historical_reconciliation import collect_connections
 from data.pipelines.historical_financial_reconciliation import run as reconcile_financials
 from data.pipelines.reconciled_dataset import run as build_dataset
-from data.pipelines.reconciliation_publication import ReconciliationPublication
+from data.pipelines.reconciliation_publication import ReconciliationPublication, BASE_SCOPE, COMPLETE_SCOPE, STAGES
 
 
-def run(raw_dir, processed_dir, *, cached_only=False, dart=None):
+def build_stages(raw, processed, *, cached_only, dart, release_reference):
+    from data.pipelines.stage_snapshots import _run
+    return _run(raw,processed,cached_only=cached_only,event_limit=None,event_ids=None,
+                dart=dart,release_reference=release_reference)
+
+
+def run(raw_dir, processed_dir, *, cached_only=False, dart=None, include_stages=True):
     raw, processed = Path(raw_dir).resolve(), Path(processed_dir).resolve()
     processed.mkdir(parents=True, exist_ok=True)
-    with (processed/'reconciliation.lock').open('a') as lock:
+    with ExitStack() as stack:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            for name in ('reconciliation.lock','stage_snapshots.lock') if include_stages else ('reconciliation.lock',):
+                lock=stack.enter_context((processed/name).open('a'))
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return {'status':'already_running', 'training_executed':False}
         dart = dart or DARTCollector()
@@ -59,20 +68,32 @@ def run(raw_dir, processed_dir, *, cached_only=False, dart=None):
                             'dataset':digest(Path(dataset['path'])/'manifest.json'),
                             'driver':digest(__file__),
                             'publication':digest(Path(__file__).with_name('reconciliation_publication.py'))}
-                version = hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:20]
-                destination = processed/'reconciliation_runs'/version
-                destination.mkdir(parents=True, exist_ok=True)
-                manifest = destination/'manifest.json'
-                expected = {'status':'complete_with_recorded_feature_holds', 'version':version,
-                    'input_sha256':identity, 'sources':sources['path'], 'financial':financial['path'],
-                    'dataset':dataset['path'], 'training_executed':False, 'deployment_authorized':False,
-                    'scope':'stored_general_ipo_listing_eve_not_product_stage_or_live_scheduler'}
-                if not manifest.exists():
-                    atomic_json(manifest, expected)
-                if json.loads(manifest.read_text()) != expected:
-                    raise RuntimeError('reconciliation_run_manifest_integrity_failed')
-                atomic_json(processed/'current_reconciliation_run.json', {
-                    'manifest':str(manifest.relative_to(processed)), 'sha256':digest(manifest)})
+                def prepare(stage_path=None):
+                    version=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:20]
+                    destination=processed/'reconciliation_runs'/version
+                    destination.mkdir(parents=True,exist_ok=True);manifest=destination/'manifest.json'
+                    expected={'status':'complete_with_recorded_feature_holds','version':version,
+                        'input_sha256':dict(identity),'sources':sources['path'],'financial':financial['path'],
+                        'dataset':dataset['path'],'training_executed':False,'deployment_authorized':False,
+                        'scope':COMPLETE_SCOPE if stage_path is not None else BASE_SCOPE}
+                    if stage_path is not None:expected['stages']=stage_path
+                    if not manifest.exists():atomic_json(manifest,expected)
+                    if json.loads(manifest.read_text())!=expected:
+                        raise RuntimeError('reconciliation_run_manifest_integrity_failed')
+                    pointer={'manifest':str(manifest.relative_to(processed)),'sha256':digest(manifest)}
+                    atomic_json(processed/'current_reconciliation_run.json',pointer)
+                    return destination,manifest,version,pointer
+                destination,manifest,version,base_reference=prepare()
+                if include_stages:
+                    phase='stages'
+                    stages=build_stages(raw,processed,cached_only=cached_only,dart=dart,
+                                        release_reference=base_reference)
+                    stage_path=Path(stages['path'])
+                    stage_reference={'manifest':str((stage_path/'manifest.json').relative_to(processed)),
+                                     'sha256':digest(stage_path/'manifest.json')}
+                    atomic_json(processed/STAGES,stage_reference)
+                    identity['stages']=stage_reference['sha256']
+                    destination,manifest,version,_=prepare(str(stage_path))
                 phase = 'publication'
                 publication.commit()
             atomic_json(processed/'reconciliation_last_attempt.json', {

@@ -859,11 +859,16 @@ def stage_dependency_paths():
         'publication':Path(__file__).with_name('reconciliation_publication.py')}
 
 
-def load_stage_model_inputs(processed_dir, stage, *, reference=None):
+def load_stage_model_inputs(processed_dir, stage, *, reference=None, reconciliation_reference=None):
     """Never substitute legacy listing-eve masks for a point-in-time snapshot."""
     profile=get_model_profile(stage);processed=Path(processed_dir).resolve()
     try:
-        ref=reference or json.loads((processed/'current_stage_snapshots.json').read_text())
+        from data.pipelines.reconciliation_publication import committed_reconciliation, STAGES
+        release=committed_reconciliation(processed,reference=reconciliation_reference)
+        pinned=release.get('references',{}).get(STAGES)
+        if pinned is not None and reference is not None and reference!=pinned:
+            raise RuntimeError('stage_input_reference_not_in_complete_release')
+        ref=reference or pinned or json.loads((processed/STAGES).read_text())
         path=(processed/ref['manifest']).resolve()
         if not path.is_relative_to(processed/'stage_snapshots') or path.name!='manifest.json' or digest(path)!=ref['sha256']:
             raise RuntimeError('stage_input_reference_invalid')
@@ -873,8 +878,6 @@ def load_stage_model_inputs(processed_dir, stage, *, reference=None):
                 or report['inputs']['builder']!=digest(__file__)
                 or report.get('input_profiles',{}).get(stage)!={'features':list(profile.feature_names),'critical_features':list(profile.critical_features)}):
             raise RuntimeError('stage_input_contract_missing_or_changed')
-        from data.pipelines.reconciliation_publication import committed_reconciliation
-        release=committed_reconciliation(processed)
         if (report['inputs']['dataset']!=release['run']['input_sha256']['dataset']
                 or report['inputs']['sources']!=release['run']['input_sha256']['sources']
                 or report['inputs']['accounts']!=digest(release['paths']['financial']/'accounts.parquet')
@@ -884,6 +887,14 @@ def load_stage_model_inputs(processed_dir, stage, *, reference=None):
             raise RuntimeError('stage_input_parent_or_dependency_changed')
         frame=pd.read_parquet(path.parent/(stage+'_inputs.parquet'))
         ledger=pd.read_parquet(path.parent/'observations.parquet')
+        population=release['reports']['sources']['population']
+        if (report.get('events')!=population or len(frame)!=population
+                or frame.event_id.nunique()!=population or not frame.prediction_stage.eq(stage).all()
+                or not frame.event_class.eq('general_ipo').all() or not frame.market.isin(['KOSPI','KOSDAQ']).all()):
+            raise RuntimeError('stage_input_population_or_scope_invalid')
+        rebuilt=build_stage_model_inputs(pd.read_parquet(path.parent/'stages.parquet'),ledger)[stage]
+        try:pd.testing.assert_frame_equal(frame,rebuilt,check_dtype=False)
+        except AssertionError as exc:raise RuntimeError('stage_input_materialization_or_candidate_changed') from exc
         ledger=ledger[ledger.stage.eq(stage) & ledger.feature_name.isin(profile.feature_names)].reset_index(drop=True)
         frame.attrs['stage_snapshot_reference']=ref
         return frame,ledger,report
@@ -1021,13 +1032,13 @@ def run(raw_dir, processed_dir, *, cached_only=True, event_limit=None, event_ids
         return _run(raw_dir,processed_dir,cached_only=cached_only,event_limit=event_limit,event_ids=event_ids,dart=dart)
 
 
-def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
+def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart, release_reference=None):
     raw, processed = Path(raw_dir).resolve(), Path(processed_dir).resolve()
     from data.pipelines.reconciliation_publication import committed_reconciliation, RUN
-    release=committed_reconciliation(processed)
+    release=committed_reconciliation(processed,reference=release_reference)
     source, source_report = pin_connections(processed, release['references']['current_historical_source_connections.json'])
     pointer_names=(RUN,)
-    pointer_hashes={RUN:release['pointer_sha256']}
+    pointer_hashes={RUN:digest(processed/RUN) if (processed/RUN).exists() else None}
     dataset=release['paths']['dataset']/'manifest.json'
     report=checked_artifact(dataset.parent)
     if report['inputs']['sources']!=digest(source/'manifest.json'):raise RuntimeError('stage_source_dataset_version_mismatch')
@@ -1196,7 +1207,7 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
         atomic_json(checkpoint,{'identity':event_identity,'payload':payload,
             'sha256':hashlib.sha256(json.dumps(payload,sort_keys=True).encode()).hexdigest()})
         if len(rows)%100==0:print(json.dumps({'stage_events_processed':len(rows)//2,'population':len(records)}),flush=True)
-    if (pointer_hashes!={name:digest(processed/name) for name in pointer_names}
+    if (pointer_hashes!={name:digest(processed/name) if (processed/name).exists() else None for name in pointer_names}
             or identity['financial_document_structure']!=financial_document_structure_contract()
             or identity['builder']!=digest(__file__)
             or identity['parser']!=digest(Path(__file__).parents[1]/'collectors/dart_collector.py')
@@ -1226,6 +1237,7 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
             'training_executed':False,'deployment_authorized':False,
             'output_sha256':{name:digest(staging/name) for name in outputs}}
         atomic_json(staging/'manifest.json',summary);staging.rename(dest)
-    if event_limit is None and event_ids is None:
+    published=event_limit is None and event_ids is None and release_reference is None and 'stages' not in release['paths']
+    if published:
         atomic_json(processed/'current_stage_snapshots.json',{'manifest':str((dest/'manifest.json').relative_to(processed)),'sha256':digest(dest/'manifest.json')})
-    return {**checked_artifact(dest),'path':str(dest),'reused_events':reused_events}
+    return {**checked_artifact(dest),'path':str(dest),'reused_events':reused_events,'reference_published':published}
