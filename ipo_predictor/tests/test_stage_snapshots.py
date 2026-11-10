@@ -176,6 +176,18 @@ class StageSnapshotTests(unittest.TestCase):
         self.assertTrue(current_annual_history(rows.iloc[:1],False).empty)
         self.assertTrue(current_annual_history(rows.drop(columns='report_code'),False).empty)
 
+    def test_financial_source_selection_contract_must_match_before_parent_reuse(self):
+        from data.pipelines.stage_snapshots import annual_history_contract_matches
+        code={'parser':'p','summary':'s','source_selection':'v2'}
+        dependencies={'financial_parser':'p','financial_summary':'s','financial_source_selection':'v2'}
+        self.assertTrue(annual_history_contract_matches(code,dependencies))
+        for key in code:
+            stale={**code,key:'old'}
+            self.assertFalse(annual_history_contract_matches(stale,dependencies))
+            absent=dict(code);absent.pop(key)
+            self.assertFalse(annual_history_contract_matches(absent,dependencies))
+        self.assertFalse(annual_history_contract_matches({},{}))
+
     def test_financial_missing_reason_is_not_a_successful_collection_label(self):
         verified={'financial_time_validation_status':'verified_dart_annual_financial_asof_v1','equity':0,'revenue':0}
         self.assertEqual(stage_financial_missing_reason('revenue_growth_3y',verified,'annual_accounts_extracted'),

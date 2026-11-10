@@ -50,6 +50,9 @@ SAMPLES = [
 # Reviewed original annual cells: scope, year, revenue, operating income, assets.
 # A None income pair explicitly checks that interim-only income stays absent.
 BASIS_SAMPLES = [
+    ('야스', '00875307', '20170919000194',
+     '9215b2415c672c58bd5ae807db2861bf6a931bf820e9728d0307b44805d08d00',
+     [('OFS', 2016, 82982000000, 16056000000, 81082801895)], {2015, 2016}),
     ('이지트로닉스', '01140837', '20220118000224',
      '3ffbe413ab2c6832cd0bf0f0a6c42fb22218b7cbe63e5435a12febce74b21be3',
      [('OFS', 2020, 15348581080, 2829540431, 34289823450)], {2020}),

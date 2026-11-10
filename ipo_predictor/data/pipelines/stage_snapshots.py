@@ -773,7 +773,7 @@ def stage_observation(row, field, value, origin, reasons):
         'source':json.dumps(origin,ensure_ascii=False),'absence_confirmed':False}
 
 
-def financials_from_selected_document(dart,raw,selected,corp,cached_only):
+def financials_from_selected_document(dart,raw,selected,corp,cached_only,*,cutoff=None):
     """An early stage needs its own annual section, not the eventual final prospectus."""
     origin=selected['proof'];receipt=origin['receipt'];cache=Path(raw)/'dart_connection_sources'
     index_path=cache/(hashlib.sha256(origin['source_url'].encode()).hexdigest()+'.json')
@@ -782,13 +782,24 @@ def financials_from_selected_document(dart,raw,selected,corp,cached_only):
             or hashlib.sha256(payload['text'].encode()).hexdigest()!=origin['index_sha256']):
         raise RuntimeError('stage_financial_index_integrity_failed')
     node=select_financial_node(payload['text'],receipt)
-    if node is None:return pd.DataFrame(),{'status':'selected_document_financial_section_not_identified','absence_confirmed':False}
-    source='https://dart.fss.or.kr/report/viewer.do?'+urlencode(node)
-    if (node['dtd'] not in ('dart3.xsd','dart4.xsd')
+    selection=None;published=origin['published_at']
+    if node is None:
+        if cutoff is None:return pd.DataFrame(),{'status':'stage_financial_cutoff_required','absence_confirmed':False}
+        from data.pipelines.financial_source_selection import resolve_financial_section
+        resolved=resolve_financial_section(dart,raw,receipt,'',corp,cutoff,published,cached_only=cached_only)
+        if resolved.get('status')!='official_section_downloaded':
+            return pd.DataFrame(),{'status':resolved['status'],'absence_confirmed':False}
+        receipt=resolved['receipt'];published=resolved['official_publication_date']
+        source=resolved['source_url'];html=resolved['html'];sha=resolved['sha256']
+        selection=resolved.get('selection_evidence')
+    elif (node['dtd'] not in ('dart3.xsd','dart4.xsd')
             or any(not re.fullmatch(r'\d+',node[key]) for key in ('dcmNo','eleId','offset','length'))):
         raise ValueError('stage_financial_section_identity_invalid')
-    html,sha=section_text(dart,source,cache,cached_only,financial=True)
-    identity={'body':sha,'receipt':receipt,'corp_code':corp,'published_at':origin['published_at'],
+    else:
+        source='https://dart.fss.or.kr/report/viewer.do?'+urlencode(node)
+        html,sha=section_text(dart,source,cache,cached_only,financial=True)
+    identity={'body':sha,'receipt':receipt,'corp_code':corp,'published_at':published,
+              'source_selection':selection,
               'document_structure':financial_document_structure_contract(),
               'parser':digest(Path(__file__).with_name('disclosure_financials.py'))}
     parsed_cache=Path(raw)/'stage_financial_analyses'/(hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()+'.json')
@@ -798,7 +809,7 @@ def financials_from_selected_document(dart,raw,selected,corp,cached_only):
             raise RuntimeError('stage_financial_analysis_integrity_failed')
         return pd.DataFrame(result['records']),result['evidence']
     diagnostics={}
-    frame=parse_disclosure_financials(html,corp,receipt,origin['published_at'],source,diagnostics,
+    frame=parse_disclosure_financials(html,corp,receipt,published,source,diagnostics,
         document_cache=Path(raw)/'financial_document_geometry')
     if not frame.empty:
         stored=json.loads((cache/(hashlib.sha256(source.encode()).hexdigest()+'.json')).read_text())
@@ -809,7 +820,7 @@ def financials_from_selected_document(dart,raw,selected,corp,cached_only):
         'official_statement_amount_conflict_requires_review' if diagnostics.get('official_statement_amount_conflicts') else
         'summary_statement_basis_unverified' if diagnostics.get('summary_primary_basis_unresolved_columns') else
         'official_financial_section_without_tables' if '<table' not in html.lower() else 'annual_format_or_basis_unverified',
-              'url':source,'sha256':sha,'details':diagnostics,'absence_confirmed':False}
+              'url':source,'sha256':sha,'details':diagnostics,'source_selection':selection,'absence_confirmed':False}
     result={'records':financial_records(frame),'evidence':evidence}
     atomic_json(parsed_cache,{'identity':identity,'result':result,
         'sha256':hashlib.sha256(json.dumps(result,sort_keys=True).encode()).hexdigest()})
@@ -866,6 +877,13 @@ def stage_financial_missing_reason(field, annual, collection_status):
         if annual.get('equity') is not None and annual['equity']<=0:return 'nonpositive_equity_ratio_undefined'
         return 'verified_same_period_liabilities_and_equity_pair_unavailable'
     return collection_status
+
+
+def annual_history_contract_matches(code, dependencies):
+    required={'parser':'financial_parser','summary':'financial_summary',
+              'source_selection':'financial_source_selection'}
+    return all(code.get(name) is not None and code.get(name)==dependencies.get(dependency)
+               for name,dependency in required.items())
 
 
 def current_annual_history(accounts, reusable_parser):
@@ -927,10 +945,10 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
         'source_document_selection':Path(__file__).with_name('lockup_reconciliation.py'),
         'band_sources':Path(__file__).with_name('band_source_resolver.py'),
         'financial_parser':Path(__file__).with_name('disclosure_financials.py'),
+        'financial_source_selection':Path(__file__).with_name('financial_source_selection.py'),
         'float_tables':Path(__file__).parents[1]/'collectors/float_tables.py'}
     identity['dependency_sha256']={name:digest(path) for name,path in dependencies.items()}
-    reusable_annual_parser=(finance_report['code']['parser']==identity['dependency_sha256']['financial_parser']
-        and finance_report['code']['summary']==identity['dependency_sha256']['financial_summary'])
+    reusable_annual_parser=annual_history_contract_matches(finance_report['code'],identity['dependency_sha256'])
     accounts=current_annual_history(accounts,reusable_annual_parser)
     index_hash=digest(dataset.parent/'kospi_index_snapshot.parquet')
     reused_events=0
@@ -1026,7 +1044,7 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
                     and annual_history.rcept_no.astype(str).eq(origin['receipt']).any())
                 if not selected_annual_already_parsed and any(annual.get(field) is None for field in EXTRA_FEATURES[2:]):
                     try:
-                        extra,financial_evidence=financials_from_selected_document(dart,raw,selected,str(record['corp_code']),cached_only)
+                        extra,financial_evidence=financials_from_selected_document(dart,raw,selected,str(record['corp_code']),cached_only,cutoff=cutoff)
                         financial_status=financial_evidence['status']
                         attempts.append({'event_id':event.event_id,'receipt':origin['receipt'],
                             'status':financial_status,'evidence':json.dumps(financial_evidence,ensure_ascii=False)})

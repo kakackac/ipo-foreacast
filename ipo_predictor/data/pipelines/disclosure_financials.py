@@ -57,7 +57,7 @@ def validate_financial_section_response(html):
     raise ValueError('financial_section_response_invalid')
 
 
-def public_financial_section(dart, receipt, corp_name, cache_dir, corp_code=None, published=None):
+def public_financial_section(dart, receipt, corp_name, cache_dir, corp_code=None, published=None, *, cached_only=False):
     """Read a bounded public section, never the first arbitrary viewer link."""
     path = Path(cache_dir) / f"{receipt}.json"
     cached = None
@@ -77,7 +77,7 @@ def public_financial_section(dart, receipt, corp_name, cache_dir, corp_code=None
         def validate_index(text):
             if corp_code is not None:
                 viewer_identity(text,receipt,str(corp_code))
-        index,index_hash=public_text(dart,url,Path(cache_dir).parent/'dart_connection_sources',validate_index)
+        index,index_hash=public_text(dart,url,Path(cache_dir).parent/'dart_connection_sources',validate_index,cached_only)
         title = re.search(r"<title>([^<]+)</title>", index, re.I)
         issuer = unescape(title.group(1)).split("/")[0].strip() if title else ""
         ids = set(re.findall(r"openCorpInfoNew\(['\"](\d{8})['\"]", index))
@@ -105,7 +105,7 @@ def public_financial_section(dart, receipt, corp_name, cache_dir, corp_code=None
             html=cached['html']
         else:
             html,_=public_text(dart,section_url,Path(cache_dir).parent/'dart_connection_sources',
-                validate_financial_section_response)
+                validate_financial_section_response,cached_only)
     except requests.RequestException as exc:
         return {"status": "financial_public_source_access_failed", "error_type": type(exc).__name__}
     except ValueError as exc:
@@ -1146,13 +1146,15 @@ def collect_disclosure_financials(dart, raw_dir, event_id, corp_code, corp_name,
     receipt = str(chosen.rcept_no)
     if not re.fullmatch(r"\d{14}", receipt):
         return pd.DataFrame(), "financial_disclosure_receipt_date_mismatch"
-    payload = public_financial_section(dart, receipt, corp_name, Path(raw_dir) / "dart_ipo_financial_sections",
-                                       corp_code=corp_code, published=pd.Timestamp(chosen.rcept_dt).date())
+    from data.pipelines.financial_source_selection import resolve_financial_section
+    payload = resolve_financial_section(dart,raw_dir,receipt,corp_name,str(corp_code),local_cutoff,
+                                        pd.Timestamp(chosen.rcept_dt).date())
     if payload.get("status") != "official_section_downloaded":
         if diagnostics is not None:
             diagnostics.update(receipt=receipt, reason=payload.get('status'), absence_confirmed=False)
         return pd.DataFrame(), payload.get("status", "financial_source_unverified")
     actual_published=pd.Timestamp(payload['official_publication_date'])
+    receipt=payload['receipt']
     if diagnostics is not None:
         diagnostics.update(receipt=receipt,actual_publication_date=str(actual_published.date()),
                            official_corp_code=payload['official_corp_code'],index_sha256=payload.get('index_sha256'),
@@ -1171,7 +1173,9 @@ def collect_disclosure_financials(dart, raw_dir, event_id, corp_code, corp_name,
         if saved['identity'] != identity or records_hash != saved['records_sha256']:
             raise RuntimeError('parsed_financial_cache_integrity_failed')
         result = pd.DataFrame(saved['records'])
-        if diagnostics is not None: diagnostics.update(saved['diagnostics'])
+        if diagnostics is not None:
+            diagnostics.update(saved['diagnostics'])
+            if payload.get('selection_evidence'):diagnostics['financial_source_selection']=payload['selection_evidence']
         return result, saved['status']
     details = {}
     result = parse_disclosure_financials(payload["html"], corp_code, receipt,
@@ -1193,5 +1197,7 @@ def collect_disclosure_financials(dart, raw_dir, event_id, corp_code, corp_name,
     records = financial_records(result)
     atomic_json(cache, {'identity': identity, 'records': records, 'diagnostics': details, 'status': status,
                        'records_sha256': hashlib.sha256(json.dumps(records, sort_keys=True).encode()).hexdigest()})
-    if diagnostics is not None: diagnostics.update(details)
+    if diagnostics is not None:
+        diagnostics.update(details)
+        if payload.get('selection_evidence'):diagnostics['financial_source_selection']=payload['selection_evidence']
     return result, status

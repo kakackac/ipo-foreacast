@@ -92,7 +92,8 @@ def run(raw_dir, processed_dir, *, unresolved_only=False, dart=None):
         scope='latest_financial_unresolved_only_not_full_version'
     dart=dart or DARTCollector()
     parser=Path(__file__).with_name('disclosure_financials.py')
-    code={'parser':digest(parser),'summary':digest(Path(__file__).with_name('financial_history.py')),'runner':digest(Path(__file__))}
+    code={'parser':digest(parser),'summary':digest(Path(__file__).with_name('financial_history.py')),'runner':digest(Path(__file__)),
+          'source_selection':digest(Path(__file__).with_name('financial_source_selection.py'))}
     rows,accounts,summaries,originals=[],[],[],{}
     started=pd.Timestamp.now(tz='Asia/Seoul').isoformat()
     for event in targets.sort_values(['listing_date','event_id']).itertuples(index=False):
@@ -102,6 +103,13 @@ def run(raw_dir, processed_dir, *, unresolved_only=False, dart=None):
         extra,status=collect_disclosure_financials(dart,raw,event.event_id,str(identity.corp_code),
                                                    event.corp_name,cutoff,lineage,details)
         receipt=details.get('receipt')
+        for proof in details.get('financial_source_selection',{}).get('sources',[]):
+            path=raw/'dart_connection_sources'/(hashlib.sha256(proof['url'].encode()).hexdigest()+'.json')
+            saved=json.loads(path.read_text())
+            if (saved['url']!=proof['url'] or saved['sha256']!=proof['sha256']
+                    or hashlib.sha256(saved['text'].encode()).hexdigest()!=proof['sha256']):
+                raise RuntimeError('financial_reconciliation_selection_proof_integrity_failed')
+            originals[proof['url']]=saved
         section=raw/'dart_ipo_financial_sections'/f'{receipt}.json'
         if details.get('document_sha256') and section.exists():
             payload=json.loads(section.read_text())
@@ -135,6 +143,7 @@ def run(raw_dir, processed_dir, *, unresolved_only=False, dart=None):
             print(json.dumps({'financial_processed':len(rows),'population':len(targets),
                 'status_counts':pd.Series([r['result_status'] for r in rows]).value_counts().to_dict()},ensure_ascii=False),flush=True)
     if (code['parser']!=digest(parser) or code['summary']!=digest(Path(__file__).with_name('financial_history.py'))
+            or code['source_selection']!=digest(Path(__file__).with_name('financial_source_selection.py'))
             or code['runner']!=digest(Path(__file__)) or inputs['input_sha256']!=load_inputs(raw,processed)['input_sha256']):
         raise RuntimeError('financial_reconciliation_code_changed')
     identity={'inputs':inputs['input_sha256'],'connection_manifest':connection_hash,'code':code,'scope':scope,
