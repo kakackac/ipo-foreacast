@@ -17,6 +17,8 @@ from features.source_contracts import (
     APPROVED_PUBLIC_FLOAT_STATUSES,
     APPROVED_UNDERWRITER_TIER_STATUSES,
     APPROVED_PRICE_BAND_STATUSES,
+    APPROVED_RAW_PRICE_BAND_STATUSES,
+    APPROVED_ANNUAL_FINANCIAL_STATUSES,
 )
 
 
@@ -28,26 +30,28 @@ class PredictionProfile:
     critical_features: tuple[str, ...]
 
 
+PRE_DEMAND_FEATURES = (
+    "kospi_momentum_5d", "kospi_momentum_20d", "recent_ipo_avg_return_sector",
+    "recent_ipo_avg_return_all", "float_share_ratio", "secondary_offering_ratio",
+    "major_shareholder_lockup_months", "risk_factor_count",
+    "underwriter_tier", "offering_type_spac_ipo", "price_band_low", "price_band_high",
+    "revenue_growth_3y", "operating_margin", "debt_ratio",
+)
+
+
 MODEL_PROFILES = {
     "pre_demand": PredictionProfile(
         name="pre_demand",
-        description="수요예측 결과 공시 전: 공모 구조·주관사·시장 상황 중심",
-        feature_names=(
-            "kospi_momentum_5d", "kospi_momentum_20d", "recent_ipo_avg_return_sector",
-            "recent_ipo_avg_return_all", "float_share_ratio", "secondary_offering_ratio",
-            "major_shareholder_lockup_months", "risk_factor_count",
-            "underwriter_tier", "offering_type_spac_ipo",
-        ),
+        description="수요예측 전: 당시 공개된 재무·희망 밴드·공모 구조·주관사·시장 상황",
+        feature_names=PRE_DEMAND_FEATURES,
         critical_features=("float_share_ratio", "secondary_offering_ratio", "underwriter_tier"),
     ),
     "post_demand": PredictionProfile(
         name="post_demand",
         description="수요예측 결과 공개 후: 확정 공모가·기관 수요·확약을 추가",
-        feature_names=(
+        feature_names=PRE_DEMAND_FEATURES + (
             "institutional_demand_ratio", "lockup_commitment_ratio",
-            "offering_price_band_position", "band_exceeded", "kospi_momentum_5d",
-            "kospi_momentum_20d", "recent_ipo_avg_return_sector", "recent_ipo_avg_return_all",
-            "offering_type_spac_ipo",
+            "offering_price_band_position", "band_exceeded",
         ),
         critical_features=("institutional_demand_ratio", "offering_price_band_position"),
     ),
@@ -75,6 +79,11 @@ FEATURE_SOURCE_APPROVAL = {
     "risk_factor_count": ("risk_factor_validation_status", frozenset()),
     "offering_per": ("valuation_validation_status", frozenset()),
     "per_vs_sector_median": ("valuation_validation_status", frozenset()),
+    "price_band_low": ("raw_price_band_validation_status", APPROVED_RAW_PRICE_BAND_STATUSES),
+    "price_band_high": ("raw_price_band_validation_status", APPROVED_RAW_PRICE_BAND_STATUSES),
+    "revenue_growth_3y": ("financial_time_validation_status", APPROVED_ANNUAL_FINANCIAL_STATUSES),
+    "operating_margin": ("financial_time_validation_status", APPROVED_ANNUAL_FINANCIAL_STATUSES),
+    "debt_ratio": ("financial_time_validation_status", APPROVED_ANNUAL_FINANCIAL_STATUSES),
     "offering_price_band_position": ("price_band_validation_status", APPROVED_PRICE_BAND_STATUSES),
     "band_exceeded": ("price_band_validation_status", APPROVED_PRICE_BAND_STATUSES),
     "float_share_ratio": (

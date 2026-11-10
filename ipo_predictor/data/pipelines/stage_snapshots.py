@@ -25,11 +25,14 @@ from data.pipelines.financial_history import atomic_json, summarize_asof, FINANC
 from data.pipelines.disclosure_financials import select_financial_node, parse_disclosure_financials, validate_financial_section_response, financial_records, financial_document_structure_contract
 from data.pipelines.reconciled_dataset import pin_connections
 from data.pipelines.underwriter_source import parse_underwriters
-from features.model_profiles import get_model_profile
+from features.model_profiles import get_model_profile, FEATURE_SOURCE_APPROVAL, stage_source_valid, stage_model_candidate_mask, VERIFIED_OFFERING_PRICE_STATUSES
+from features.source_contracts import (DART_RAW_PRICE_BAND_STATUS, DART_PRICE_BAND_STATUS,
+    DART_PUBLIC_FLOAT_STATUS, DART_OFFERING_STRUCTURE_STATUS, DART_STRUCTURAL_AGGREGATE_STATUS)
 from features.prediction_time_contract import validate_prediction_times
 
 POLICY = 'historical_stage_documents_v1'
 EXTRA_FEATURES = ('price_band_low', 'price_band_high', 'revenue_growth_3y', 'operating_margin', 'debt_ratio')
+INPUT_POLICY = 'verified_contemporaneous_stage_model_inputs_v1'
 
 
 class StageSourceMissing(ValueError):
@@ -714,6 +717,12 @@ def values_from_document(dart, selected, corp, stage):
         'lockup_commitment_ratio':demand.get('lockup_structured_evidence'),
         'offering_price_band_position':document.get('price_band_parse_evidence'),
         'band_exceeded':document.get('price_band_parse_evidence')}
+    selected['field_validation']={
+        'price_band_low':DART_RAW_PRICE_BAND_STATUS,'price_band_high':DART_RAW_PRICE_BAND_STATUS,
+        'secondary_offering_ratio':DART_OFFERING_STRUCTURE_STATUS,'float_share_ratio':DART_PUBLIC_FLOAT_STATUS,
+        'underwriter_tier':underwriter.get('underwriter_validation_status'),
+        'institutional_demand_ratio':DART_STRUCTURAL_AGGREGATE_STATUS,'lockup_commitment_ratio':DART_STRUCTURAL_AGGREGATE_STATUS,
+        'offering_price_band_position':DART_PRICE_BAND_STATUS,'band_exceeded':DART_PRICE_BAND_STATUS}
     return values, reasons
 
 
@@ -771,6 +780,97 @@ def stage_observation(row, field, value, origin, reasons):
         'available_at_is_effective':True,
         'time_validation_status':'pre_listing_verified' if value is not None else 'missing',
         'source':json.dumps(origin,ensure_ascii=False),'absence_confirmed':False}
+
+
+def build_stage_model_inputs(frame, observations):
+    """Project the same event cohort into distinct, receipt-bound stage inputs."""
+    keys=['event_id','prediction_stage']
+    if frame.duplicated(keys).any() or observations.duplicated(['event_id','stage','feature_name']).any():
+        raise RuntimeError('stage_input_duplicate_identity')
+    fields=set(stage_collection_fields())
+    expected={(str(r.event_id),r.prediction_stage,field) for r in frame.itertuples() for field in fields}
+    actual={(str(r.event_id),r.stage,r.feature_name) for r in observations.itertuples()}
+    if expected!=actual:raise RuntimeError('stage_input_observation_lattice_incomplete')
+    lookup=frame.set_index(keys)
+    for obs in observations.itertuples():
+        value=lookup.at[(obs.event_id,obs.stage),obs.feature_name]
+        missing=pd.isna(value)
+        if (bool(obs.is_missing)!=missing or pd.isna(obs.value)!=missing
+                or (not missing and (not math.isfinite(float(value))
+                    or not math.isclose(float(value),float(obs.value),rel_tol=1e-12,abs_tol=1e-12)))):
+            raise RuntimeError('stage_input_value_or_missing_mismatch')
+    output={}
+    for stage in ('pre_demand','post_demand'):
+        profile=get_model_profile(stage)
+        table=frame[frame.prediction_stage.eq(stage)].copy().reset_index(drop=True)
+        if stage=='pre_demand' and table[['institutional_demand_ratio','lockup_commitment_ratio',
+                                        'offering_price_band_position','band_exceeded']].notna().any().any():
+            raise RuntimeError('stage_input_pre_result_leakage')
+        table=table.drop(columns=[f for f in fields if f not in profile.feature_names])
+        if stage=='pre_demand':
+            table=table.drop(columns=[c for c in ('offering_price','offering_price_source','offering_price_available_at') if c in table])
+        audit=observations[observations.stage.eq(stage) & observations.feature_name.isin(profile.feature_names)]
+        for status_column in dict.fromkeys(c[0] for c in FEATURE_SOURCE_APPROVAL.values()):
+            table[status_column]='unverified_or_missing'
+        for index,row in table.iterrows():
+            current=audit[audit.event_id.eq(row.event_id)]
+            approvals={}
+            for field in profile.feature_names:
+                contract=FEATURE_SOURCE_APPROVAL.get(field)
+                if contract is not None and pd.notna(row[field]):
+                    observed=current[current.feature_name.eq(field)].iloc[0]
+                    approvals.setdefault(contract[0],[]).append((observed.validation_status,contract[1]))
+                table.at[index,field+'__missing']=pd.isna(row[field])
+            for column,checks in approvals.items():
+                if all(status in allowed for status,allowed in checks) and len({status for status,_ in checks})==1:
+                    table.at[index,column]=checks[0][0]
+        table['stage_time_valid']=validate_prediction_times(table,profile,audit)
+        invalid=set()
+        for obs in audit[~audit.is_missing].itertuples():
+            contract=FEATURE_SOURCE_APPROVAL.get(obs.feature_name)
+            allowed=contract[1] if contract else {'verified_stage_asof_input_v1'}
+            if obs.validation_status not in allowed:invalid.add(obs.event_id)
+        table['stage_source_valid']=stage_source_valid(table,profile) & ~table.event_id.isin(invalid)
+        table['stage_offering_price_verified']=table.offering_price_review_status.isin(VERIFIED_OFFERING_PRICE_STATUSES)
+        table['stage_dual_target_ready']=table.open_return_pct.notna() & table.close_return_pct.notna() & table.price_target_validation_status.eq('official_price_verified')
+        table['stage_critical_features_complete']=table[list(profile.critical_features)].notna().all(axis=1)
+        table['stage_model_candidate']=stage_model_candidate_mask(table,profile) & table.stage_source_valid & table.status.eq('historical_document_selected') & table.event_class.eq('general_ipo')
+        table['stage_data_ready']=table.stage_model_candidate
+        table['training_authorized']=False;table['deployment_authorized']=False
+        output[stage]=table
+    return output
+
+
+def load_stage_model_inputs(processed_dir, stage, *, reference=None):
+    """Never substitute legacy listing-eve masks for a point-in-time snapshot."""
+    profile=get_model_profile(stage);processed=Path(processed_dir).resolve()
+    try:
+        ref=reference or json.loads((processed/'current_stage_snapshots.json').read_text())
+        path=(processed/ref['manifest']).resolve()
+        if not path.is_relative_to(processed/'stage_snapshots') or path.name!='manifest.json' or digest(path)!=ref['sha256']:
+            raise RuntimeError('stage_input_reference_invalid')
+        report=checked_artifact(path.parent)
+        if (report.get('scope')!='all_connected_general_ipo' or report.get('input_policy')!=INPUT_POLICY
+                or report.get('training_executed') is not False or report.get('deployment_authorized') is not False
+                or report['inputs']['builder']!=digest(__file__)
+                or report.get('input_profiles',{}).get(stage)!={'features':list(profile.feature_names),'critical_features':list(profile.critical_features)}):
+            raise RuntimeError('stage_input_contract_missing_or_changed')
+        from data.pipelines.reconciliation_publication import committed_reconciliation
+        release=committed_reconciliation(processed)
+        if (report['inputs']['dataset']!=release['run']['input_sha256']['dataset']
+                or report['inputs']['sources']!=release['run']['input_sha256']['sources']
+                or report['inputs']['accounts']!=digest(release['paths']['financial']/'accounts.parquet')
+                or any(digest(Path(__file__).parents[2]/'features'/file)!=report['inputs']['dependency_sha256'][key]
+                       for file,key in [('model_profiles.py','profiles'),('source_contracts.py','source_contracts'),
+                                        ('prediction_time_contract.py','time_contract')])):
+            raise RuntimeError('stage_input_parent_or_dependency_changed')
+        frame=pd.read_parquet(path.parent/(stage+'_inputs.parquet'))
+        ledger=pd.read_parquet(path.parent/'observations.parquet')
+        ledger=ledger[ledger.stage.eq(stage) & ledger.feature_name.isin(profile.feature_names)].reset_index(drop=True)
+        frame.attrs['stage_snapshot_reference']=ref
+        return frame,ledger,report
+    except (OSError,KeyError,ValueError) as exc:
+        raise RuntimeError('stage_input_snapshot_missing_or_invalid') from exc
 
 
 def financials_from_selected_document(dart,raw,selected,corp,cached_only,*,cutoff=None):
@@ -1001,7 +1101,9 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
                 'demand_result_time_is_effective':True,**dict.fromkeys(fields)}
             target=targets.loc[event.event_id]
             row.update(target_offering_price=float(target.offering_price),open_return_pct=float(target.open_return_pct),
-                       close_return_pct=float(target.close_return_pct))
+                       close_return_pct=float(target.close_return_pct),market=target.market,event_class=target.event_class,
+                       offering_price_review_status=target.offering_price_review_status,
+                       price_target_validation_status=target.price_target_validation_status)
             values={};reasons={};origins={}
             if selected['status']=='historical_document_selected':
                 cutoff=selected['prediction_at'];origin=selected['proof'];row.update(prediction_at=cutoff.isoformat(),selected_receipt=origin['receipt'])
@@ -1017,11 +1119,13 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
                     values,reasons=values_from_document(dart,selected,str(record['corp_code']),stage)
                     set_stage_offering_price_metadata(row,selected)
                 except ValueError as exc:row['status']=str(exc);values={}
-                origins={f:{**origin,'extraction_evidence':selected.get('field_evidence',{}).get(f)}
+                origins={f:{**origin,'extraction_evidence':selected.get('field_evidence',{}).get(f),
+                            'validation_status':selected.get('field_validation',{}).get(f,'unverified_or_missing')}
                          for f in set(values)|set(reasons)}
                 for field,source in origin.get('result_field_sources',{}).items():
                     if field in values:
                         origins[field]={**source,'extraction_evidence':selected.get('field_evidence',{}).get(field),
+                            'validation_status':selected.get('field_validation',{}).get(field,'unverified_or_missing'),
                             'linked_complete_receipt':origin['receipt']}
                 past=index[index.available_at<cutoff]
                 for window in [5,20]:
@@ -1094,6 +1198,12 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
         raise RuntimeError('stage_inputs_or_code_changed')
     outputs={'stages.parquet':pd.DataFrame(rows),'observations.parquet':pd.DataFrame(ledger),
              'milestones.parquet':pd.DataFrame(milestones),'source_attempts.parquet':pd.DataFrame(attempts)}
+    inputs=build_stage_model_inputs(outputs['stages.parquet'],outputs['observations.parquet'])
+    for stage,frame in inputs.items():
+        outputs[stage+'_inputs.parquet']=frame
+        ready=frame.set_index('event_id').stage_data_ready
+        mask=outputs['stages.parquet'].prediction_stage.eq(stage)
+        outputs['stages.parquet'].loc[mask,'stage_data_ready']=outputs['stages.parquet'].loc[mask,'event_id'].map(ready)
     identity['attempts']=hashlib.sha256(json.dumps(attempts,sort_keys=True).encode()).hexdigest()
     version=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:20]
     dest=processed/'stage_snapshots'/version;dest.parent.mkdir(parents=True,exist_ok=True)
@@ -1101,6 +1211,9 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
         staging=Path(tempfile.mkdtemp(prefix='.stages.',dir=dest.parent))
         for name,frame in outputs.items():frame.to_parquet(staging/name,index=False)
         summary={'version':version,'policy':POLICY,'inputs':identity,'events':len(records),
+            'input_policy':INPUT_POLICY,
+            'input_profiles':{s:{'features':list(get_model_profile(s).feature_names),
+                                'critical_features':list(get_model_profile(s).critical_features)} for s in inputs},
             'scope':'all_connected_general_ipo' if event_limit is None and event_ids is None else 'limited_sample',
             'stages':{s:{'rows':int(len(g)),'ready_rows':int(g.stage_data_ready.sum()),'status_counts':g.status.value_counts().to_dict()}
                       for s,g in outputs['stages.parquet'].groupby('prediction_stage')},

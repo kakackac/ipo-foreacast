@@ -71,7 +71,8 @@ class ReconciledDatasetTests(unittest.TestCase):
                            'record':json.dumps(record),'proof':'{}'}]).to_parquet(source/'connection_results.parquet')
             atomic_json(source/'manifest.json',{'inputs':{'inputs':inputs['input_sha256']},'output_sha256':{
                 'connection_results.parquet':digest(source/'connection_results.parquet')}})
-            pd.DataFrame([dict(event_id='e',operating_margin=.1,financial_feature_provenance=json.dumps({
+            pd.DataFrame([dict(event_id='e',operating_margin=.1,
+                financial_time_validation_status='verified_dart_annual_financial_asof_v1',financial_feature_provenance=json.dumps({
                 'operating_margin':{'validation_status':'verified_dart_annual_financial_asof_v1',
                                     'available_at':'2024-02-02T00:00:00+09:00','source_reference':'20240201000001'}}))]).to_parquet(financial/'summaries.parquet')
             atomic_json(financial/'manifest.json',{'inputs':inputs['input_sha256'],

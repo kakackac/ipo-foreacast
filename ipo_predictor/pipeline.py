@@ -62,15 +62,14 @@ def step_load_or_build_data(
         logger.info("데모 데이터: %d행 × %d열", len(df), len(df.columns))
     else:
         from config import PROC_DIR
-        stage_path = (
-            PROC_DIR / "model_stage_datasets" / f"{prediction_stage}.parquet"
-            if prediction_stage else None
-        )
-        if stage_path is not None and not stage_path.exists():
-            raise TrainingReadinessError(
-                f"단계 데이터셋이 없습니다: {stage_path}. collect를 다시 실행하세요."
-            )
-        proc_path = stage_path if stage_path is not None else PROC_DIR / "features_all.parquet"
+        if prediction_stage:
+            from data.pipelines.stage_snapshots import load_stage_model_inputs
+            try:df,_,report=load_stage_model_inputs(PROC_DIR,prediction_stage)
+            except RuntimeError as exc:
+                raise TrainingReadinessError("최신 계약의 시점별 입력 스냅샷 검증이 필요합니다. 전체 collect를 반복하지 마세요.") from exc
+            logger.info("시점별 입력 로드: %d행 (%s, %s)",len(df),prediction_stage,report['version'])
+            return df
+        proc_path = PROC_DIR / "features_all.parquet"
         if not proc_path.exists():
             logger.error("피처 파일 없음: %s", proc_path)
             logger.error("먼저 collect 모드로 공식 원천과 단계별 피처 파일을 생성하세요.")
@@ -246,8 +245,14 @@ def require_training_ready(
 ) -> pd.DataFrame:
     """학습 안전장치를 적용하고, 통과한 일반 IPO 행만 반환한다."""
     from config import PROC_DIR
-    time_path = PROC_DIR / "feature_time_validation.parquet"
-    time_audit = pd.read_parquet(time_path) if time_path.exists() else None
+    from data.pipelines.stage_snapshots import load_stage_model_inputs
+    reference=df.attrs.get('stage_snapshot_reference')
+    if reference is None:raise TrainingReadinessError('검증 버전에 고정되지 않은 단계 입력입니다.')
+    pinned,time_audit,_=load_stage_model_inputs(PROC_DIR,prediction_stage,reference=reference)
+    try:pd.testing.assert_frame_equal(df,pinned)
+    except AssertionError as exc:raise TrainingReadinessError('저장된 단계 입력과 현재 입력이 다릅니다.') from exc
+    if not pinned.get('training_authorized',pd.Series(False,index=pinned.index)).eq(True).all():
+        raise TrainingReadinessError('현재 단계 산출물은 데이터 검증용이며 모델 학습이 승인되지 않았습니다.')
     report = assess_training_readiness(df, phase=phase, prediction_stage=prediction_stage,
                                       feature_time_audit=time_audit)
     if not report["eligible"]:

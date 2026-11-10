@@ -15,6 +15,19 @@ from models.baseline.gradient_boost_model import IPOPriceModel
 
 
 class Phase2FeatureTests(unittest.TestCase):
+    def approved_stage_base(self, frame):
+        for field in ('major_shareholder_lockup_months','risk_factor_count'):
+            frame[field]=pd.NA
+        for field,status in {
+            'raw_price_band_validation_status':'verified_dart_currency_band_v1',
+            'financial_time_validation_status':'verified_dart_annual_financial_asof_v1',
+            'float_share_validation_status':'verified_dart_public_float_direct_v1',
+            'offering_structure_validation_status':'verified_dart_offering_structure_v1',
+            'underwriter_validation_status':'verified_krx_underwriter_registry_mapping_v1',
+        }.items():
+            if field not in frame:frame[field]=status
+        return frame
+
     def test_phase2_demo_dataset_transforms_without_missing_values(self):
         df = build_demo_dataset(n=80, seed=7, phase="phase2")
         feature_names = get_phase2_feature_names()
@@ -295,6 +308,7 @@ class Phase2FeatureTests(unittest.TestCase):
             )))
         ])
 
+        self.approved_stage_base(features)
         pre = build_stage_dataset(features, "pre_demand", audit)
         post_demand = build_stage_dataset(features, "post_demand", audit)
 
@@ -343,6 +357,7 @@ class Phase2FeatureTests(unittest.TestCase):
             for feature_name in profile.feature_names
         ])
 
+        self.approved_stage_base(features)
         dataset = build_stage_dataset(features, "post_demand", audit)
 
         self.assertTrue(dataset.loc[0, "stage_source_valid"])
@@ -373,6 +388,7 @@ class Phase2FeatureTests(unittest.TestCase):
             for feature_name in profile.feature_names
         ])
 
+        self.approved_stage_base(features)
         dataset = build_stage_dataset(features, "post_demand", audit)
 
         self.assertFalse(dataset.loc[0, "stage_features_complete"])
@@ -429,7 +445,7 @@ class Phase2FeatureTests(unittest.TestCase):
             row.update({feature: 1.0 for feature in profile.feature_names})
             rows.append(row)
 
-        readiness = assess_training_readiness(pd.DataFrame(rows), prediction_stage="post_demand")
+        readiness = assess_training_readiness(self.approved_stage_base(pd.DataFrame(rows)), prediction_stage="post_demand")
 
         self.assertEqual(readiness["current_contract_model_candidate_rows"], 100)
 
