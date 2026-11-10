@@ -18,6 +18,17 @@ def schedule(start='2024년 02월 08일',end='02월 09일'):
 
 
 class StageSnapshotTests(unittest.TestCase):
+    def test_unverified_float_scope_is_not_reported_as_a_proven_quantity_conflict(self):
+        for basis,expected in [('initial_float_scope_unverified','initial_float_scope_unverified'),
+                               ('same_table_candidates_conflict','conflicting_float_ratios_review_required')]:
+            selected={'html':'','metadata':{'rcept_no':'20240101000001'},
+                'analysis':{'offering':{'public_float_parse_method':'conflicting_float_ratios_review_required',
+                    'public_float_basis_status':basis},'demand':{},
+                    'underwriter':{'underwriter_validation_status':'unverified'}}}
+            values,reasons=values_from_document(None,selected,'00000001','pre_demand')
+            self.assertNotIn('float_share_ratio',values)
+            self.assertEqual(reasons['float_share_ratio'],expected)
+
     def added_note_html(self):
         return ('<table><tr><td>항목</td><td>정정 전</td><td>정정 후</td></tr>'
             '<tr><td>신규 수요예측 결과</td><td>-</td><td>주2)</td></tr></table>'

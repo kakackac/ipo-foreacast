@@ -684,6 +684,8 @@ def values_from_document(dart, selected, corp, stage):
         if total>0:values['secondary_offering_ratio']=document['secondary_shares']/total
     reasons['secondary_offering_ratio']='offering_structure_pair_incomplete_or_unverified'
     reasons['float_share_ratio']=document.get('public_float_parse_method') or 'float_not_identified_in_selected_sections'
+    if document.get('public_float_basis_status')=='initial_float_scope_unverified':
+        reasons['float_share_ratio']='initial_float_scope_unverified'
     if document.get('public_float_parse_method')=='disclosed_public_float_ratio_direct_context':
         values['float_share_ratio']=document.get('public_float_ratio_disclosed')
     elif (document.get('public_float_parse_method')=='disclosed_public_float_shares_direct_context'
@@ -841,6 +843,22 @@ def build_stage_model_inputs(frame, observations):
     return output
 
 
+def stage_dependency_paths():
+    return {'time_contract':Path(__file__).parents[2]/'features/prediction_time_contract.py',
+        'profiles':Path(__file__).parents[2]/'features/model_profiles.py',
+        'source_contracts':Path(__file__).parents[2]/'features/source_contracts.py',
+        'underwriters':Path(__file__).with_name('underwriter_source.py'),
+        'tier_mapping':Path(__file__).parents[1]/'processors/feature_engineer.py',
+        'financial_summary':Path(__file__).with_name('financial_history.py'),
+        'correction_views':Path(__file__).with_name('correction_views.py'),
+        'source_document_selection':Path(__file__).with_name('lockup_reconciliation.py'),
+        'band_sources':Path(__file__).with_name('band_source_resolver.py'),
+        'financial_parser':Path(__file__).with_name('disclosure_financials.py'),
+        'financial_source_selection':Path(__file__).with_name('financial_source_selection.py'),
+        'float_tables':Path(__file__).parents[1]/'collectors/float_tables.py',
+        'publication':Path(__file__).with_name('reconciliation_publication.py')}
+
+
 def load_stage_model_inputs(processed_dir, stage, *, reference=None):
     """Never substitute legacy listing-eve masks for a point-in-time snapshot."""
     profile=get_model_profile(stage);processed=Path(processed_dir).resolve()
@@ -860,9 +878,9 @@ def load_stage_model_inputs(processed_dir, stage, *, reference=None):
         if (report['inputs']['dataset']!=release['run']['input_sha256']['dataset']
                 or report['inputs']['sources']!=release['run']['input_sha256']['sources']
                 or report['inputs']['accounts']!=digest(release['paths']['financial']/'accounts.parquet')
-                or any(digest(Path(__file__).parents[2]/'features'/file)!=report['inputs']['dependency_sha256'][key]
-                       for file,key in [('model_profiles.py','profiles'),('source_contracts.py','source_contracts'),
-                                        ('prediction_time_contract.py','time_contract')])):
+                or report['inputs']['dependency_sha256']!={name:digest(file) for name,file in stage_dependency_paths().items()}
+                or report['inputs']['parser']!=digest(Path(__file__).parents[1]/'collectors/dart_collector.py')
+                or report['inputs']['financial_document_structure']!=financial_document_structure_contract()):
             raise RuntimeError('stage_input_parent_or_dependency_changed')
         frame=pd.read_parquet(path.parent/(stage+'_inputs.parquet'))
         ledger=pd.read_parquet(path.parent/'observations.parquet')
@@ -1034,19 +1052,7 @@ def _run(raw_dir, processed_dir, *, cached_only, event_limit, event_ids, dart):
     identity={'policy':POLICY,'sources':digest(source/'manifest.json'),'dataset':digest(dataset),
               'financial_document_structure':financial_document_structure_contract(),
               'accounts':digest(accounts_path),'builder':digest(__file__), 'parser':digest(Path(__file__).parents[1]/'collectors/dart_collector.py')}
-    dependencies={'time_contract':Path(__file__).parents[2]/'features/prediction_time_contract.py',
-        'profiles':Path(__file__).parents[2]/'features/model_profiles.py',
-        'source_contracts':Path(__file__).parents[2]/'features/source_contracts.py',
-        'underwriters':Path(__file__).with_name('underwriter_source.py'),
-        'tier_mapping':Path(__file__).parents[1]/'processors/feature_engineer.py',
-        'financial_summary':Path(__file__).with_name('financial_history.py'),
-        'correction_views':Path(__file__).with_name('correction_views.py'),
-        'source_document_selection':Path(__file__).with_name('lockup_reconciliation.py'),
-        'band_sources':Path(__file__).with_name('band_source_resolver.py'),
-        'financial_parser':Path(__file__).with_name('disclosure_financials.py'),
-        'financial_source_selection':Path(__file__).with_name('financial_source_selection.py'),
-        'float_tables':Path(__file__).parents[1]/'collectors/float_tables.py',
-        'publication':Path(__file__).with_name('reconciliation_publication.py')}
+    dependencies=stage_dependency_paths()
     identity['dependency_sha256']={name:digest(path) for name,path in dependencies.items()}
     reusable_annual_parser=annual_history_contract_matches(finance_report['code'],identity['dependency_sha256'])
     accounts=current_annual_history(accounts,reusable_annual_parser)

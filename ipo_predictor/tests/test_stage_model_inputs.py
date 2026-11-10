@@ -188,10 +188,10 @@ class StageModelInputTests(unittest.TestCase):
                 'input_profiles':{s:{'features':list(get_model_profile(s).feature_names),
                     'critical_features':list(get_model_profile(s).critical_features)} for s in inputs},
                 'inputs':{'builder':digest(stages.__file__),'dataset':'dataset','sources':'sources',
-                    'accounts':digest(finance/'accounts.parquet'),'dependency_sha256':{
-                        key:digest(Path(stages.__file__).parents[2]/'features'/file) for file,key in [
-                            ('model_profiles.py','profiles'),('source_contracts.py','source_contracts'),
-                            ('prediction_time_contract.py','time_contract')]}},
+                    'accounts':digest(finance/'accounts.parquet'),
+                    'parser':digest(Path(stages.__file__).parents[1]/'collectors/dart_collector.py'),
+                    'financial_document_structure':stages.financial_document_structure_contract(),
+                    'dependency_sha256':{key:digest(file) for key,file in stages.stage_dependency_paths().items()}},
                 'output_sha256':{f.name:digest(f) for f in root.iterdir()}}
             atomic_json(root/'manifest.json',report)
             ref={'manifest':str((root/'manifest.json').relative_to(processed)),'sha256':digest(root/'manifest.json')}
@@ -202,6 +202,11 @@ class StageModelInputTests(unittest.TestCase):
                 self.assertEqual(table.attrs['stage_snapshot_reference'],ref)
                 self.assertTrue(evidence.stage.eq('pre_demand').all())
                 self.assertNotIn('institutional_demand_ratio',evidence.feature_name.tolist())
+                changed={**report['inputs'],'dependency_sha256':{**report['inputs']['dependency_sha256'],'float_tables':'old'}}
+                atomic_json(root/'manifest.json',{**report,'inputs':changed})
+                atomic_json(processed/'current_stage_snapshots.json',{**ref,'sha256':digest(root/'manifest.json')})
+                with self.assertRaisesRegex(RuntimeError,'stage_input_parent_or_dependency_changed'):
+                    stages.load_stage_model_inputs(processed,'pre_demand')
                 atomic_json(root/'manifest.json',{**report,'inputs':{**report['inputs'],'builder':'old'}})
                 atomic_json(processed/'current_stage_snapshots.json',{**ref,'sha256':digest(root/'manifest.json')})
                 with self.assertRaisesRegex(RuntimeError,'stage_input_contract_missing_or_changed'):

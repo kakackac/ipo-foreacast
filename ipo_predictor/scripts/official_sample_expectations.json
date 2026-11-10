@@ -48,6 +48,86 @@
   ],
   "samples": [
     {
+      "sample": "jeil_pre_nested_float_precision_2020",
+      "receipt": "20201105000117",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20201105000117&dcmNo=7535654&eleId=16&offset=247410&length=286484&dtd=dart3.xsd",
+      "sha256": "18c603292e97235313b637f89df20dd59fedd96cca2cc9a30c6513ce933cf523",
+      "expected": {"public_float_shares": 2900000,"total_post_listing_shares": 11117000,"public_float_ratio_disclosed": 0.2609},
+      "expected_evidence": {"public_float_parse_evidence": {"schema_binding": {"rule": "closed_post_ownership_group_partition_v1"}}},
+      "review_note": "The narrative says approximately 26.1%, while the closed issuer table prints 26.09% for the same 2900000/11117000 quantity pair. Locked leaves total 8217000; floating new and secondary shares are 1450000 each. Preserve the more precise directly printed aggregate, not an unrounded calculated replacement."
+    },
+    {
+      "sample": "ssr_nested_partition_float_2018",
+      "receipt": "20180717000064",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20180717000064&dcmNo=6252723&eleId=15&offset=166129&length=238634&dtd=dart3.xsd",
+      "sha256": "36c4c8ded5c8a4077518b1f6217729906bafade5045f8a8342b488759cbfe9d0",
+      "expected": {"public_float_shares": 1420000,"total_post_listing_shares": 5662567,"public_float_ratio_disclosed": 0.2508},
+      "expected_evidence": {"public_float_parse_evidence": {"schema_binding": {"rule": "closed_post_ownership_group_partition_v1"}}},
+      "review_note": "The maximal-holder subgroup subtotal 2974908 is not another leaf. Eight maximal-holder leaves plus venture 1225059 and underwriter 42600 reconcile to the locked subtotal 4242567. Public-offering float 1420000 completes the issuer total 5662567/100%. Preserve printed 25.08%."
+    },
+    {
+      "sample": "novatech_nested_partition_float_2018",
+      "receipt": "20181022000097",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20181022000097&dcmNo=6354422&eleId=16&offset=519672&length=168790&dtd=dart3.xsd",
+      "sha256": "e348082444a7b70eaf172d25914812716ece991576834f0d495597ce4d1c2019",
+      "expected": {"public_float_shares": 1148400,"total_post_listing_shares": 4626800,"public_float_ratio_disclosed": 0.2482},
+      "expected_evidence": {"public_float_parse_evidence": {"schema_binding": {"rule": "closed_post_ownership_group_partition_v1"}}},
+      "review_note": "Nested locked subgroups 3250270 and 228130 are subtotals, not leaves. Their combined 3478400 locked plus public-offering float 1148400 reconcile to 4626800 post-offering shares/100%; pre-offering 3780000 is not the denominator. Preserve printed 24.82%."
+    },
+    {
+      "sample": "daeyuap_closed_partition_float_2018",
+      "receipt": "20181126000391",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20181126000391&dcmNo=6395553&eleId=17&offset=209212&length=207115&dtd=dart3.xsd",
+      "sha256": "1ede6e2fd3f676a9031bfec8966303a9512e6045b8174babfa04312798749c23",
+      "expected": {"public_float_shares": 2520000,"total_post_listing_shares": 10884000,"public_float_ratio_disclosed": 0.2315},
+      "expected_evidence": {"public_float_parse_evidence": {"schema_binding": {"rule": "closed_post_ownership_group_partition_v1"}}},
+      "review_note": "The only initial float row is public shareholders 2520000/23.15%. All five locked leaves total 8364000; together they close post-offering total 10884000/100%. A single holder is aggregate only after this complete issuer partition is proved."
+    },
+    {
+      "sample": "winners_closed_partition_float_2025",
+      "receipt": "20250213000090",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20250213000090&dcmNo=10302839&eleId=14&offset=498958&length=600542&dtd=dart4.xsd",
+      "sha256": "670f6f7a341f66038b89599239c710228fad0adfec6fd346286ae65863156dd2",
+      "expected": {"public_float_shares": 1700000,"total_post_listing_shares": 6851000,"public_float_ratio_disclosed": 0.2481},
+      "expected_evidence": {"public_float_parse_evidence": {"schema_binding": {"rule": "closed_post_ownership_group_partition_v1","reported_percentage_text": "24.81%"}}},
+      "review_note": "The generic float subtotal is not a free-standing investor subtotal: its immediately preceding float leaf is 1700000. The two locked leaves total 5151000; both groups reconcile to issuer total 6851000/100%. Keep the printed 24.81%."
+    },
+    {
+      "sample": "unitechno_closed_partition_float_2016",
+      "receipt": "20160902000083",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160902000083&dcmNo=5280828&eleId=16&offset=257393&length=133264&dtd=dart3.xsd",
+      "sha256": "58b3a9b53aca8bca68e222857251c7d9564d69e81f6919138dd67ed17b464666",
+      "expected": {"public_float_shares": 1350000,"total_post_listing_shares": 6008760,"public_float_ratio_disclosed": null},
+      "expected_evidence": {"public_float_parse_evidence": {"schema_binding": {"rule": "closed_post_ownership_leaf_partition_v1","float_leaf_rows": [8],"empty_financial_grid_rows": [4],"aggregate_cell_imputed": false}}},
+      "review_note": "The float total cell is a dash, not zero. All leaf post shares sum to 6008760 and each row partitions into declared float/locked shares; float leaf 1350000 and independently printed locked total 4658760 close the issuer total. The blank repeated-period row contains no holder or financial values. Derive quantities without inserting a value into the missing total cell."
+    },
+    {
+      "sample": "sillajen_group_partition_float_2016",
+      "receipt": "20161125000431",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20161125000431&dcmNo=5363139&eleId=16&offset=379522&length=338284&dtd=dart3.xsd",
+      "sha256": "7967116d1b1379ba24efa0fa901f9d42416d35957e9c116a2f7fc7921698e35f",
+      "expected": {"public_float_shares": 46299555,"total_post_listing_shares": 61616527,"public_float_ratio_disclosed": 0.7514},
+      "expected_evidence": {"public_float_parse_evidence": {"schema_binding": {"rule": "closed_post_ownership_group_partition_v1","reported_percentage_text": "75.14%"}}},
+      "review_note": "The generic float subtotal follows both explicitly labelled float leaves: 36899555 plus 9400000 equals 46299555. Locked 15316972 plus float reconciles to issuer total 61616527/100%. Preserve the printed aggregate 75.14%, do not double-count nested locked subtotals, and never use an investor subgroup alone."
+    },
+    {
+      "sample": "jinair_single_partition_float_2017",
+      "receipt": "20171128000038",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20171128000038&dcmNo=5861144&eleId=16&offset=581668&length=242633&dtd=dart3.xsd",
+      "sha256": "cd9e744fdb72070391a94a1aae284b509d17587bcbf637e5126bf960333d67b3",
+      "expected": {"public_float_shares": 9600000,"total_post_listing_shares": 30000000,"public_float_ratio_disclosed": 0.32},
+      "expected_evidence": {"public_float_parse_evidence": {"schema_binding": {"rule": "closed_post_ownership_group_partition_v1"}}},
+      "review_note": "A single explicitly labelled float public-offering holder is the whole float only because all locked leaves/subtotal 20400000 plus float 9600000 reconcile to post issuer total 30000000/100%. The pre-offering total 27000000 is not the denominator. Preserve the directly printed 32.0%."
+    },
+    {
       "sample": "lsasia_excluded_total_conflict_float_2016", "receipt": "20160907000314",
       "section_title": "Ⅲ. 투자위험요소",
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160907000314&dcmNo=5285496&eleId=16&offset=521447&length=407853&dtd=dart3.xsd",

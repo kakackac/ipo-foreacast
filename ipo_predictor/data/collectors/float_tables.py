@@ -28,6 +28,7 @@ def ownership_float(tables):
     ratio_only = []
     scope_rejections = []
     unverified_grids = []
+    partition_candidates = []
     for ti, table in enumerate(tables):
         if not table:
             continue
@@ -185,6 +186,125 @@ def ownership_float(tables):
                 if len(fs)==len(bs)==1 and shares(r[fs[0]])+shares(r[bs[0]])==shares(r[c]):return True
             return False
 
+        # Read a closed issuer partition, not an investor subtotal. A missing
+        # aggregate cell stays missing; only the explicit leaf quantities sum.
+        grand_rows=[(ri,r) for ri,r in enumerate(table) if r and re.fullmatch(
+            r'합계|총계|총합계|공모후합계|상장후합계',compact(r[0]))]
+        post_columns={c for h in headers for c,cell in enumerate(h) if re.fullmatch(
+            r'(?:공모후|상장후)(?:총)?(?:발행)?주식수(?:\(주\))?|공모후|상장후|상장예정주식(?:총)?수(?:\(주\))?',compact(cell))}
+        closed_totals=[(ri,r,c) for ri,r in grand_rows for c in post_columns
+            if c<len(r) and shares(r[c]) is not None and total_percentage(r,c)]
+        float_columns={c for h in headers for c,cell in enumerate(h) if float_label(cell)
+            and not any(c<len(other) and re.search(r'지분율|비율',compact(other[c])) for other in headers)}
+        locked_label=r'(?:공모후|상장후)?(?:유통(?:불가능|제한)(?:물량|주식수|주식)?|매도금지물량|매각제한물량|보호예수및매도금지물량)'
+        locked_columns={c for h in headers for c,cell in enumerate(h) if re.fullmatch(locked_label,compact(cell))}
+        if (len(closed_totals)==1 and not conditional_header and not any(re.search(
+                r'회사명|기업명|비교회사|비교기업|종속회사|종속기업|타사|타기업',compact(cell))
+                for header in headers for cell in header)):
+            tr,trow,dc=closed_totals[0]
+            split=len(float_columns)==len(locked_columns)==1
+            fc=next(iter(float_columns)) if split else None;lc=next(iter(locked_columns)) if split else None
+            split=split and len({dc,fc,lc})==3
+            def group_label(value):
+                value=compact(value)
+                if float_label(value):return 'float'
+                if re.fullmatch(locked_label+r'(?:\((?:주)?\d+\))?',value):return 'locked'
+                wrapped=re.fullmatch(r'소계\((.+)\)',value)
+                return group_label(wrapped[1]) if wrapped else None
+            def read_partition():
+                if share_class_unverified(dc):return
+                labelled_quantity_columns={j for h in headers for j,cell in enumerate(h) if j>0 and re.fullmatch(
+                    r'(?:(?:공모|상장)(?:전|후)|상장예정)?(?:총)?(?:발행)?주식수(?:\(주\))?|공모전|상장전|공모후|상장후',compact(cell))}
+                label_end=min(labelled_quantity_columns or {dc})
+                totals={'float':0,'locked':0};last={'float':0,'locked':0}
+                leaves={'float':[],'locked':[]};subtotals=[];excluded=[];empty_rows=[];active=None;post_sum=0;public=False;conflicts=[]
+                for ri,row in enumerate(table[:tr]):
+                    if dc>=len(row):continue
+                    q=shares(row[dc])
+                    if q is None:
+                        if ri<2 and re.fullmatch(r'(?:(?:공모|상장)(?:전|후)|상장예정)?(?:총)?(?:발행)?주식수(?:\(주\))?|공모후|상장후',compact(row[dc])):continue
+                        if (split and max(fc,lc)<len(row) and all(compact(cell) in {'','-','--'}
+                                for cell in row[1:max(dc,fc,lc)+1])):
+                            empty_rows.append(ri);continue
+                        return
+                    prefix=[compact(cell) for cell in row[:label_end]]
+                    labels=[cell for cell in prefix if cell not in {'','-','--'} and shares(cell) is None and percent(cell) is None]
+                    def subtotal_name(cell):
+                        return bool(re.fullmatch(r'(?:'+re.escape(labels[0]) + r')?소계(?:\((?:주)?\d+\))?',cell))
+                    subtotal=bool(labels and (
+                        re.fullmatch(r'소계(?:\([^()]*\))?',labels[0])
+                        or re.fullmatch(r'.+소계(?:\([^()]*\))?',labels[0]) and len(labels)>1 and len(set(labels))==1
+                        or not split and group_label(row[0]) is not None
+                            and any(re.fullmatch(r'소계(?:\((?:주)?\d+\))?',cell) for cell in labels[1:])
+                        or any(subtotal_name(cell) for cell in labels[1:])
+                            and all(cell in {'보통주',labels[0]} or subtotal_name(cell) for cell in labels[1:])))
+                    if split:
+                        if max(fc,lc)>=len(row):return
+                        n,b=shares(row[fc]),shares(row[lc])
+                        if subtotal:
+                            vectors=[(post_sum,totals['float'],totals['locked']),
+                                     (post_sum-sum(last.values()),totals['float']-last['float'],totals['locked']-last['locked'])]
+                            if not any(q==v[0] and (n is None or n==v[1]) and (b is None or b==v[2]) for v in vectors):
+                                conflicts.append({'row':ri,'reason':'subtotal_does_not_match_declared_leaves'})
+                            last.update(totals);excluded.append(ri);continue
+                        if n is None and compact(row[fc]) not in {'','-','--'}:return
+                        if b is None and compact(row[lc]) not in {'','-','--'}:return
+                        if n is None and b is None:return
+                        if (n or 0)+(b or 0)!=q:
+                            conflicts.append({'row':ri,'reason':'leaf_float_locked_sum_differs_from_post_shares'})
+                        for kind,value in [('float',n),('locked',b)]:
+                            if value is not None:totals[kind]+=value;leaves[kind].append(ri)
+                    else:
+                        kind=group_label(row[0])
+                        if kind is None and subtotal and all(cell in {'','-','--','보통주'} or re.fullmatch(r'소계(?:\((?:주)?\d+\))?',cell) for cell in prefix):kind=active
+                        if kind is None:return
+                        if subtotal:
+                            if q not in {totals[kind],totals[kind]-last[kind]}:
+                                conflicts.append({'row':ri,'reason':'group_subtotal_does_not_match_declared_leaves'})
+                            if q==totals[kind]:subtotals.append((kind,ri,q))
+                            last[kind]=totals[kind];excluded.append(ri);continue
+                        active=kind;totals[kind]+=q;leaves[kind].append(ri)
+                    post_sum+=q
+                    public=public or q>0 and any(re.fullmatch(r'공모주주(?:\(.*\))?|공모주식수|공모주식(?:\(.*\))?',cell) for cell in prefix)
+                d=shares(trow[dc]);n=totals['float'];b=totals['locked']
+                if not public or not leaves['float'] or not leaves['locked'] or not n:return
+                if post_sum!=d or n+b!=d:conflicts.append({'reason':'whole_issuer_partition_not_closed','leaf_post_total':post_sum,'issuer_total':d})
+                if conflicts:
+                    unverified_grids.append({'table_index':ti,'table':table,'partition_layout_checks_failed':conflicts})
+                    return
+                if split:
+                    if max(fc,lc)>=len(trow):return
+                    explicit=[(fc,n),(lc,b)]
+                    if not any(shares(trow[c]) is not None for c,_ in explicit):return
+                    for c,value in explicit:
+                        given=shares(trow[c])
+                        if given is None and compact(trow[c]) not in {'','-','--'}:return
+                        if given is not None and given!=value:conflicts.append({'column':c,'reason':'reported_total_differs_from_leaf_sum','reported':given,'leaf_sum':value})
+                if conflicts:
+                    paragraph_conflicts.append({'rule':'closed_ownership_partition_conflict_v1','table_index':ti,'table':table,'conflicts':conflicts})
+                    return
+                fr=leaves['float'][0];printed=None
+                if not split:
+                    full=[ri for kind,ri,q in subtotals if kind=='float' and q==n]
+                    single=[ri for ri in leaves['float'] if shares(table[ri][dc])==n]
+                    direct=full[-1:] or single
+                    if len(direct)==1:
+                        fr=direct[0]
+                        if dc+1<len(table[fr]):
+                            cell=table[fr][dc+1]
+                            if percent(cell) is not None:printed=cell
+                            elif compact(cell) not in {'','-','--'}:return
+                item=(n,d,percent(printed) if printed else None,ti,fr,tr,dc,dc,table)
+                binding={'rule':'closed_post_ownership_leaf_partition_v1' if split else 'closed_post_ownership_group_partition_v1',
+                    'float_leaf_rows':leaves['float'],'locked_leaf_rows':leaves['locked'],
+                    'float_total':n,'locked_total':b,'post_total':d,'post_column':dc,
+                    'float_column':fc,'locked_column':lc,'reported_percentage_text':printed,
+                    'excluded_subtotal_rows':excluded,
+                    'empty_financial_grid_rows':empty_rows,
+                    'aggregate_cell_imputed':False,'all_leaf_post_quantities_reconciled':True}
+                partition_candidates.append((item,binding))
+            read_partition()
+
         # An explicitly labelled listing-day schedule discloses its percentage
         # directly. Future 100% rows must not manufacture today's denominator.
         schedule_q={c for h in headers for c,cell in enumerate(h) if re.fullmatch(r'(?:유통가능)?주식수(?:\(주\))?',compact(cell))}
@@ -330,6 +450,12 @@ def ownership_float(tables):
                         'share_class_scope':'ordinary' if ordinary else 'explicit_post_total',
                         'ignored_diluted_basis_percentage':ignored_printed,
                         'denominator_percentage_text':row[c+1] if diluted_percentage else None}
+    for item,binding in partition_candidates:
+        key=(item[3],item[4],item[6])
+        if any((old[0],old[1],old[3],old[4],old[6])==(item[0],item[1],*key) for old in candidates):continue
+        if key in schema_bindings and schema_bindings[key]['reported_percentage_text'] is None:
+            item=(*item[:2],None,*item[3:])
+        candidates.append(item);schema_bindings.setdefault(key,binding)
     valid = []
     def reported_cell(item):
         binding=paragraph_bindings.get((item[3],item[4]))
