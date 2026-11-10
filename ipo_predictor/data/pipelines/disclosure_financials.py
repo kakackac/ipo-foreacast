@@ -564,11 +564,7 @@ def preparation_for_year(statements, scope, year, header, term_years):
     return None
 
 
-def interim_annual_comparative_basis(text, scope, interim_years, published, fiscal_periods=(), interim_ends=(), interim_terms=()):
-    """Bind a same-scope IFRS interim declaration to its named prior annual report."""
-    if not interim_years:return {}
-    current=max(interim_years)
-    if current>pd.Timestamp(published).year:return {}
+def interim_preparation_declarations(text, scope, current):
     compact=re.sub(r'\s+','',text)
     bridge=r'(?:(?:[^.。!?])|(?<=\d)\.(?=\d)){0,160}?'
     interim_standard=r'기업회계기준서제1034호(?:[\'"‘’「」(]*중간재무보고[\'"‘’「」)]*)?'
@@ -585,7 +581,18 @@ def interim_annual_comparative_basis(text, scope, interim_years, published, fisc
         years={int(y) for y in re.findall(r'((?:19|20)\d{2})(?:년|[./-])\d{1,2}(?:월|[./-])\d{1,2}',match[0])}
         if years and years!={current}:continue
         declarations.append(match)
+    return compact,declarations
+
+
+def interim_annual_comparative_basis(text, scope, interim_years, published, fiscal_periods=(), interim_ends=(), interim_terms=()):
+    """Bind a same-scope IFRS interim declaration to its named prior annual report."""
+    if not interim_years:return {}
+    current=max(interim_years)
+    if current>pd.Timestamp(published).year:return {}
+    compact,declarations=interim_preparation_declarations(text,scope,current)
     if not declarations:return {}
+    def matches_scope(bases):
+        return not bases or {('CFS' if b=='연결' else 'OFS') for b in bases}=={scope}
     references=[]
     reference=(r'(?P<year>(?:19|20)\d{2})(?:년|[./-])12(?:월|[./-])31일?(?:자)?로?종료(?:하는|되는)'
                r'회계(?:연도(?:에대한|의)?(?:연차)?|기간(?:에대한|의)?연차)(?P<basis>연결|별도|개별)?재무제표')
@@ -638,6 +645,30 @@ def interim_annual_comparative_basis(text, scope, interim_years, published, fisc
         'standard_reference':'https://www.ifrs.org/issued-standards/list-of-standards/ias-34-interim-financial-reporting/',
         'korean_standard_reference':'https://kasb.or.kr/front/board/View016001.do?seq=35659'},ensure_ascii=False)
     return result
+
+
+def interim_comparative_balance_basis(text, scope, pair):
+    """IAS 34.20(a) covers the prior closing balance, not full-year income."""
+    if pair is None:return None
+    current=pd.Timestamp(pair['interim_period_end'])
+    _,declarations=interim_preparation_declarations(text,scope,current.year)
+    verified=[]
+    for declaration in declarations:
+        bases=[b for b in [declaration['before'],declaration['after']] if b]
+        if scope=='CFS' and '연결' not in bases:continue
+        try:
+            dates={str(pd.Timestamp(*map(int,d)).date()) for d in re.findall(
+                r'((?:19|20)\d{2})(?:년|[./-])(\d{1,2})(?:월|[./-])(\d{1,2})',declaration[0])}
+        except ValueError:continue
+        if dates and dates!={pair['interim_period_end']}:continue
+        verified.append(declaration[0])
+    if not verified:return None
+    return json.dumps({'rule':'same_table_ifrs_interim_prior_closing_balance_v1',
+        'scope':scope,**pair,'ifrs_interim_declarations':verified,
+        'applies_to_accounts':['total_assets','total_liabilities','equity'],
+        'source_kind':'prior_fiscal_closing_comparative_not_interim_or_full_year_income',
+        'standard_reference':'https://www.ifrs.org/content/dam/ifrs/publications/amendments/english/2017/ifrs-practice-statement-2-making-materiality-judgements.pdf',
+        'standard_paragraph':'IAS 34.20(a)','korean_standard_reference':'https://www.kasb.or.kr/front/board/ingAccountingList.do'},ensure_ascii=False)
 
 
 def detailed_annual_accounts(parser, corp_code, receipt, published, source_url, digest, summary_basis=None, primary_terms=None,
@@ -693,7 +724,7 @@ def detailed_annual_accounts(parser, corp_code, receipt, published, source_url, 
             continue
         scale = {"백만원": 1_000_000, "천원": 1_000, "원": 1, "KRW": 1}[units.pop()]
         terms = list(re.finditer(r"제\s*(\d+)\s*(?:\([^)]*\))?\s*(?:[1-4]\s*분기|분기|반기|기)", current_context))
-        periods = {}
+        periods = {};table_interims=[]
         for index, term in enumerate(terms):
             text = current_context[term.start():terms[index+1].start() if index+1 < len(terms) else len(current_context)]
             if re.search(r"분기|반기|[36]\s*개월|설립\s*전|분할\s*전|사업부|carve\s*out", text,re.I):
@@ -704,6 +735,12 @@ def detailed_annual_accounts(parser, corp_code, receipt, published, source_url, 
                     dates=re.findall(r'((?:19|20)\d{2})\s*(?:년|[./-])\s*(\d{1,2})\s*(?:월|[./-])\s*(\d{1,2})',text)
                     if dates:
                         try:interim_ends[scope].add(str(pd.Timestamp(*map(int,dates[-1])).date()))
+                        except ValueError:pass
+                    if kind=='balance' and len(dates)==1:
+                        try:
+                            end=pd.Timestamp(*map(int,dates[0]))
+                            if end<pd.Timestamp(published).tz_localize(None):
+                                table_interims.append({'term':int(term[1]),'end':str(end.date()),'text':text})
                         except ValueError:pass
                 continue
             dates = [tuple(map(int, day)) for day in re.findall(
@@ -718,6 +755,9 @@ def detailed_annual_accounts(parser, corp_code, receipt, published, source_url, 
             header = " ".join(row[column] for row in headers if len(row) > column)
             if re.search(r'KGAAP|KGAPP|일반기업회계기준',clean(header)):
                 rejected['explicit_gaap_not_ifrs']+=1
+                continue
+            if re.search(r'회계정책변경전',clean(header)):
+                rejected['superseded_accounting_policy_column']+=1
                 continue
             if re.search(r"분기|반기|기초|잠정|추정|예상|[36]\s*개월|누\s*적|설립\s*전|분할\s*전|사업부|carve\s*out", header,re.I):
                 continue
@@ -748,7 +788,39 @@ def detailed_annual_accounts(parser, corp_code, receipt, published, source_url, 
                 continue
             if pd.Timestamp(fiscal['end'] if fiscal else f"{year}-12-31") >= pd.Timestamp(published).tz_localize(None):
                 continue
-            candidates.append((scope, year, table_id, positions, column, scale, header, period))
+            pair=None
+            if kind=='balance':
+                annual_end=pd.Timestamp(fiscal['end'] if fiscal else f'{year}-12-31')
+                comparisons=[]
+                for interim in table_interims:
+                    if (interim['term']!=fiscal_term+1
+                            or not annual_end<pd.Timestamp(interim['end'])<annual_end+pd.DateOffset(years=1)):continue
+                    for current_column in range(1,max(map(len,table))):
+                        current_header=' '.join(r[current_column] for r in headers if len(r)>current_column)
+                        terms={int(t) for t in re.findall(r'제\s*(\d+)\s*(?:\([^)]*\))?\s*(?:[1-4]\s*분기|분기|반기|기)',current_header)}
+                        if terms!={interim['term']} or re.search('기초|수정|조정|KGAAP|KGAPP|일반기업회계기준',clean(current_header)):continue
+                        current_dates=re.findall(r'((?:19|20)\d{2})\s*(?:년|[./-])\s*(\d{1,2})\s*(?:월|[./-])\s*(\d{1,2})',current_header)
+                        try:
+                            if current_dates and (len(current_dates)!=1 or str(pd.Timestamp(*map(int,current_dates[0])).date())!=interim['end']):continue
+                        except ValueError:continue
+                        names={name for _,r,name,_ in positions if len(r)>current_column
+                               and re.fullmatch(r'(?:-?\d[\d,]*(?:\.\d+)?|\(\d[\d,]*(?:\.\d+)?\))',r[current_column].strip())}
+                        if names=={'total_assets','total_liabilities','equity'}:
+                            comparisons.append({'interim_period_end':interim['end'],'interim_term':interim['term'],
+                                'interim_column':current_column,'interim_period_text':interim['text'],
+                                'interim_header':current_header})
+                header_agrees=(not column_dates or len(column_dates)==1 and tuple(column_dates[0])==(
+                    annual_end.year,annual_end.month,annual_end.day))
+                if len(comparisons)==1 and header_agrees:
+                    pair={'table_id':table_id,'annual_year':year,'annual_period_end':str(annual_end.date()),
+                          'annual_term':fiscal_term,'annual_column':column,'annual_period_text':period,
+                          'annual_header':header,**comparisons[0]}
+                    if '회계정책변경후' in clean(header):
+                        pair['annual_policy_selection']='explicit_after_accounting_policy_change'
+                        pair['superseded_headers']=[{'column_id':j,'header':' '.join(r[j] for r in headers if len(r)>j)}
+                            for j in range(1,max(map(len,table))) if '회계정책변경전' in clean(
+                                ' '.join(r[j] for r in headers if len(r)>j))]
+            candidates.append((scope, year, table_id, positions, column, scale, header, period,pair))
     basis = {}
     for scope, blocks in regions.items():
         text = " ".join(blocks)
@@ -769,8 +841,10 @@ def detailed_annual_accounts(parser, corp_code, receipt, published, source_url, 
     if basis_evidence is not None:
         basis_evidence.update(basis)
     rows = []
-    for scope, year, table_id, positions, column, scale, header, period in candidates:
+    for scope, year, table_id, positions, column, scale, header, period,pair in candidates:
         evidence = basis.get((scope, year))
+        if evidence is None and pair is not None:
+            evidence=interim_comparative_balance_basis(' '.join(regions[scope]),scope,pair)
         if evidence is None:
             rejected["accounting_basis_unverified"] += 1
             continue
@@ -855,6 +929,13 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url,
             entity_scope, scope_evidence = "issuer", None
             scope_explicit, resolved_scopes = False, {}
             standards = {}
+        # A standalone framework caption starts a new basis even without a
+        # repeated summary title. A mention inside a preceding note does not.
+        if re.search(r'\[\s*(?:K\s*-?\s*GAAP|K\s*-?\s*GAPP|일반기업회계기준)\s*\]\s*'
+                     r'(?:\(\s*단위\s*[:：][^)]*\))?\s*$',context,re.I):
+            scope_standard='K-GAAP'
+            standards={}
+            resolved_scopes={}
         unit_text = context + " " + " ".join(" ".join(r) for r in table[:2])
         unit = re.search(r"단위\s*[:：]\s*(백\s*만\s*원|천\s*원|원|KRW)", unit_text)
         if unit:
