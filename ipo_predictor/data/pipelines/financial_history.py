@@ -137,16 +137,26 @@ def summarize_asof(financials, corp_code, cutoff):
                   & frame.currency.eq("KRW") & frame.report_code.isin(["11011", "IPO_FINANCIAL_DISCLOSURE"])
                   & frame.fs_div.isin(["CFS", "OFS"]) & (frame.available_at < cutoff)
                   & frame.amount.map(lambda v: pd.notna(v) and math.isfinite(v))]
+    if 'period_end' in frame:
+        explicit=frame.period_end.notna()
+        starts=pd.to_datetime(frame.get('period_start',pd.Series(index=frame.index,dtype=object)),errors='coerce')
+        ends=pd.to_datetime(frame.period_end,errors='coerce')
+        valid=(ends.dt.year.eq(pd.to_numeric(frame.year,errors='coerce'))
+               & ends.eq(starts.map(lambda d:d+pd.DateOffset(years=1)-pd.Timedelta(days=1) if pd.notna(d) else pd.NaT))
+               & (ends.dt.tz_localize('Asia/Seoul')<frame.available_at))
+        frame=frame[~explicit | valid].copy()
+    frame['_fiscal_end']=[str(row.get('period_end')) if pd.notna(row.get('period_end'))
+                          else f'{int(row.year)}-12-31' for _,row in frame.iterrows()]
     yearly = {}
     for year, group in frame.groupby("year"):
         if not group.response_year.eq(str(int(year))).all():
             continue
         candidates = []
-        for (receipt, basis), source in group.groupby(["rcept_no", "fs_div"]):
+        for (receipt, basis, fiscal_end), source in group.groupby(["rcept_no", "fs_div", "_fiscal_end"]):
             names = set(source.account_name_en)
             complete = {"revenue", "operating_income", "total_liabilities", "equity"}.issubset(names)
-            candidates.append((complete, source.available_at.max(), basis == "CFS", receipt, source))
-        group = sorted(candidates, key=lambda x: x[:4])[-1][4]
+            candidates.append((complete, source.available_at.max(), basis == "CFS", receipt, fiscal_end, source))
+        group = sorted(candidates, key=lambda x: x[:5])[-1][5]
         accounts = {}
         for name, entries in group.groupby("account_name_en"):
             if entries.amount.nunique() == 1:
@@ -190,6 +200,9 @@ def summarize_asof(financials, corp_code, cutoff):
                                     'OpenDART_annual_structured' for x in entries}),
             "source_hash_scopes": sorted({str(x.get('source_hash_scope')) for x in entries if pd.notna(x.get('source_hash_scope'))}),
         }
+        if any(pd.notna(x.get('period_end')) for x in entries):
+            provenance[feature]['fiscal_periods']=[{'start':x.get('period_start'),'end':x.get('period_end')}
+                for x in entries if pd.notna(x.get('period_end'))]
 
     for name, row in latest.items():
         add_evidence(name, [row])
@@ -211,6 +224,11 @@ def summarize_asof(financials, corp_code, cutoff):
         # Growth needs a matching revenue endpoint, not a complete old balance sheet.
         endpoints=frame[frame.year.eq(income_year-3) & frame.response_year.eq(str(income_year-3))
                         & frame.account_name_en.eq('revenue') & frame.fs_div.eq(recent.fs_div)]
+        if pd.notna(recent.get('period_end')):
+            endpoints=endpoints[endpoints.get('period_end',pd.Series(index=endpoints.index,dtype=object)).notna()
+                & endpoints['_fiscal_end'].str[5:].eq(str(recent.period_end)[5:])]
+        elif 'period_end' in endpoints:
+            endpoints=endpoints[endpoints.period_end.isna()]
         candidates=[(group.available_at.max(),str(receipt),group)
                     for receipt,group in endpoints.groupby('rcept_no')]
         if candidates:

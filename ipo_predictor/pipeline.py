@@ -631,6 +631,8 @@ if __name__ == "__main__":
     parser.add_argument("--financial-limit", type=int, help="재무 수집 공식 API 검증용 연도 분산 표본 개수")
     parser.add_argument("--recovery-limit", type=int, help="과거 누락 이벤트 복구 표본 개수; 전체 복구 버전 포인터는 갱신하지 않음")
     parser.add_argument("--reconcile-limit", type=int, help="기존 공식 원천 연결 검증의 연도 분산 표본 개수")
+    parser.add_argument('--context-start-date', help='KRX 시장지표의 선별 수집 시작일 (YYYY-MM-DD)')
+    parser.add_argument('--context-end-date', help='KRX 시장지표의 선별 수집 종료일 (YYYY-MM-DD)')
     parser.add_argument("--stage-limit",type=int,help="단계 스냅샷의 제한 표본 수; 전체 단계 포인터는 바꾸지 않음")
     parser.add_argument('--stage-event-id',action='append',help='필요한 공식 이벤트 ID만 단계 원문 수집/재처리; 전체 단계 포인터는 바꾸지 않음')
     parser.add_argument("--financial-unresolved-only", action="store_true",
@@ -716,7 +718,8 @@ if __name__ == "__main__":
         inputs=load_inputs(RAW_DIR,PROC_DIR)
         events=inputs['events'][inputs['events'].event_class.eq('general_ipo')]
         _,days,result=collect_days(KRXCollector(),RAW_DIR,pd.read_parquet(RAW_DIR/'kospi_index.parquet'),
-                                  events,cached_only=args.connection_cached_only)
+                                  events,cached_only=args.connection_cached_only,
+                                  start_date=args.context_start_date,end_date=args.context_end_date)
         print(json.dumps({'collection':result,'checked_days':len(days),'scope':'index_source_cache_only',
                           'dart_recollection_required':False,'listing_price_recollection_required':False,
                           'training_executed':False},ensure_ascii=False))

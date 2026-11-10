@@ -43,6 +43,103 @@ def financial_index(receipt='20230315000001',date='2023.03.15',corp='12345678',n
 
 
 class DisclosureFinancialTests(unittest.TestCase):
+    def fiscal_statements(self,end_year=2022):
+        html='2. 연결재무제표 연결재무상태표 '
+        html+=f'제13기 {end_year}년 3월 31일 현재 (단위: 원)'
+        html+=table([['과목','제13기'],['자산총계','300'],['부채총계','100'],['자본총계','200']])
+        html+=f'연결손익계산서 제13기 {end_year-1}년 4월 1일부터 {end_year}년 3월 31일까지 (단위: 원)'
+        html+=table([['과목','제13기'],['매출액','1000'],['영업이익','50'],['당기순이익','40']])
+        return html+'3. 연결재무제표 주석 재무제표는 한국채택국제회계기준에 따라 작성되었습니다.'
+
+    def test_noncalendar_annual_period_is_not_treated_as_interim(self):
+        frame=parse(self.fiscal_statements())
+        self.assertEqual(len(frame),6);self.assertEqual(set(frame.year),{2022})
+        self.assertEqual(set(frame.period_start),{'2021-04-01'})
+        self.assertEqual(set(frame.period_end),{'2022-03-31'})
+        self.assertEqual(summarize_asof(frame,'12345678','2023-04-01')['operating_margin'],.05)
+        for changed in [self.fiscal_statements().replace('2021년 4월 1일','2021년 7월 1일'),
+                        self.fiscal_statements().replace('2021년 4월 1일','2020년 4월 1일'),
+                        self.fiscal_statements().replace('제13기 2021년','제13기 반기 2021년'),
+                        self.fiscal_statements().replace('2022년 3월 31일 현재','2022년 6월 30일 현재')]:
+            with self.subTest(body=changed):
+                result=parse(changed)
+                self.assertFalse({'total_assets','revenue'}.issubset(set(result.get('account_name_en',[]))))
+
+    def test_noncalendar_annual_end_precedes_publication_not_calendar_december(self):
+        body=self.fiscal_statements()
+        result=parse_disclosure_financials(body,'12345678','20220501000001','2022-05-01','official')
+        self.assertEqual(len(result),6)
+        self.assertTrue(parse_disclosure_financials(body,'12345678','20220201000001','2022-02-01','official').empty)
+
+    def test_contract_period_in_notes_never_relabels_annual_statement_year(self):
+        body='1. 요약별도재무정보 (단위: 원)'+table(summary())
+        body+='4. 재무제표 5. 재무제표 주석 2. 재무제표 작성기준 '
+        body+=table([['계약명','계약기간'],['연구개발','2020.07.01~2021.06.30'],['대출','2020.07.01~2021.06.30']])
+        frame=parse(body);self.assertEqual(len(frame),6);self.assertEqual(set(frame.year),{2022})
+        self.assertNotIn('period_end',frame)
+
+    def test_explicit_non_ifrs_summary_title_cannot_inherit_global_ifrs_basis(self):
+        for standard in ['K-GAAP','K-GAPP','일반기업회계기준']:
+            body='1. 요약별도재무정보 ('+standard+' 기준) (단위: 원)'+table(summary(standard=False))
+            body+='재무제표는 한국채택국제회계기준에 따라 작성되었습니다.'
+            with self.subTest(standard=standard):self.assertTrue(parse(body).empty)
+
+    def test_opening_balance_never_inherits_same_term_year_end_date(self):
+        body='4. 재무제표 재무상태표 제13기말 2022년 12월 31일 현재 제13기초 2022년 1월 1일 현재 (단위: 원)'
+        body+=table([['과목','제13기말','제13기초'],['자산총계','300','200'],
+                     ['부채총계','100','90'],['자본총계','200','110']])
+        body+='5. 재무제표 주석 재무제표는 한국채택국제회계기준에 따라 작성되었습니다.'
+        frame=parse(body)
+        self.assertEqual(set(frame.amount),{300,100,200})
+        self.assertTrue(frame.column_id.eq(1).all())
+        from data.collectors.dart_collector import _TableRowParser
+        from data.pipelines.disclosure_financials import primary_annual_balances, financial_table_document
+        parser=_TableRowParser();parser.feed(financial_table_document(body));parser.close()
+        groups=primary_annual_balances(parser)['groups']
+        self.assertEqual(len(groups),1)
+        self.assertTrue(all(f['column_id']==1 for f in groups[0]['facts'].values()))
+        self.assertTrue(parse('1. 요약별도재무정보 (단위: 원)'+table(summary('2022년 기초'))).empty)
+
+    def test_start_year_label_is_bound_by_fiscal_term_to_dated_primary_statement(self):
+        body=('1. 요약연결재무정보 (단위: 원)'+table([
+            ['구분','2021년 (제13기)'],['자산총계','300'],['부채총계','100'],['자본총계','200'],
+            ['매출액','1000'],['영업이익','50'],['당기순이익','40']])+self.fiscal_statements())
+        frame=parse(body)
+        self.assertEqual(set(frame.year),{2022})
+        self.assertTrue(frame.period_end.eq('2022-03-31').all())
+        self.assertEqual(summarize_asof(frame,'12345678','2023-04-01')['operating_margin'],.05)
+
+    def test_financial_block_breaks_keep_issuer_preparation_subject_separate(self):
+        body=self.fiscal_statements().replace('재무제표는 한국채택국제회계기준에 따라 작성되었습니다.',
+            '<p>2. 재무제표 작성기준<br/>(1) 회계기준의 적용<br/>연결회사는 한국채택국제회계기준에 따라 연결재무제표를 작성하였습니다.</p>')
+        frame=parse(body);self.assertEqual(len(frame),6)
+        self.assertTrue(frame.accounting_standard_evidence.str.contains('연결회사는').all())
+
+    def test_generic_parent_summary_basis_covers_its_children_not_other_entities(self):
+        head='1. 요약재무정보 당사의 요약재무정보는 한국채택국제회계기준(K-IFRS)에 따라 작성되었으며 '
+        body=head+'가. 요약연결재무제표 (단위: 원)'+table(summary(standard=False))
+        frame=parse(body);self.assertEqual(len(frame),6);self.assertEqual(set(frame.fs_div),{'CFS'})
+        self.assertTrue(parse(body.replace('당사의 요약','비교회사의 요약')).empty)
+        self.assertTrue(parse(body.replace('작성되었','작성할 예정')).empty)
+
+    def test_annual_basis_text_survives_split_balance_and_income_summary_tables(self):
+        body=('1. 요약재무정보 당사의 요약재무정보는 한국채택국제회계기준(K-IFRS)에 따라 작성되었으며 '
+              '가. 요약연결재무제표 (단위: 원)')
+        body+=table([['구분','제18기(2018.03.31)'],['자산총계','300'],['부채총계','100'],['자본총계','200']])
+        body+=table([['구분','(2017.04.01∼2018.03.31)'],['매출액','1000'],['영업이익','50'],['당기순이익','40']])
+        frame=parse(body);self.assertEqual(len(frame),6)
+        self.assertTrue(frame.accounting_standard_evidence.str.contains('한국채택국제회계기준').all())
+
+    def test_noncalendar_relative_annual_reference_uses_fiscal_term_not_calendar_year_minus_one(self):
+        body=self.fiscal_statements(2022)
+        body=body.replace('2. 연결재무제표','2. 연결재무제표 연결재무상태표 제14기 1분기 2022년 6월 30일 현재 (단위: 원)'+
+            table([['과목','제14기 1분기'],['자산총계','400'],['부채총계','100'],['자본총계','300']]))
+        body=body.replace('재무제표는 한국채택국제회계기준에 따라 작성되었습니다.',
+            "분기연결재무제표는 기업회계기준서 제1034호 '중간재무보고'에 따라 작성되었으며 전기말 연차연결재무제표와 함께 읽어야 합니다.")
+        frame=parse(body);self.assertEqual(len(frame),6);self.assertEqual(set(frame.year),{2022})
+        self.assertTrue(frame.accounting_standard_evidence.str.contains('explicit_fiscal_annual').all())
+        self.assertTrue(parse(body.replace('전기말 연차연결재무제표','전기말 연차별도재무제표')).empty)
+
     def test_document_geometry_reuse_does_not_reuse_financial_approval(self):
         from data.pipelines import disclosure_financials as module
         body='1. 요약별도재무정보 (단위: 원)'+table(summary())

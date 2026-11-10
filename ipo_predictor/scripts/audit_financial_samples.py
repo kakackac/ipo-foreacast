@@ -13,6 +13,8 @@ from data.pipelines.disclosure_connections import viewer_identity
 
 # Amounts below were read from original issuer statements, not parser output.
 SAMPLES = [
+    ('뷰노', '01344202', '20210215001088', '2021-02-25 21:00', 2019,
+     [162097981, -6021756963, 7452661169, 2033877398, 5418783771, -5912548138]),
     ('디앤씨미디어', '01186404', '20170721000127', '2017-07-31 21:00', 2016,
      [18893266114, 3693827393, 9632000000, 2864000000, 6769000000, 3011991038]),
     ('우진아이엔에스', '00143262', '20180904000072', '2018-09-13 21:00', 2017,
@@ -48,6 +50,50 @@ SAMPLES = [
 # Reviewed original annual cells: scope, year, revenue, operating income, assets.
 # A None income pair explicitly checks that interim-only income stays absent.
 BASIS_SAMPLES = [
+    ('피피아이', '00403766', '20191213000083',
+     'a963431acb85848428a50673824cf0a40ca52be500dcb8a31d567d943b672394',
+     [('OFS', 2016, 15523077931, 1104260564, None)], {2016, 2017, 2018}),
+    ('제주맥주', '01230255', '20210512000262',
+     '6f2db4f80c52f663a9d3dfb9bea22ab2bfaa83d3625203bb0ad78708e9219607',
+     [('OFS', 2020, 21525592162, -4347327422, 62682620070),
+      ('OFS', 2019, 7210611126, -9218206523, 43085862224)], {2019, 2020}),
+    ('카카오뱅크', '01133217', '20210722000374',
+     'eb112ad666e2ca2caf4565efdd387146ee8b89c17db0712b3abbed027421bdf7',
+     [('OFS', 2020, 804157323123, 122551246633, 26649990466590),
+      ('OFS', 2018, 375581509526, -21208717701, 12126722813103)], {2018, 2019, 2020}),
+    ('핀텔', '01524507', '20221007000279',
+     '5baa7fd5db1bd3d8454a64022fe17c95e347e42d235b36045f972b7aebbc8069',
+     [('OFS', 2020, 4886319291, -837626, 2445934794),
+      ('OFS', 2019, 2596328239, 93064237, 2910102543)], {2019, 2020, 2021}),
+    ('제주항공', '00555874', '20151026000276',
+     '24f3f78cb6a9c04a82e28f49c9ff387ea139644b501c0df1e2d3de80952c1fbf',
+     [('OFS', 2014, 510636000000, 29519000000, 263681000000),
+      ('OFS', 2013, 434146000000, 17026000000, 180902000000)], {2013, 2014}),
+    ('포시에스', '00939942', '20150129000089',
+     '20b088ef862d75c2bb0b29d4b855ee0069d214aa3bd55bda610d1b347fe5b1ee',
+     [('OFS', 2014, 12846942899, 4111424306, 24724607959)], {2013, 2014}),
+    ('아이엔지생명', '00176792', '20170424000341',
+     'd19317902d31fb71e985b9d024f8de96eb70db66a09f98e572a6ebde4e32e3fd',
+     [('OFS', 2016, 4265748000000, 321884000000, 30668730000000),
+      ('OFS', 2013, 3853774000000, 272284000000, 23339170000000, '2013-03-31')], {2013, 2014, 2015, 2016}),
+    ('에이텀', '01444380', '20231117000118',
+     '843e1cdee1385c8049e5f3a2ae57d05938901ad823a878c0c5b09c0860339c0c',
+     [('CFS', 2023, 47971262000, -5922868000, 38055185000)], {2021, 2022, 2023}),
+    ('SV인베스트먼트', '00599151', '20180625000357',
+     '4edb9ce1f4ad545ada7bb7f6014116faf2d6fb9285a47900ac6faeb226ef7dc6',
+     [('CFS', 2018, 17961441215, 7561825679, 33886719627)], {2017, 2018}),
+    ('이지케어텍', '00490090', '20190308000278',
+     'b60637df20c7810795d24312584fb87dfa8536593772a3943e65d88d0798bc05',
+     [('CFS', 2018, 55374000000, 4492000000, 39215000000)], {2017, 2018}),
+    ('코리아에셋투자증권', '00304915', '20191107000232',
+     '2e4c5e31fb9c2d2bfd2ffec1846edead3950390d04f75b768847aa2f3df13958',
+     [('CFS', 2019, 166372000000, 8240000000, 78638000000)], {2019}),
+    ('마크로밀엠브레인', '00877174', '20200617000383',
+     '9a2975527798060bb92daf4174f6aa80100fa169882f7492beda309ee7b9abe9',
+     [('CFS', 2019, 39074815984, 2576070308, 17347766482)], {2017, 2018, 2019}),
+    ('위더스제약', '00765851', '20200623000326',
+     'f522e97a69e6aca462544ed59c56283b8bf35e6f7afcb4ded0ba0e8556551c91',
+     [('OFS', 2019, 51732082000, 10934657000, 76282983000)], {2019}),
     ('전진건설로봇', '00372129', '20240807000292',
      '48f65bca5496a43df10f469a9da642138d5a4a79108ed1fca8d115db44fe1f1b',
      [('CFS', 2023, 158370290546, 32904822481, 158316498662),
@@ -171,10 +217,17 @@ def main():
                                           payload['official_publication_date'],payload['source_url'])
         mismatches=[]
         if frame.empty or set(frame.year)!=years:mismatches.append('annual_years')
+        if receipt in {'20180625000357','20190308000278','20191107000232','20200617000383','20200623000326','20231117000118'}:
+            from data.pipelines.disclosure_financials import annual_date_range
+            if frame.empty or any(annual_date_range(str(a.period_start)+'~'+str(a.period_end)) is None
+                                 or str(a.period_end)[:4]!=str(a.year) for a in frame.itertuples()):
+                mismatches.append('explicit_full_fiscal_period')
         cells=[]
         for scope,year,*values in expected:
+            fiscal_end=values.pop() if len(values)==4 else None
             for name,value in zip(['revenue','operating_income','total_assets'],values):
                 selected=frame[frame.fs_div.eq(scope)&frame.year.eq(year)&frame.account_name_en.eq(name)]
+                if fiscal_end:selected=selected[selected.period_end.eq(fiscal_end)]
                 actual=set(selected.amount)
                 if actual!=({value} if value is not None else set()):
                     mismatches.append([scope,year,name,value,sorted(actual)])

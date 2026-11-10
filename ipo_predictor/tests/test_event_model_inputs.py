@@ -13,6 +13,51 @@ from features.source_contracts import DART_STRUCTURAL_AGGREGATE_STATUS
 
 
 class EventModelInputTests(unittest.TestCase):
+    def test_bounded_prefix_collection_is_connected_to_default_cached_replay(self):
+        krx=KRXCollector(api_key='test',request_delay=0)
+        krx._get_daily_records=Mock(side_effect=lambda endpoint,day:[{'BAS_DD':day,'IDX_NM':'KOSPI','CLSPRC_IDX':'99'}])
+        events=pd.DataFrame([{'listing_date':'2026-09-11'}])
+        with tempfile.TemporaryDirectory() as root:
+            index,days,report=collect_days(krx,root,self.seed(),events,start_date='2026-09-07',end_date='2026-09-08')
+            self.assertEqual(report['new_daily_requests'],2)
+            self.assertEqual(report['prefix_status'],'verified_cached_prefix_merged')
+            self.assertEqual(len(index),3)
+            krx._get_daily_records=Mock(side_effect=AssertionError('unexpected network'))
+            again,reused,result=collect_days(krx,root,self.seed(),events,cached_only=True)
+            pd.testing.assert_frame_equal(index.reset_index(drop=True),again.reset_index(drop=True))
+            self.assertEqual(result['new_daily_requests'],0);self.assertEqual(set(days),set(reused))
+
+    def test_incomplete_prefix_is_not_used_to_compute_a_return(self):
+        krx=KRXCollector(api_key='test',request_delay=0)
+        krx._get_daily_records=Mock(side_effect=lambda endpoint,day:[{'BAS_DD':day,'IDX_NM':'KOSPI','CLSPRC_IDX':'99'}])
+        with tempfile.TemporaryDirectory() as root:
+            _,_,report=collect_days(krx,root,self.seed(),pd.DataFrame([{'listing_date':'2026-09-11'}]),
+                start_date='2026-09-07',end_date='2026-09-07')
+            self.assertEqual(report['prefix_missing_days'],['20260908'])
+            index,_,report=collect_days(krx,root,self.seed(),pd.DataFrame([{'listing_date':'2026-09-11'}]),cached_only=True)
+            self.assertEqual(len(index),1)
+            self.assertEqual(report['prefix_status'],'incomplete_checkpoints_not_merged')
+
+    def test_overlap_conflict_and_reversed_requested_range_are_rejected(self):
+        krx=KRXCollector(api_key='test',request_delay=0)
+        krx._get_daily_records=Mock(return_value=[{'BAS_DD':'20260909','IDX_NM':'KOSPI','CLSPRC_IDX':'101'}])
+        events=pd.DataFrame([{'listing_date':'2026-09-11'}])
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaisesRegex(ValueError,'seed_conflict'):
+                collect_days(krx,root,self.seed(),events,start_date='2026-09-09',end_date='2026-09-09')
+            with self.assertRaisesRegex(ValueError,'invalid_requested_range'):
+                collect_days(krx,root,self.seed(),events,start_date='2026-09-10',end_date='2026-09-09')
+
+    def test_old_prefix_cannot_hide_an_all_empty_new_requested_range(self):
+        krx=KRXCollector(api_key='test',request_delay=0)
+        krx._get_daily_records=Mock(side_effect=lambda endpoint,day:[{'BAS_DD':day,'IDX_NM':'KOSPI','CLSPRC_IDX':'99'}])
+        with tempfile.TemporaryDirectory() as root:
+            collect_days(krx,root,self.seed(),pd.DataFrame([{'listing_date':'2026-09-11'}]),
+                         start_date='2026-09-07',end_date='2026-09-08')
+            krx._get_daily_records=Mock(return_value=[])
+            _,_,report=collect_days(krx,root,self.seed(),pd.DataFrame([{'listing_date':'2026-09-15'}]))
+            self.assertEqual(report['status'],'market_index_all_empty_requires_review')
+
     def test_no_new_events_never_requests_market_data(self):
         krx=Mock()
         with tempfile.TemporaryDirectory() as root:

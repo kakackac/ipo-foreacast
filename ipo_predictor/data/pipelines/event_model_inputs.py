@@ -36,13 +36,17 @@ def read_day(path, day):
     return data
 
 
-def collect_days(krx, raw_dir, seed, events, cached_only=False):
+def collect_days(krx, raw_dir, seed, events, cached_only=False, *, start_date=None, end_date=None):
     if events.empty:
         return seed.copy(),{},{'status':'complete','error_type':None,'new_daily_requests':0,
             'checked_days':0,'required_weekdays':0,'start':None,'end':None}
     if seed.empty:raise ValueError('verified_historical_index_seed_required')
     start=pd.to_datetime(seed.date).max().normalize()+pd.Timedelta(days=1)
     end=pd.to_datetime(events.listing_date).max().normalize()-pd.Timedelta(days=2)
+    if start_date is not None:start=pd.Timestamp(start_date).normalize()
+    if end_date is not None:end=min(end,pd.Timestamp(end_date).normalize())
+    if (start_date is not None or end_date is not None) and start>end:
+        raise ValueError('market_context_invalid_requested_range')
     root=Path(raw_dir)/'krx_index_days'/'KOSPI';root.mkdir(parents=True,exist_ok=True)
     frames, checked, requested = [],{},0
     status='complete';error_type=None
@@ -72,11 +76,34 @@ def collect_days(krx, raw_dir, seed, events, cached_only=False):
         if record['selected_row']:
             frames.append({'date':timestamp,'index_code':'KOSPI','close':krx._to_number(record['selected_row']['CLSPRC_IDX'])})
     fresh=pd.DataFrame(frames,columns=['date','index_code','close'])
+    requested_rows_present=bool(frames)
+    prefix_paths={path.stem:path for path in root.glob('????????.json')
+                  if path.stem.isdigit() and path.stem<pd.Timestamp(seed.date.min()).strftime('%Y%m%d')}
+    prefix_missing=[];prefix=[]
+    if prefix_paths:
+        required_prefix=[d.strftime('%Y%m%d') for d in pd.bdate_range(
+            min(prefix_paths),pd.Timestamp(seed.date.min()).normalize()-pd.Timedelta(days=1))]
+        prefix_missing=[day for day in required_prefix if day not in prefix_paths]
+        if not prefix_missing:
+            for day in required_prefix:
+                record=read_day(prefix_paths[day],day);checked[day]=digest(prefix_paths[day])
+                if record['selected_row']:
+                    prefix.append({'date':pd.Timestamp(day),'index_code':'KOSPI',
+                                   'close':krx._to_number(record['selected_row']['CLSPRC_IDX'])})
+    if prefix:fresh=pd.concat([fresh,pd.DataFrame(prefix)],ignore_index=True)
+    if not fresh.empty:
+        overlap=seed[['date','close']].merge(fresh[['date','close']],on='date',suffixes=('_seed','_fresh'))
+        if any(not math.isclose(float(r.close_seed),float(r.close_fresh),rel_tol=1e-12,abs_tol=1e-12)
+               for r in overlap.itertuples(index=False)):
+            raise ValueError('market_index_seed_conflict')
     combined=(pd.concat([seed,fresh],ignore_index=True) if len(fresh) else seed.copy()).drop_duplicates('date').sort_values('date')
-    if status=='complete' and len(pd.bdate_range(start,end)) and fresh.empty:
+    if status=='complete' and len(pd.bdate_range(start,end)) and not requested_rows_present:
         status='market_index_all_empty_requires_review'
     return combined,checked,{'status':status,'error_type':error_type,'new_daily_requests':requested,
         'checked_days':len(checked),'required_weekdays':len(pd.bdate_range(start,end)),
+        'prefix_status':('incomplete_checkpoints_not_merged' if prefix_missing else
+                         'verified_cached_prefix_merged' if prefix_paths else 'no_cached_prefix'),
+        'prefix_missing_days':prefix_missing,
         'start':start.strftime('%Y-%m-%d'),'end':end.strftime('%Y-%m-%d')}
 
 

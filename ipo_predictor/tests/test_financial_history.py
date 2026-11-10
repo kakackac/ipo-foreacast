@@ -41,6 +41,26 @@ class FakeFinancialDART:
 
 
 class FinancialHistoryTests(unittest.TestCase):
+    def test_growth_requires_matching_explicit_fiscal_periods(self):
+        recent=self.history();recent['period_start']='2021-04-01';recent['period_end']='2022-03-31'
+        old=recent[recent.account_name_en.eq('revenue')].copy()
+        old['year']=2019;old['response_year']='2019';old['rcept_no']='20190501000001'
+        old['published_at']='2019-05-01';old['period_start']='2018-04-01';old['period_end']='2019-03-31'
+        old['amount']=125
+        result=summarize_asof(pd.concat([recent,old]),'12345678','2023-04-01')
+        self.assertEqual(result['revenue_growth_3y'],1.)
+        self.assertTrue(json.loads(result['financial_feature_provenance'])['operating_margin']['fiscal_periods'])
+        for start,end in [('2018-07-01','2019-06-30'),(None,None),('2018-07-01','2019-03-31')]:
+            changed=old.copy();changed['period_start']=start;changed['period_end']=end
+            self.assertIsNone(summarize_asof(pd.concat([recent,changed]),'12345678','2023-04-01')['revenue_growth_3y'])
+
+    def test_distinct_fiscal_periods_in_one_year_never_form_one_ratio(self):
+        frame=self.history();frame['period_start']='2021-04-01';frame['period_end']='2022-03-31'
+        a=frame[frame.account_name_en.eq('revenue')].copy()
+        b=frame[frame.account_name_en.eq('operating_income')].copy()
+        b['period_start']='2021-07-01';b['period_end']='2022-06-30'
+        self.assertNotIn('operating_margin',summarize_asof(pd.concat([a,b]),'12345678','2023-04-01'))
+
     def history(self):
         frame = DARTCollector.normalize_financial_statements(api_items(), "12345678", 2022, "11011", "CFS")
         frame["publication_verified"] = True
