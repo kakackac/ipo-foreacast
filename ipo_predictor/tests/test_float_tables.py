@@ -7,6 +7,63 @@ import pandas as pd
 
 
 class FloatTablesTests(unittest.TestCase):
+    def test_matching_disclosed_initial_ratio_is_not_replaced_by_quantity_division(self):
+        table=[['구분','공모후','공모후','유통가능물량','유통가능물량','매각제한물량','매각제한물량'],
+               ['구분','주식수','지분율','주식수','지분율','주식수','지분율'],
+               ['공모 후 합계','11,363,649','100.00%','3,002,063','100.00%','8,361,586','100.00%']]
+        schedule=[['구분','유통가능 주식수','유통가능 주식수 비율'],
+                  ['상장일 유통가능','3,002,063주','26.42%'],
+                  ['상장후 3년뒤 유통가능','11,363,649주','100.00%']]
+        result=ownership_float([table,schedule])
+        self.assertEqual(result['total_post_listing_shares'],11363649)
+        self.assertEqual(result['public_float_shares'],3002063)
+        self.assertEqual(result['public_float_ratio_disclosed'],.2642)
+        evidence=json.loads(result['public_float_parse_evidence'])
+        self.assertEqual(evidence['rule'],'explicit_listing_day_schedule_ratio_v1')
+        self.assertEqual(evidence['supporting_issuer_quantity_pair']['total_column'],1)
+        schedule[1][2]='36.42%'
+        self.assertNotApproved(ownership_float([table,schedule]))
+
+    def test_explicit_post_issuer_total_row_aliases_retain_quantity_and_scope_checks(self):
+        table=[['구분','주주명','주식의 종류','공모 후','공모 후','유통가능물량','유통가능물량','매각제한물량'],
+               ['구분','주주명','주식의 종류','주식수','지분율','주식수','지분율','주식수'],
+               ['공모 후 합계','공모 후 합계','보통주','14,965,620','100.00%','3,037,960','20.30%','11,927,660']]
+        for label in ['공모 후 합계','상장 후 합계','공모후 주식 총수','공모 후 발행주식 총수']:
+            with self.subTest(label=label):
+                table[-1][:2]=[label,label]
+                result=ownership_float([table])
+                self.assertEqual(result['public_float_shares'],3037960)
+                self.assertEqual(result['total_post_listing_shares'],14965620)
+                self.assertAlmostEqual(result['public_float_ratio_disclosed'],.203)
+        for label in ['공모 전 합계','최대주주 공모 후 합계','공모 후 합계 예정','상장 6개월 후 합계']:
+            with self.subTest(rejected_label=label):
+                table[-1][:2]=[label,label]
+                self.assertNotApproved(ownership_float([table]))
+        table[-1][:2]=['공모 후 합계']*2;table[-1][6]='30.30%'
+        self.assertNotApproved(ownership_float([table]))
+
+    def test_horizontal_schedule_binds_only_listing_day_quantity_total_and_ratio(self):
+        table=[['구분','상장일','상장일로부터1개월 후','상장일로부터5년 후'],
+               ['유통가능주식수','807,628','1,605,588','3,534,040'],
+               ['유통비율','22.85%','45.43%','100.00%'],
+               ['발행주식총수','3,534,040','3,534,040','3,534,040']]
+        for header in ['상장일','상장 직후']:
+            with self.subTest(header=header):
+                table[0][1]=header;result=ownership_float([table])
+                self.assertEqual(result['public_float_shares'],807628)
+                self.assertEqual(result['total_post_listing_shares'],3534040)
+                self.assertAlmostEqual(result['public_float_ratio_disclosed'],.2285)
+                binding=json.loads(result['public_float_parse_evidence'])['schema_binding']
+                self.assertEqual(binding['rule'],'horizontal_listing_day_quantity_ratio_v1')
+                self.assertEqual(binding['ratio_row'],2)
+        for header in ['상장 1개월 후','전환 가정 상장일','우선주 포함 상장일']:
+            with self.subTest(rejected_header=header):
+                table[0][1]=header;self.assertNotApproved(ownership_float([table]))
+        table[0][1]='상장일';table[2][1]='32.85%'
+        self.assertNotApproved(ownership_float([table]))
+        table[2][1]='22.85%';table[3][0]='보호예수주식총수'
+        self.assertNotApproved(ownership_float([table]))
+
     def assertNotApproved(self, result):
         self.assertIsNone(result.get('public_float_shares'))
         self.assertIsNone(result.get('public_float_ratio_disclosed'))

@@ -318,9 +318,9 @@
       "section_title": "III. 투자위험요소",
       "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20250114000477&dcmNo=10264820&eleId=14&offset=944822&length=346605&dtd=dart4.xsd",
       "sha256": "f591bb93bd10f3a913ba562600c4be58be484940f6a5717077cbd2544dfe9559",
-      "expected": {"public_float_shares":4392116,"public_float_ratio_disclosed":0.3228},
-      "expected_evidence": {"public_float_parse_evidence":{"rule":"explicit_listing_day_schedule_ratio_v1","denominator_inferred":false}},
-      "review_note": "The initial listing-day row explicitly prints 4392116 shares and 32.28%. Later lockup-release rows are not a denominator or replacement for the initial ratio."
+      "expected": {"public_float_shares":4392116,"public_float_ratio_disclosed":0.3228,"total_post_listing_shares":13605424},
+      "expected_evidence": {"public_float_parse_evidence":{"rule":"same_table_post_offering_scope_v1","schema_binding":{"rule":"explicit_post_offering_float_column_v2","share_class_scope":"ordinary"}}},
+      "review_note": "The initial listing-day row prints 4392116 shares and 32.28%. The independently matching ordinary-share post-offering total row prints the same float plus total 13605424/100% and locked 9213308/67.72%. Keep the newly supported explicit quantity proof. Later lockup-release rows are never a denominator or replacement."
     },
     {
       "sample": "solum_column_scope_float_2021", "receipt": "20210120000141",
@@ -1052,6 +1052,61 @@
       "expected": {"offering_price": 8000, "price_band_low": 7000, "price_band_high": 8000,
         "price_band_validation_status": "direct_currency_band"},
       "review_note": "The later same-day complete prospectus explicitly states the current 7000-8000 band and price 8000. Retain its own verified band despite the earlier notice parser ambiguity. Genuine differences between two verified current bands remain held."
+    },
+    {
+      "sample": "brils_printed_initial_float_2026",
+      "receipt": "20260916000240",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20260916000240&dcmNo=11581402&eleId=14&offset=1076056&length=930107&dtd=dart4.xsd",
+      "sha256": "d908e92cd127b0fa1458002815ff59d67dc3d4beee6784e3e47792661b588bd2",
+      "expected": {"public_float_shares": 3002063, "total_post_listing_shares": 11363649, "public_float_ratio_disclosed": 0.2642},
+      "expected_evidence": {"public_float_parse_evidence":{"rule":"explicit_listing_day_schedule_ratio_v1","supporting_issuer_quantity_pair":{"rule":"same_table_post_offering_scope_v1","schema_binding":{"percentage_scope":"within_float_and_locked_columns"}}}},
+      "review_note": "The listing-day schedule explicitly prints 3002063 shares and 26.42%. A separately labelled same-document post-offering total is 11363649/100%; the float and locked columns each print within-column 100%. Those are not issuer float percentages. Use the matching disclosed 26.42%, preserve the independent quantity proof, and do not replace it with 3002063/11363649."
+    },
+    {
+      "sample": "jlk_post_total_float_2019",
+      "receipt": "20191129001530",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20191129001530&dcmNo=6979367&eleId=17&offset=350043&length=175565&dtd=dart3.xsd",
+      "sha256": "09737e6ae40e8b63070f8bc357d1812265bcec9c65acae63e62daf97356efa9f",
+      "expected": {"public_float_shares": 7085669, "total_post_listing_shares": 14894862, "public_float_ratio_disclosed": null},
+      "review_note": "The explicit post-offering issuer-total row prints 14894862 shares and 100%, float 7085669 and locked 7809193. No float percentage cell is disclosed here; preserve that distinction and derive N/D only with the same-table post total."
+    },
+    {
+      "sample": "beautyskin_horizontal_float_2023",
+      "receipt": "20230712000262",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230712000262&dcmNo=9347022&eleId=14&offset=695407&length=331092&dtd=dart3.xsd",
+      "sha256": "5f086df62ff4731f4a70f761a5c024900ef3fb25619b27ecf0500ed7a092045f",
+      "expected": {"public_float_shares": 807628, "total_post_listing_shares": 3534040, "public_float_ratio_disclosed": 0.2285},
+      "review_note": "The horizontal schedule's listing-day column prints float 807628, ratio 22.85% and issued total 3534040 in separate labelled rows. Do not use a future-release column or its 100% as today's denominator."
+    },
+    {
+      "sample": "sigetronics_post_total_float_2023",
+      "receipt": "20230721000288",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230721000288&dcmNo=9357441&eleId=14&offset=575358&length=403398&dtd=dart3.xsd",
+      "sha256": "e1c332884c77c7f23a5342be9c48a9b97e3b6c765898a3db4827411e6c9f72ff",
+      "expected": {"public_float_shares": 2538205, "total_post_listing_shares": 4506250, "public_float_ratio_disclosed": 0.5633},
+      "review_note": "The post-offering total row prints 4506250 shares/100%, float 2538205/56.33% and locked 1968045/43.67%. The differently named total is not a different event or a subgroup subtotal."
+    },
+    {
+      "sample": "ivim_post_total_float_2024",
+      "receipt": "20240723000182",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20240723000182&dcmNo=10035213&eleId=14&offset=899948&length=906285&dtd=dart4.xsd",
+      "sha256": "1e4a45c726e152095cd8844ddf6669f4daca790365305f1fcf3761dd54e37050",
+      "expected": {"public_float_shares": 3037960, "total_post_listing_shares": 14965620, "public_float_ratio_disclosed": 0.203},
+      "review_note": "Repeated original ownership grids have an ordinary-share post-offering total row: 14965620/100%, float 3037960/20.30%, locked 11927660/79.70%. Preserve the actual row and columns rather than treating the new total label as missing data."
+    },
+    {
+      "sample": "irondevice_post_total_float_2024",
+      "receipt": "20240906000325",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20240906000325&dcmNo=10106026&eleId=14&offset=786746&length=1379062&dtd=dart4.xsd",
+      "sha256": "f1ee5a576279a9cc50f55de6fac0eb1e014205e5b87a1e07a75d4a25105a5634",
+      "expected": {"public_float_shares": 4115351, "total_post_listing_shares": 13653263, "public_float_ratio_disclosed": 0.3014},
+      "review_note": "The explicitly labelled post-offering total row, not the pre-offering cap table, prints 13653263/100%, float 4115351/30.14% and locked 9537912/69.86%."
     },
     {
       "sample": "sunic_terms_2017",

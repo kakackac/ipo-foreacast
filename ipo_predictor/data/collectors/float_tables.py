@@ -202,9 +202,26 @@ def ownership_float(tables):
                         'percentage_text':r[pc],'table':table,'denominator_inferred':False})
         if any('유통가능' in compact(cell) for h in headers for cell in h):
             unverified_grids.append({'table_index':ti,'table':table})
+        initial_columns=[c for c,cell in enumerate(table[0]) if c>0 and compact(cell) in {'상장일','상장직후'}]
+        if len(initial_columns)==1 and not any(re.search(r'전환|희석|가정|우선주|기업명|회사명',compact(cell)) for cell in table[0]):
+            c=initial_columns[0]
+            quantity_rows=[(ri,r) for ri,r in enumerate(table[1:],1) if r and compact(r[0])=='유통가능주식수']
+            total_rows=[(ri,r) for ri,r in enumerate(table[1:],1) if r and re.fullmatch(
+                r'발행주식총수|상장후총발행주식수|공모후발행주식총수',compact(r[0]))]
+            ratio_rows=[(ri,r) for ri,r in enumerate(table[1:],1) if r and compact(r[0]) in {'유통비율','유통가능비율'}]
+            if len(quantity_rows)==len(total_rows)==len(ratio_rows)==1:
+                fr,frow=quantity_rows[0];tr,trow=total_rows[0];pr,prow=ratio_rows[0]
+                if (all(c<len(r) for r in [frow,trow,prow]) and shares(frow[c]) is not None
+                        and shares(trow[c]) is not None and percent(prow[c]) is not None):
+                    candidates.append((shares(frow[c]),shares(trow[c]),percent(prow[c]),ti,fr,tr,c,c,table))
+                    schema_bindings[(ti,fr,c)]={'rule':'horizontal_listing_day_quantity_ratio_v1',
+                        'reported_percentage_text':prow[c],'ratio_row':pr,'time_header_row':0,
+                        'time_header_text':table[0][c],'share_class_scope':'explicit_listing_day_issuer_total'}
         for ri, row in enumerate(table):
             label = compact(' '.join(row[:3]))
             total_label = bool(re.search(r'상장후총발행주식(?:수|합계)|상장예정주식(?:총)?수', label))
+            total_label = total_label or any(re.fullmatch(
+                r'공모후(?:발행)?주식총수|(?:공모후|상장후)합계',compact(cell)) for cell in row[:3])
             is_total = total_label or bool(re.fullmatch(r'합계|총계|총합계', compact(row[0])))
             if not is_total:
                 continue
@@ -419,10 +436,17 @@ def ownership_float(tables):
         'schema_binding':schema_bindings.get((ti,fr,fc)),
         'rejected_header_candidates':rejected_headers,
         'paragraph_binding':paragraph_bindings.get((ti,fr))}, ensure_ascii=False)
+    float_evidence=evidence
+    if ratio is None:
+        direct=[r for r in ratio_only if r['shares']==n and compatible(n,d,r['percentage_text'])]
+        if len({r['ratio'] for r in direct})==1:
+            chosen=min(direct,key=lambda r:display_quantum(r['percentage_text']))
+            ratio=chosen['ratio']
+            float_evidence=json.dumps({**chosen,'supporting_issuer_quantity_pair':json.loads(evidence)},ensure_ascii=False)
     return {'public_float_shares': n, 'public_float_ratio_disclosed': ratio,
             'public_float_parse_method': ('disclosed_public_float_ratio_direct_context' if ratio is not None
                                           else 'disclosed_public_float_shares_direct_context'),
-            'public_float_parse_evidence': evidence, 'total_post_listing_shares': d,
+            'public_float_parse_evidence': float_evidence, 'total_post_listing_shares': d,
             'total_post_listing_shares_parse_method': 'same_table_post_offering_scope_v1',
             'total_post_listing_shares_parse_evidence': evidence,
             'total_post_listing_shares_parser_validation_status': 'structurally_verified',
