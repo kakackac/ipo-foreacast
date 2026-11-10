@@ -48,6 +48,86 @@
   ],
   "samples": [
     {
+      "sample": "lsasia_excluded_total_conflict_float_2016", "receipt": "20160907000314",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20160907000314&dcmNo=5285496&eleId=16&offset=521447&length=407853&dtd=dart3.xsd",
+      "sha256": "8422a8a7f79bcd5802604b4b6b9f1520bdedb80993ccd6dd68bffba4c31c626a",
+      "expected": {"public_float_shares": null, "public_float_ratio_disclosed": null, "public_float_parse_method": "conflicting_float_ratios_review_required"},
+      "review_note": "The initial-float paragraph states 10120113/30546620 but prints 32.78 percent; the declared total excludes underwriter mandatory shares. Reconcile the full listed denominator with the primary ownership table before using either number. Do not silently calculate a different ratio from the partial declared total."
+    },
+    {
+      "sample": "almac_original_percent_conflict_float_2023", "receipt": "20230616000539",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230616000539&dcmNo=9318149&eleId=14&offset=755448&length=533482&dtd=dart3.xsd",
+      "sha256": "c0d6bfa64badc7dcf48a7b3e6b156b1de26f7726622d2cf8568cbff079aa09d4",
+      "expected": {"public_float_shares": null, "public_float_ratio_disclosed": null, "public_float_parse_method": "conflicting_float_ratios_review_required"},
+      "review_note": "The stated 1833048/5966381 initial quantity pair does not agree with primary 31.56 percent. Parenthesized 29.46 percent explicitly includes preferred shares and cannot replace the primary percentage or repair the initial denominator without further official scope reconciliation."
+    },
+    {
+      "sample": "opennol_preferred_note_float_2023", "receipt": "20230620000341",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20230620000341&dcmNo=9320690&eleId=14&offset=384298&length=536790&dtd=dart3.xsd",
+      "sha256": "2920a42acb6e9823c1b1a9b8815856dbb767614777a682f6b2011e254b64667e",
+      "expected": {"public_float_shares": 2584985, "total_post_listing_shares": 9687820, "public_float_ratio_disclosed": 0.2668},
+      "review_note": "The issuer's initial 2584985/9687820 quantity pair agrees with primary 26.68 percent. The parenthesized preferred-inclusive 26.36 percent is a distinct basis; preserve it in evidence but never use it as the initial ordinary ratio."
+    },
+    {
+      "sample": "qualitas_initial_conversion_note_float_2023", "receipt": "20231017000137",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20231017000137&dcmNo=9461258&eleId=14&offset=591115&length=357969&dtd=dart3.xsd",
+      "sha256": "a89f64821cd4e9c03cfadc2cf5f846e3e4744a5a2d1a3a206379163557e27976",
+      "expected": {"public_float_shares": 2679046, "total_post_listing_shares": 10193520, "public_float_ratio_disclosed": 0.2628},
+      "review_note": "Initial listed total 10193520 and tradable shares 2679046 agree with primary 26.28 percent. Parenthesized 24.79 percent is explicitly after preferred-share conversion and is not the initial denominator or ratio. Do not bypass an unparsed primary percentage by calculating from quantities alone."
+    },
+    {
+      "sample": "ecoprobm_original_percent_conflict_float_2019", "receipt": "20190220000799",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20190220000799&dcmNo=6488272&eleId=16&offset=506916&length=168419&dtd=dart3.xsd",
+      "sha256": "c1ae1fbac43fb333690c9193945cf49d476561ca7861cdaf0b0fa00d00fe9277",
+      "expected": {"public_float_shares": null, "public_float_ratio_disclosed": null, "public_float_parse_method": "conflicting_float_ratios_review_required"},
+      "review_note": "The issuer risk text prints listed ordinary shares 19850000 and initial tradable 3000000 at 83.3 percent, which is internally inconsistent. Preserve the conflicting original; do not silently override it with another quantity table. This is not issuer-wide absence."
+    },
+    {
+      "sample": "uracle_original_percent_conflict_float_2024", "receipt": "20240805000137",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20240805000137&dcmNo=10049761&eleId=15&offset=635968&length=555968&dtd=dart4.xsd",
+      "sha256": "4ce630c3f65638cde1a6f8d42b726327793fa1d10ec1d669f6a53824b66a7725",
+      "expected": {"public_float_shares": null, "public_float_ratio_disclosed": null, "public_float_parse_method": "conflicting_float_ratios_review_required"},
+      "review_note": "The same risk paragraph prints 2458326 initial shares out of 4330068 at 55.77 percent; quantities instead imply about 56.77 percent. Preserve the discrepancy for correction review; do not ignore the direct printed ratio."
+    },
+    {
+      "sample": "boratr_ordinary_initial_float_2017", "receipt": "20170526000344",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20170526000344&dcmNo=5668347&eleId=16&offset=260216&length=131122&dtd=dart3.xsd",
+      "sha256": "21659384118820ceef00d4a03e2551df39dd8a0bb3bff228b209631823d2b2a6",
+      "expected": {"public_float_shares": 1687700, "total_post_listing_shares": 6750733, "public_float_ratio_disclosed": 0.25},
+      "review_note": "The issuer's same risk cell explicitly states ordinary listed shares 6750733 and initial tradable shares 1687700 at 25.0 percent. The ordinary-basis parenthesis is part of the total label, not a reason to drop its denominator."
+    },
+    {
+      "sample": "raphas_listing_initial_float_2019", "receipt": "20191030000166",
+      "section_title": "Ⅲ. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20191030000166&dcmNo=6940615&eleId=17&offset=724151&length=745664&dtd=dart3.xsd",
+      "sha256": "6a64cc9ff154395194755d340433e0cdc50fa45c74694bf17d9f1899e0f611c6",
+      "expected": {"public_float_shares": 4850127, "total_post_listing_shares": 8191416, "public_float_ratio_disclosed": 0.5921},
+      "review_note": "The issuer states listed shares 8191416 and initial ordinary float 4850127 at 59.21 percent of listed shares. The later six-month 5818876 shares/71.03 percent are not the initial float."
+    },
+    {
+      "sample": "saebit_offering_initial_float_2022", "receipt": "20220726000371",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20220726000371&dcmNo=8746979&eleId=14&offset=318184&length=285910&dtd=dart3.xsd",
+      "sha256": "49e3eab60d1f1733f3e9e9b2a8229cfc0f0c1e377b40b4a53c3ba1358db5ae92",
+      "expected": {"public_float_shares": 1626454, "total_post_listing_shares": 4754545, "public_float_ratio_disclosed": 0.3421},
+      "review_note": "The same IPO risk cell directly binds the offering-inclusive listed total 4754545 to initial float 1626454 and 34.21 percent. Later release warnings supply no substitute numerator."
+    },
+    {
+      "sample": "rp_offering_initial_float_2022", "receipt": "20220919000288",
+      "section_title": "III. 투자위험요소",
+      "source_url": "https://dart.fss.or.kr/report/viewer.do?rcpNo=20220919000288&dcmNo=8810946&eleId=14&offset=235053&length=408078&dtd=dart3.xsd",
+      "sha256": "3da16be01b1fa475573d2c282e2c3e49b399ddd212d8c20ed52ecdf91eb7beb2",
+      "expected": {"public_float_shares": 2729226, "total_post_listing_shares": 7823942, "public_float_ratio_disclosed": 0.3488},
+      "review_note": "The issuer's offering-inclusive listed total 7823942, initial float 2729226 and 34.88 percent are explicitly linked. The separate convertible/preferred adjustment note is not an instruction to replace this listed-share denominator."
+    },
+    {
       "sample":"easycare_bound_share_unit_2019","receipt":"20190308000278","section_title":"Ⅰ. 모집 또는 매출에 관한 일반사항",
       "source_url":"https://dart.fss.or.kr/report/viewer.do?rcpNo=20190308000278&dcmNo=6532849&eleId=9&offset=237437&length=170849&dtd=dart3.xsd",
       "sha256":"b021c57c52bf8f255893b715b4f363d0eb2563c0cc98282c82fe2f1c62e846e2",

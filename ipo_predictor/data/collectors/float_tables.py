@@ -34,26 +34,60 @@ def ownership_float(tables):
         for ri, row in enumerate(table):
             if len(row)!=1:continue
             text=compact(row[0])
-            totals={int(value.replace(',','')) for value in re.findall(
-                r'(?:당사의|(?<![가-힣])회사의)(?:상장예정주식수|상장후총발행(?:예정)?주식수|상장후발행주식총수)([0-9][0-9,]*)주',text)}
+            total_label=(r'(?:(?:당사의|(?<![가-힣])회사의)'
+                r'(?:상장예정주식수|상장후총발행(?:예정)?주식수|상장후발행주식총수)'
+                r'(?:\(보통주기준\))?(?:인)?|공모주식(?:등)?을포함한상장예정주식수)')
+            other_scope=(r'비교회사|타회사|종속회사|관계회사|경쟁회사|피투자회사|다른회사|다른기업|타사|경쟁사|'
+                         r'비교기업|종속기업|관계기업|피투자기업|행사가정|전환가정|전량행사시|전환시')
+            total_matches=[m for m in re.finditer(total_label+r'(?P<total>[0-9][0-9,]*)주',text)
+                if shares(m['total']) is not None and not re.search(other_scope,text[max(0,m.start()-40):m.start()])]
+            totals={int(m['total'].replace(',','')) for m in total_matches}
             if len(totals)!=1:continue
             total=totals.pop()
+            total_clause=r'(?:'+'|'.join(re.escape(m[0]) for m in total_matches)+r')'
+            initial_percentage=(r'(?P<pct>[0-9]+(?:\.[0-9]+)?)%'
+                r'(?P<alternate_basis_note>\(우선주(?:전환후|포함(?:기준)?)[0-9]+(?:\.[0-9]+)?%\))?')
             patterns=[
-                r'(?:당사의|(?<![가-힣])회사의)(?:상장예정주식수|상장후총발행(?:예정)?주식수|상장후발행주식총수)[0-9][0-9,]*주중(?:약)?(?P<pct>[0-9]+(?:\.[0-9]+)?)%에해당하는(?P<n>[0-9][0-9,]*)주(?:는|가)?상장직후유통가능(?:물량|주식)',
-                r'상장예정주식수의(?P<pct>[0-9]+(?:\.[0-9]+)?)%에해당하는(?P<n>[0-9][0-9,]*)주(?:는|가)?상장직후유통가능(?:물량|주식)',
-                r'(?P<n>[0-9][0-9,]*)주(?:\((?:공모후(?:주식수)?기준)?(?P<pct>[0-9]+(?:\.[0-9]+)?)%\))?(?:는|가|이)?상장직후유통가능(?:물량|주식)',
+                total_clause+r'중(?:약)?'+initial_percentage+r'에해당하는(?P<n>[0-9][0-9,]*)주(?:는|가)?상장직후유통가능(?:물량|주식)',
+                r'상장예정주식수의'+initial_percentage+r'에해당하는(?P<n>[0-9][0-9,]*)주(?:는|가)?상장직후유통가능(?:물량|주식)',
+                r'(?P<n>[0-9][0-9,]*)주(?:\((?:공모후(?:주식수)?기준|상장주식수대비)?(?P<pct>[0-9]+(?:\.[0-9]+)?)%\))?(?:는|가|이)?상장직후유통가능(?:물량|주식)',
             ]
             seen_spans=[]
             for pattern in patterns:
                 for match in re.finditer(pattern,text):
                     if any(start<=match.start()<end for start,end in seen_spans):continue
+                    if re.search(other_scope,text[max(0,match.start()-40):match.start()]):continue
                     seen_spans.append(match.span())
-                    numerator=int(match['n'].replace(',',''));ratio=float(match['pct'])/100 if match['pct'] is not None else None
-                    binding={'text':row[0],'tradable_clause':match[0],'numerator':numerator,'denominator':total,
-                             'reported_fraction':ratio,'reported_percentage_text':match['pct'],
-                             'rule':'same_row_explicit_issuer_initial_float_v1'}
+                    numerator=shares(match['n']);percentage_text=match['pct'];percentage_raw=percentage_text
+                    alternate_note=match.groupdict().get('alternate_basis_note')
+                    if numerator is None:
+                        paragraph_conflicts.append({'rule':'malformed_initial_float_share_token_v2',
+                            'text':row[0],'raw_quantity':match['n'],'tradable_clause':match[0]})
+                        continue
+                    clause=match[0]
+                    if percentage_text is None:
+                        linked=re.search(r'(?P<pct>[0-9][0-9.,]*)%(?P<note>(?:\([^()]*\))*)에해당하는$',text[:match.start()])
+                        if linked:
+                            percentage_raw=linked['pct'];percentage_text=percentage_raw;alternate_note=linked['note'] or None
+                            if re.fullmatch(r'(?:[0-9]{1,2}|100),[0-9]{2}',percentage_text):
+                                percentage_text=percentage_text.replace(',','.')
+                            if (not re.fullmatch(r'[0-9]+(?:\.[0-9]+)?',percentage_text) or alternate_note
+                                    and not re.fullmatch(r'\(우선주(?:전환후|포함(?:기준)?)[0-9]+(?:\.[0-9]+)?%\)',alternate_note)):
+                                paragraph_conflicts.append({'rule':'unbound_initial_float_percentage_link_v2',
+                                    'text':row[0],'percentage_clause':linked[0],'tradable_clause':clause})
+                                continue
+                            clause=linked[0]+clause
+                    ratio=float(percentage_text)/100 if percentage_text is not None else None
+                    binding={'text':row[0],'tradable_clause':clause,'numerator':numerator,'denominator':total,
+                             'reported_fraction':ratio,'reported_percentage_text':percentage_text,
+                             'reported_percentage_raw_text':percentage_raw,
+                             'percentage_normalization':('decimal_comma_two_places_quantity_checked'
+                                 if percentage_raw!=percentage_text else None),
+                             'alternate_basis_note':alternate_note,
+                             'issuer_total_clauses':[m[0] for m in total_matches],
+                             'rule':'same_row_explicit_issuer_initial_float_v2'}
                     if (total<=0 or numerator>total or ratio is not None and
-                            (not 0<=ratio<=1 or not compatible(numerator,total,match['pct']+'%'))):
+                            (not 0<=ratio<=1 or not compatible(numerator,total,percentage_text+'%'))):
                         paragraph_conflicts.append(binding);continue
                     candidates.append((numerator,total,ratio,ti,ri,ri,0,0,table))
                     paragraph_bindings[(ti,ri)]=binding

@@ -115,6 +115,83 @@ class FloatTablesTests(unittest.TestCase):
             'total_post_listing_shares_parse_method':['same_table_post_offering_scope_v1']}))
         self.assertTrue(pd.isna(result.iloc[0].float_share_ratio))
         self.assertEqual(result.iloc[0].float_share_validation_status,'public_float_not_structurally_verified')
+
+    def test_ordinary_issuer_total_parenthesis_binds_the_initial_float_clause(self):
+        text=('당사의 상장예정주식수(보통주 기준) 6,750,733주 중 보호예수 대상은 5,013,405주입니다. '
+              '따라서 상장예정주식수의 25.0%에 해당하는 1,687,700주는 상장 직후 유통가능 물량입니다.')
+        result=ownership_float([[[text]]])
+        self.assertEqual(result['total_post_listing_shares'],6750733)
+        self.assertEqual(result['public_float_shares'],1687700)
+        self.assertAlmostEqual(result['public_float_ratio_disclosed'],.25)
+        evidence=json.loads(result['public_float_parse_evidence'])['paragraph_binding']
+        self.assertEqual(evidence['issuer_total_clauses'],['당사의상장예정주식수(보통주기준)6,750,733주'])
+        for old,new in [('당사의','비교회사의'),('보통주 기준','전환 가정'),('상장 직후','6개월 후')]:
+            with self.subTest(replacement=new):self.assertNotApproved(ownership_float([[[text.replace(old,new)]]]))
+
+    def test_explicit_offering_inclusive_total_is_not_a_peer_or_conditional_total(self):
+        text='공모주식 등을 포함한 상장예정주식수 4,754,545주 중 34.21%에 해당하는 1,626,454주는 상장 직후 유통가능 물량입니다.'
+        result=ownership_float([[[text]]])
+        self.assertEqual(result['total_post_listing_shares'],4754545)
+        self.assertEqual(result['public_float_shares'],1626454)
+        self.assertAlmostEqual(result['public_float_ratio_disclosed'],.3421)
+        for prefix in ['비교회사의 ', '종속회사의 ', '타사의 ', '관계기업의 ', '다른 회사의 ',
+                       '주식매수선택권 전량행사 가정 시 ', '전환 가정 시 ']:
+            with self.subTest(prefix=prefix):self.assertNotApproved(ownership_float([[[prefix+text]]]))
+        self.assertNotApproved(ownership_float([[[text.replace('공모주식 등을 포함한 ','')]]]))
+        self.assertEqual(ownership_float([[[text.replace('34.21%','44.21%')]]])['public_float_basis_status'],
+                         'same_table_candidates_conflict')
+        self.assertNotApproved(ownership_float([[[text.replace('4,754,545','4,75,4545')]]]))
+        self.assertEqual(ownership_float([[[text.replace('1,626,454','1,62,6454')]]])['public_float_basis_status'],
+                         'same_table_candidates_conflict')
+
+    def test_listing_share_percentage_is_initial_not_a_later_release(self):
+        text=('당사의 상장예정주식수 8,191,416주 중 매각제한 물량을 제외한 보통주 '
+              '4,850,127주(상장 주식수 대비 59.21%)는 상장 직후 유통가능물량이며, '
+              '상장일로부터 6개월 뒤에는 총 5,818,876주(상장 주식수 대비 71.03%)가 유통가능합니다.')
+        result=ownership_float([[[text]]])
+        self.assertEqual(result['public_float_shares'],4850127)
+        self.assertEqual(result['total_post_listing_shares'],8191416)
+        self.assertAlmostEqual(result['public_float_ratio_disclosed'],.5921)
+        self.assertNotApproved(ownership_float([[[text.replace('상장 직후','상장 6개월 후')]]]))
+        self.assertEqual(ownership_float([[[text.replace('59.21%','69.21%')]]])['public_float_basis_status'],
+                         'same_table_candidates_conflict')
+
+    def test_initial_percentage_is_not_lost_behind_an_alternative_conversion_basis(self):
+        text=('공모주식 등을 포함한 상장예정주식수 10,193,520주 중 '
+              '26.28%(우선주 전환 후 24.79%)에 해당하는 2,679,046주는 상장 직후 유통가능 물량입니다.')
+        result=ownership_float([[[text]]])
+        self.assertEqual(result['public_float_shares'],2679046)
+        self.assertEqual(result['total_post_listing_shares'],10193520)
+        self.assertAlmostEqual(result['public_float_ratio_disclosed'],.2628)
+        evidence=json.loads(result['public_float_parse_evidence'])['paragraph_binding']
+        self.assertEqual(evidence['alternate_basis_note'],'(우선주전환후24.79%)')
+        for label in ['우선주 포함','우선주 포함 기준']:
+            with self.subTest(label=label):
+                self.assertAlmostEqual(ownership_float([[[text.replace('우선주 전환 후',label)]]])['public_float_ratio_disclosed'],.2628)
+        self.assertEqual(ownership_float([[[text.replace('26.28%','36.28%')]]])['public_float_basis_status'],
+                         'same_table_candidates_conflict')
+        self.assertNotApproved(ownership_float([[[text.replace('우선주 전환 후','다른 기준')]]]))
+
+    def test_percentage_immediately_before_initial_quantity_is_checked_not_discarded(self):
+        text=('당사의 상장예정주식수 3,294,600주 중 약 66.88%에 해당하는 2,203,434주는 보호예수되며, '
+              '약 33.12%에 해당하는 1,091,166주는 상장 직후 유통가능물량입니다.')
+        result=ownership_float([[[text]]])
+        self.assertEqual(result['public_float_shares'],1091166)
+        self.assertAlmostEqual(result['public_float_ratio_disclosed'],.3312)
+        qualified=text.replace('3,294,600주 중','3,294,600주(주식매수선택권 미행사 20,000주 제외) 중')
+        self.assertAlmostEqual(ownership_float([[[qualified]]])['public_float_ratio_disclosed'],.3312)
+        self.assertEqual(ownership_float([[[text.replace('33.12%','43.12%')]]])['public_float_basis_status'],
+                         'same_table_candidates_conflict')
+        comma=text.replace('33.12%','33,12%')
+        result=ownership_float([[[comma]]])
+        self.assertAlmostEqual(result['public_float_ratio_disclosed'],.3312)
+        evidence=json.loads(result['public_float_parse_evidence'])['paragraph_binding']
+        self.assertEqual(evidence['reported_percentage_raw_text'],'33,12')
+        self.assertEqual(evidence['percentage_normalization'],'decimal_comma_two_places_quantity_checked')
+        self.assertEqual(ownership_float([[[comma.replace('33,12%','43,12%')]]])['public_float_basis_status'],
+                         'same_table_candidates_conflict')
+        for token in ['33,120','1,000','33.1.2','33,,12']:
+            with self.subTest(token=token):self.assertNotApproved(ownership_float([[[comma.replace('33,12%',token+'%')]]]))
     def test_post_offering_column_not_pre_offering(self):
         table=[['구분','공모전 주식수','공모전 주식수','공모후 주식수','공모후 주식수'],
                ['구분','주식수','지분율','주식수','지분율'],

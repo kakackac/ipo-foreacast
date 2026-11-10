@@ -19,6 +19,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data.collectors.dart_collector import DARTCollector
 
 SAMPLES = {
+    "lsasia_excluded_total_conflict_float_2016": "20160907000314",
+    "almac_original_percent_conflict_float_2023": "20230616000539",
+    "opennol_preferred_note_float_2023": "20230620000341",
+    "qualitas_initial_conversion_note_float_2023": "20231017000137",
+    "ecoprobm_original_percent_conflict_float_2019": "20190220000799",
+    "uracle_original_percent_conflict_float_2024": "20240805000137",
+    "boratr_ordinary_initial_float_2017": "20170526000344",
+    "raphas_listing_initial_float_2019": "20191030000166",
+    "saebit_offering_initial_float_2022": "20220726000371",
+    "rp_offering_initial_float_2022": "20220919000288",
     "easycare_bound_share_unit_2019": "20190308000278",
     "cowin_bound_share_unit_2019": "20190723000079",
     "knj_bound_share_unit_2019": "20191015000138",
