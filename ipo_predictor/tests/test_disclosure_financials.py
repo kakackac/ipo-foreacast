@@ -43,6 +43,70 @@ def financial_index(receipt='20230315000001',date='2023.03.15',corp='12345678',n
 
 
 class DisclosureFinancialTests(unittest.TestCase):
+    def compressed_summary_with_named_statements(self):
+        body='1. 요약별도재무정보 (단위: 원)'+table([
+            ['사업연도','2022연도 (제13기)'],['회계처리 기준','한국채택 국제회계기준'],
+            ['감사의견','적정'],['자산총계 부채총계 자본총계','300 100 200']])
+        body+='4. 재무제표 재무상태표 (단위: 원)'+table([
+            ['과목','2022연도 (제13기)'],['유동자산','200'],['자산총계','300'],
+            ['부채총계','100'],['자본총계','200']])
+        body+='포괄손익계산서 (단위: 원)'+table([
+            ['과목','2022연도 (제13기)'],['매출액','1000'],['영업이익','50'],['당기순이익','40']])
+        return body
+
+    def test_compressed_summary_standard_binds_named_annual_statement_not_amount_tokens(self):
+        frame=parse(self.compressed_summary_with_named_statements())
+        self.assertEqual(len(frame),6);self.assertEqual(set(frame.year),{2022})
+        self.assertEqual(set(frame.amount),{300,100,200,1000,50,40})
+        self.assertTrue(frame.table_id.isin([1,2]).all())
+        self.assertTrue(frame.accounting_standard_evidence.str.contains('issuer_summary_explicit_column_standard_v1').all())
+        for old,new in [('한국채택 국제회계기준','일반기업회계기준'),('회계처리 기준','기타 설명'),
+                        ('요약별도','요약연결'),('2022연도 (제13기)','2022연도 반기 (제13기)')]:
+            with self.subTest(replacement=new):
+                self.assertTrue(parse(self.compressed_summary_with_named_statements().replace(old,new)).empty)
+
+    def test_named_annual_header_needs_same_year_standard_and_not_interim_title(self):
+        body=self.compressed_summary_with_named_statements()
+        self.assertTrue(parse(body.replace('2022연도 (제13기)','2021연도 (제12기)',1)).empty)
+        result=parse(body.replace('4. 재무제표 재무상태표','4. 재무제표 반기재무상태표')
+                     .replace('포괄손익계산서','반기포괄손익계산서'))
+        self.assertTrue(result.empty)
+
+    def test_interim_header_cannot_poison_another_columns_dated_annual_period(self):
+        body=self.compressed_summary_with_named_statements().split('4. 재무제표')[0]
+        body+='4. 재무제표 분기재무상태표 제14(당)3분기말 2023년 9월 30일 현재 '
+        body+='제13(전)기말 2022년 12월 31일 현재 (단위: 원)'+table([
+            ['과목','제14(당)3분기말','제13(전)기말'],['유동자산','250','200'],
+            ['자산총계','400','300'],['부채총계','110','100'],['자본총계','290','200']])
+        frame=parse(body);self.assertEqual(len(frame),3);self.assertEqual(set(frame.year),{2022})
+        self.assertEqual(set(frame.column_id),{2})
+        self.assertTrue(parse(body.replace('2022년 12월 31일','2021년 12월 31일')).empty)
+
+    def test_same_column_dates_bind_without_borrowing_another_columns_period(self):
+        body=self.compressed_summary_with_named_statements().split('4. 재무제표')[0]
+        body+='4. 재무제표 재무상태표 (단위: 원)'+table([
+            ['과목','제13기 2022.12.31'],['유동자산','200'],['자산총계','300'],
+            ['부채총계','100'],['자본총계','200']])
+        self.assertEqual(len(parse(body)),3)
+        self.assertTrue(parse(body.replace('2022.12.31','2022.06.30')).empty)
+
+    def test_explicit_ifrs_fiscal_year_reference_does_not_need_redundant_annual_word(self):
+        body=self.interim_comparative().split('3. 연결재무제표 주석')[0]
+        body+='3. 연결재무제표 주석 한국채택국제회계기준에 따라 작성된 2022년 12월 31일자로 종료하는 회계연도에 대한 연결재무제표와 함께 읽어야 합니다.'
+        frame=parse_disclosure_financials(body,'12345678','20231101000001','2023-11-01','official')
+        self.assertEqual(len(frame),6);self.assertEqual(set(frame.year),{2022})
+        for old,new in [('회계연도','분기 회계기간'),('대한 연결재무제표','대한 별도재무제표'),
+                        ('작성된 2022년 12월 31일','작성된 2021년 12월 31일'),
+                        ('주석 한국채택','주석 비교회사의 한국채택')]:
+            with self.subTest(replacement=new):
+                self.assertTrue(parse_disclosure_financials(body.replace(old,new),
+                    '12345678','20231101000001','2023-11-01','official').empty)
+
+    def test_quarter_number_after_parenthesized_term_preserves_annual_comparative(self):
+        body=self.interim_comparative().replace('제14기 3분기','제14(당) 3분기')
+        frame=parse_disclosure_financials(body,'12345678','20231101000001','2023-11-01','official')
+        self.assertEqual(len(frame),6);self.assertEqual(set(frame.year),{2022})
+
     def fiscal_statements(self,end_year=2022):
         html='2. 연결재무제표 연결재무상태표 '
         html+=f'제13기 {end_year}년 3월 31일 현재 (단위: 원)'
@@ -575,8 +639,35 @@ class DisclosureFinancialTests(unittest.TestCase):
         self.assertTrue(frame.extraction_rule_id.eq('detailed_annual_period_and_basis_v1').all())
         incomplete=primary.replace('<tr><td>당기순이익</td><td>36</td><td>40000000</td></tr>','')
         frame=parse(summary_html+incomplete)
-        self.assertEqual(frame.loc[frame.account_name_en.eq('total_assets'),'amount'].tolist(),[300000000])
+        # The complete balance statement keeps its precision; incomplete
+        # primary income must not replace the complete summary income family.
+        self.assertEqual(frame.loc[frame.account_name_en.eq('total_assets'),'amount'].tolist(),[300000001])
         self.assertEqual(frame.loc[frame.account_name_en.eq('net_income'),'amount'].tolist(),[40000000])
+        income=frame[frame.account_name_en.isin(['revenue','operating_income','net_income'])]
+        self.assertTrue(income.extraction_rule_id.eq('summary_issuer_statement_scope_v2').all())
+
+    def test_primary_precision_is_independent_of_framework_transfer_route(self):
+        rows=summary(standard=False);rows[-2]=['영업이익','50'];rows[-1]=['당기순이익','40']
+        head='1. 요약별도재무정보 (단위: 백만원)'+table(rows)
+        primary=self.interim_comparative().replace('2. 연결재무제표','4. 재무제표')
+        primary=primary.replace('3. 연결재무제표 주석','5. 재무제표 주석').replace('연결','')
+        for old,new in [('300','300000001'),('100','100000001'),('200','200000000'),
+                        ('1000','1000000000'),('50','50000000'),('40','40000000')]:
+            primary=primary.replace('<td>'+old+'</td>','<td>'+new+'</td>')
+        primary+='한국채택국제회계기준에 따라 작성된 2022년 12월 31일자로 종료하는 회계연도에 대한 연차재무제표'
+        frame=parse(head+primary)
+        self.assertEqual(frame.loc[frame.account_name_en.eq('total_assets'),'amount'].tolist(),[300000001])
+        self.assertTrue(frame.extraction_rule_id.eq('detailed_annual_period_and_basis_v1').all())
+
+    def test_new_balance_summary_keeps_equal_account_precise_primary_income(self):
+        rows=summary(standard=False);rows[-2]=['영업이익','50'];rows[-1]=['당기순이익','40']
+        body='1. 요약별도재무정보 (단위: 천원)'+table(rows)
+        body+='4. 재무제표 손익계산서 제13기 2022년 1월 1일부터 2022년 12월 31일까지 (단위: 원)'
+        body+=table([['과목','제13기'],['매출액','1000001'],['영업이익','50001'],['당기순이익','40001']])
+        body+='5. 재무제표 주석 한국채택국제회계기준에 따라 작성된 2022년 12월 31일자로 종료하는 회계연도에 대한 연차재무제표'
+        frame=parse(body);self.assertEqual(len(frame),6)
+        self.assertEqual(frame.loc[frame.account_name_en.eq('revenue'),'amount'].tolist(),[1000001])
+        self.assertEqual(frame.loc[frame.account_name_en.eq('total_assets'),'amount'].tolist(),[300000])
 
     def test_partial_verified_summary_does_not_hide_complete_primary_income(self):
         summary_rows=summary(standard=False)

@@ -248,6 +248,31 @@ def financial_records(frame):
     return json.loads(frame.to_json(orient='records',date_format='iso',double_precision=15))
 
 
+def explicit_statement_year(header):
+    """A named annual-year column, not a date range, interim, forecast or term alone."""
+    compact=clean(header)
+    match=re.fullmatch(r'((?:19|20)\d{2})(?:연도|년도|년)(?:제\d+기)?',compact)
+    return int(match[1]) if match else None
+
+
+def summary_column_standard(table, scope, context, table_id, primary, explicit):
+    """Read the declared standard independently of compressed monetary rows."""
+    if scope is None or (primary['consolidated_primary_present'] and not explicit):
+        return {}
+    result={}
+    for row_id,row in enumerate(table):
+        if not row or clean(row[0]) not in {'회계처리기준','회계기준'}:continue
+        for column,value in enumerate(row[1:],start=1):
+            if clean(value) not in {'KIFRS','한국채택국제회계기준'}:continue
+            header=' '.join(r[column] for r in table[:row_id] if len(r)>column)
+            year=explicit_statement_year(header)
+            if year is None:continue
+            result[(scope,year)]={'rule':'issuer_summary_explicit_column_standard_v1','scope':scope,
+                'year':year,'summary_table_id':table_id,'column_id':column,'standard_row_id':row_id,
+                'header_rows':table[:row_id],'raw_standard_cell':value,'statement_scope_evidence':context}
+    return result
+
+
 def statement_section_boundaries(context):
     return [match for match in re.finditer(
         r'(?<!\d)([2345])[.)]\s*(연\s*결\s*)?재\s*무\s*제\s*표(?!\s*작성)(\s*주\s*석)?',context)
@@ -377,6 +402,8 @@ def primary_annual_balances(parser, fiscal_columns=None):
             if fiscal and fiscal['scope']!=scope:fiscal=None
             if fiscal and fiscal['scope']==scope:
                 year=fiscal['year']
+            elif explicit_statement_year(header) is not None:
+                year=explicit_statement_year(header)
             elif len(years)==1 and re.search(r'12\s*월',header):
                 year=int(next(iter(years)))
             else:
@@ -475,7 +502,7 @@ def ifrs_preparation_statements(text, default_scope="OFS", table_note=False, fis
         r"당사는\s*" + standard + r"에\s*따라\s*(?P<basis>연결|별도|개별)?\s*재무제표를\s*작성하였",
         r"(?<![가-힣])(?P<issuer>연결실체|연결회사|당사|회사)는[^.。]{0,180}?" + standard
         + r"에\s*따라\s*(?P<basis>연결|별도|개별)?\s*재무제표를\s*작성하였",
-        standard + r"에\s*따라\s*작성된\s*(?P<annual_year>(?:19|20)\d{2})년\s*12월\s*31일(?:자)?로\s*종료하는\s*회계연도에\s*대한\s*연차\s*(?P<basis>연결|별도|개별)\s*재무제표",
+        standard + r"에\s*따라\s*작성된\s*(?P<annual_year>(?:19|20)\d{2})년\s*12월\s*31일(?:자)?로\s*종료하는\s*회계연도에\s*대한\s*(?:연차\s*)?(?P<basis>연결|별도|개별)?\s*재무제표",
     ]
     if table_note:
         patterns.append(standard + r"\s*(?:작성기준)?\s*에\s*따라\s*작성\s*(?:되었|됐|하였|하고)?")
@@ -495,6 +522,8 @@ def ifrs_preparation_statements(text, default_scope="OFS", table_note=False, fis
             if since_year and re.search(r'종속회사|관계회사|피투자회사|비교회사',prefix):
                 continue
             annual_reference=match.groupdict().get('annual_year') is not None
+            if annual_reference and re.search(r'(?:종속회사|종속기업|관계회사|피투자회사|비교회사)(?:인|의)?\s*$',prefix):
+                continue
             if not annual_reference and re.search(r"(?:분기|반기|중간)(?:(?:연결|별도|개별)?재무제표는)?$",clean(prefix)):
                 continue
             if re.search(r"차기|예정|채택할|적용할",prefix) or re.match(r"\s*(?:할|될|예정)",text[match.end():]):
@@ -515,6 +544,7 @@ def ifrs_preparation_statements(text, default_scope="OFS", table_note=False, fis
             terms = set() if annual_reference else {int(term) for term in re.findall(r"제\s*(\d+)\s*기", prefix + match[0])}
             result.append({'scope': scope, 'text': prefix + match[0], 'terms': terms,
                            'years': {date[0] for date in dates},
+                           **({'implicit_scope_annual_reference':True} if annual_reference and basis is None else {}),
                            **({'since_year':int(since_year)} if since_year else {})})
     return result
 
@@ -558,7 +588,7 @@ def interim_annual_comparative_basis(text, scope, interim_years, published, fisc
     if not declarations:return {}
     references=[]
     reference=(r'(?P<year>(?:19|20)\d{2})(?:년|[./-])12(?:월|[./-])31일?(?:자)?로?종료(?:하는|되는)'
-               r'회계(?:연도|기간)(?:에대한|의)?연차(?P<basis>연결|별도|개별)?재무제표')
+               r'회계(?:연도(?:에대한|의)?(?:연차)?|기간(?:에대한|의)?연차)(?P<basis>연결|별도|개별)?재무제표')
     for match in re.finditer(reference,compact):
         if int(match['year'])!=current-1 or not matches_scope([match['basis']] if match['basis'] else []):continue
         if re.search(r'종속회사|종속기업|관계회사|비교회사',compact[max(0,match.start()-80):match.start()]):continue
@@ -650,7 +680,11 @@ def detailed_annual_accounts(parser, corp_code, receipt, published, source_url, 
                      ((item[2] in {"total_assets", "total_liabilities", "equity"}) == (kind == "balance"))]
         if len(positions) < 2:
             continue
-        headers = table[:positions[0][0]]
+        data_start=next((i for i,row in enumerate(table[:positions[0][0]])
+            if clean(row[0]) not in {'과목','구분','기간','사업연도'} and any(
+                re.fullmatch(r'(?:-?\d[\d,]*(?:\.\d+)?|\(\d[\d,]*(?:\.\d+)?\))',cell.strip())
+                for cell in row[1:])),positions[0][0])
+        headers = table[:data_start]
         heading = current_context + " " + " ".join(" ".join(row) for row in headers)
         units = re.findall(r"단위\s*[:：]\s*(백\s*만\s*원|천\s*원|원|KRW)", heading)
         units = {re.sub(r"\s+", "", value) for value in units}
@@ -658,10 +692,10 @@ def detailed_annual_accounts(parser, corp_code, receipt, published, source_url, 
             rejected["krw_unit_unverified"] += 1
             continue
         scale = {"백만원": 1_000_000, "천원": 1_000, "원": 1, "KRW": 1}[units.pop()]
-        terms = list(re.finditer(r"제\s*(\d+)\s*(?:\([^)]*\))?\s*(?:분기|반기|기)", heading))
+        terms = list(re.finditer(r"제\s*(\d+)\s*(?:\([^)]*\))?\s*(?:[1-4]\s*분기|분기|반기|기)", current_context))
         periods = {}
         for index, term in enumerate(terms):
-            text = heading[term.start():terms[index+1].start() if index+1 < len(terms) else len(heading)]
+            text = current_context[term.start():terms[index+1].start() if index+1 < len(terms) else len(current_context)]
             if re.search(r"분기|반기|[36]\s*개월|설립\s*전|분할\s*전|사업부|carve\s*out", text,re.I):
                 if re.search(r'분기|반기|[36]\s*개월',text):
                     interim_terms[scope].add(int(term[1]))
@@ -691,7 +725,16 @@ def detailed_annual_accounts(parser, corp_code, receipt, published, source_url, 
             if len(numbers) != 1:
                 continue
             fiscal_term=numbers.pop()
-            years = periods.get(fiscal_term, {})
+            years = dict(periods.get(fiscal_term, {}))
+            column_dates=[tuple(map(int,date)) for date in re.findall(
+                r'((?:19|20)\d{2})\s*(?:년|[./-])\s*(\d{1,2})\s*(?:월|[./-])\s*(\d{1,2})',header)]
+            column_annual=(len(column_dates)==1 and column_dates[0][1:]==(12,31) if kind=='balance'
+                else len(column_dates)==2 and column_dates==[(column_dates[0][0],1,1),(column_dates[0][0],12,31)])
+            if column_annual:years.setdefault(column_dates[0][0],header)
+            label_year=explicit_statement_year(header)
+            if (not years and label_year is not None and (scope,label_year) in (summary_basis or {})
+                    and not re.search('분기|반기|중간|개월',current_context)):
+                years={label_year:header}
             fiscal=fiscal_columns.get((table_id,column))
             if fiscal and fiscal['scope']!=scope:fiscal=None
             if fiscal and fiscal['scope']==scope:years={fiscal['year']:fiscal['text']}
@@ -823,6 +866,8 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url,
             if len(table) >= 4:
                 rejected['summary_scope_unresolved'] += 1
             continue
+        if declared:
+            summary_basis.update(summary_column_standard(table,scope,context,table_id,primary,scope_explicit))
         if scale is None:rejected['krw_unit_unverified'] += 1
         account_positions = [(i, r, account_name(r[0])) for i, r in enumerate(table) if r]
         account_positions = [(i, r, name) for i, r, name in account_positions if name]
@@ -930,6 +975,10 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url,
                         parent[0],default_scope=column_scope),column_scope,year,header,term_years)
             framework_evidence=(local_evidence
                 or preparation_for_year(frameworks,column_scope,year,header,term_years))
+            if framework_evidence and any(statement.get('implicit_scope_annual_reference')
+                    and preparation_for_year([statement],column_scope,year,header,term_years)==framework_evidence
+                    for statement in frameworks):
+                shared_framework_groups.add((year,column_scope))
             if (framework_evidence is None and (year,column_scope) not in standards
                     and 'KIFRS' not in clean(header) and scope_standard!='K-IFRS'):
                 if primary_frameworks is None:
@@ -1043,7 +1092,13 @@ def parse_disclosure_financials(html, corp_code, receipt, published, source_url,
                 primary_accounts={r['account_name_en'] for r in primary_family}
                 required=({'total_assets','total_liabilities','equity'} if 'total_assets' in family
                           else {'revenue','operating_income','net_income'})
-                if (required.issubset(primary_accounts) and summary_accounts < primary_accounts
+                family_precise=(bool(summary_family)
+                    and summary_accounts.issubset(primary_accounts)
+                    and all(any(r['unit_multiplier']<=s['unit_multiplier'] for r in primary_family
+                                if r['account_name_en']==s['account_name_en']) for s in summary_family)
+                    and any(r['unit_multiplier']<s['unit_multiplier'] for s in summary_family for r in primary_family
+                            if r['account_name_en']==s['account_name_en']))
+                if (required.issubset(primary_accounts) and (summary_accounts < primary_accounts or family_precise)
                         and all(len({r['amount'] for r in primary_family if r['account_name_en']==name})==1
                                 for name in primary_accounts)):
                     rows=[r for r in rows if (r['year'],r['fs_div'])!=key or r['account_name_en'] not in family]
