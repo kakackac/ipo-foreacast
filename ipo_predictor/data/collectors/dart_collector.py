@@ -14,11 +14,19 @@ DART OpenAPI를 통해 공모주 관련 공시 데이터를 수집한다.
   - 투자설명서(prospectus) PDF는 별도 파싱 파이프라인이 필요하다.
 """
 
-import time
 import logging
+import json
 import re
-from datetime import date, timedelta
+import time
+import zipfile
+import hashlib
+import os
+import tempfile
+from pathlib import Path
+from io import BytesIO
+from datetime import date, timedelta, datetime, timezone
 from html import unescape as html_unescape
+from html.parser import HTMLParser
 from typing import Optional
 
 import requests
@@ -33,22 +41,131 @@ logger = logging.getLogger(__name__)
 REQUEST_DELAY = 0.3          # API 호출 간격 (초) — 속도 제한 회피
 MAX_RETRIES   = 3
 TIMEOUT       = 15
+DEMAND_PARSER_VERSION = 29
+
+FINAL_PRICE_LABEL_PATTERN = (
+    r"(?:1\s*주당\s*)?(?:(?:확정|최종)\s*공모가(?:액|격)?|공모가(?:액|격)?\s*확정)"
+)
+PRICE_CONTEXT_EXCLUSIONS = r"희망|밴드|액면|총\s*공모|공모\s*총액|모집\s*총액|발행\s*총액|총\s*발행"
+
+
+class _TableRowParser(HTMLParser):
+    """DART 원문 HTML에서 표의 행·셀 경계를 보존한다."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.rows: list[str] = []
+        self.tables: list[list[list[str]]] = []
+        self.table_contexts: list[str] = []
+        self._outside_text: list[str] = []
+        self._current_context = ""
+        self._table_depth = 0
+        self._table_rows: list[list[str]] | None = None
+        self._row: list[tuple[str, int, int]] | None = None
+        self._cell: list[str] | None = None
+        self._cell_rowspan = 1
+        self._cell_colspan = 1
+        self._pending_rowspans: dict[int, tuple[str, int]] = {}
+
+    def handle_starttag(self, tag: str, attrs):
+        tag = tag.lower()
+        if tag == "table":
+            if self._table_depth == 0:
+                self._table_rows = []
+                self._current_context = re.sub(r"\s+", " ", "".join(self._outside_text)).strip()
+                self._outside_text = []
+            self._table_depth += 1
+        elif self._table_depth and tag == "tr":
+            self._row = []
+        elif self._table_depth and tag in {"td", "th"} and self._row is not None:
+            self._cell = []
+            attributes = dict(attrs)
+            self._cell_rowspan = self._positive_span(attributes.get("rowspan"))
+            self._cell_colspan = self._positive_span(attributes.get("colspan"))
+
+    def handle_endtag(self, tag: str):
+        tag = tag.lower()
+        if self._table_depth and tag in {"td", "th"} and self._cell is not None and self._row is not None:
+            value = re.sub(r"\s+", " ", "".join(self._cell)).strip()
+            self._row.append((value, self._cell_rowspan, self._cell_colspan))
+            self._cell = None
+        elif self._table_depth and tag == "tr" and self._row is not None:
+            if self._row:
+                expanded = self._expand_row(self._row)
+                self.rows.append(" | ".join(expanded))
+                if self._table_rows is not None:
+                    self._table_rows.append(expanded)
+            self._row = None
+        elif tag == "table" and self._table_depth:
+            self._table_depth -= 1
+            if self._table_depth == 0 and self._table_rows:
+                self.tables.append(self._table_rows)
+                self.table_contexts.append(self._current_context)
+                self._table_rows = None
+                self._pending_rowspans = {}
+
+    def handle_data(self, data: str):
+        # DART ZIP XML uses a non-HTML line-break entity in headings and cells.
+        data = data.replace("&cr;", "\n")
+        if self._cell is not None:
+            self._cell.append(data)
+        elif not self._table_depth:
+            self._outside_text.append(data)
+
+    @staticmethod
+    def _positive_span(value: str | None) -> int:
+        try:
+            return max(1, int(value or 1))
+        except (TypeError, ValueError):
+            return 1
+
+    def _expand_row(self, cells: list[tuple[str, int, int]]) -> list[str]:
+        """rowspan/colspan과 빈 셀을 보존한 직사각형 행을 만든다."""
+        row: list[str] = []
+        column = 0
+
+        def append_pending() -> None:
+            nonlocal column
+            while column in self._pending_rowspans:
+                value, remaining = self._pending_rowspans[column]
+                row.append(value)
+                if remaining <= 1:
+                    del self._pending_rowspans[column]
+                else:
+                    self._pending_rowspans[column] = (value, remaining - 1)
+                column += 1
+
+        for value, rowspan, colspan in cells:
+            append_pending()
+            for _ in range(colspan):
+                row.append(value)
+                if rowspan > 1:
+                    self._pending_rowspans[column] = (value, rowspan - 1)
+                column += 1
+        append_pending()
+        return row
 
 
 class DARTCollector:
     """DART OpenAPI 수집기"""
 
-    def __init__(self, api_key: str = DART_API_KEY):
+    def __init__(self, api_key: str = DART_API_KEY, document_cache_dir=RAW_DIR / "dart_document_sources"):
         self.api_key = api_key
+        self.document_cache_dir = Path(document_cache_dir) if document_cache_dir is not None else None
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "IPO-Research/1.0"})
+
+    @property
+    def is_configured(self) -> bool:
+        """실제 OpenDART 인증키가 설정되었는지 반환한다."""
+        return bool(self.api_key and self.api_key != "YOUR_DART_API_KEY")
 
     # ── 저수준 API 호출 ────────────────────────────────────────
 
     def _get(self, endpoint: str, params: dict) -> dict:
         """재시도 포함 GET 요청"""
         url = f"{DART_BASE_URL}/{endpoint}.json"
-        params["crtfc_key"] = self.api_key
+        params = {**params, "crtfc_key": self.api_key}
 
         for attempt in range(1, MAX_RETRIES + 1):
             try:
@@ -57,16 +174,105 @@ class DARTCollector:
                 data = resp.json()
                 if data.get("status") == "000":
                     return data
-                # status 020 = 조회된 데이터 없음 (정상)
-                if data.get("status") == "020":
-                    return {"status": "020", "list": []}
-                logger.warning("DART API status=%s msg=%s", data.get("status"), data.get("message"))
-                return data
-            except requests.RequestException as e:
-                logger.warning("DART API attempt %d failed: %s", attempt, e)
+                if data.get("status") == "013":
+                    return {"status": data.get("status"), "list": []}
+                # Request URLs and exception text can contain the authentication key.
+                status = str(data.get("status", "unknown"))
+                safe_status = status if re.fullmatch(r"\d{3}", status) else "unknown"
+                context = ""
+                if endpoint == "fnlttSinglAcntAll":
+                    # Only public request fields with known formats may enter logs.
+                    formats = {"corp_code": r"\d{8}", "bsns_year": r"\d{4}",
+                               "reprt_code": r"1101[1-4]", "fs_div": r"CFS|OFS"}
+                    fields = [f"{name}={value if re.fullmatch(pattern, value) else 'invalid'}"
+                              for name, pattern in formats.items()
+                              for value in [str(params.get(name, ""))]]
+                    fields.append(f"authentication_key_length={len(str(self.api_key or ''))}")
+                    context = ", " + ", ".join(fields)
+                raise RuntimeError(f"DART API failed: {endpoint}, status={safe_status}{context}")
+            except (requests.RequestException, ValueError) as e:
+                logger.warning("DART API attempt %d failed: %s (%s)", attempt, endpoint, type(e).__name__)
                 if attempt < MAX_RETRIES:
                     time.sleep(attempt * 2)
-        return {}
+        raise RuntimeError(f"DART API request failed: {endpoint}, attempts={MAX_RETRIES}") from None
+
+    def get_document_text(self, rcept_no: str, *, refresh: bool = False) -> str:
+        """DART 원문 ZIP을 내려받아 분석 가능한 평문으로 변환한다.
+
+        OpenDART의 ``document.xml``은 이름과 달리 JSON/XBRL API가 아닌 ZIP
+        바이너리 응답이다. 공시별 XML/HTML 조각을 모두 읽어 합치므로, 신고서
+        정정본처럼 여러 파일로 구성된 원문도 같은 파서로 처리할 수 있다.
+        """
+        rcept_no = str(rcept_no)
+        if not re.fullmatch(r"\d{14}", rcept_no):
+            raise ValueError("DART 접수번호는 14자리 숫자여야 합니다.")
+        cache_path = self.document_cache_dir / f"{rcept_no}.json" if self.document_cache_dir is not None else None
+        if cache_path is not None and cache_path.exists() and not refresh:
+            try:
+                cached = json.loads(cache_path.read_text(encoding="utf-8"))
+                document = cached["decoded_document"]
+                if (cached["schema_version"] == 1 and cached["rcept_no"] == rcept_no
+                        and isinstance(document, str) and document.strip()
+                        and hashlib.sha256(document.encode("utf-8")).hexdigest() == cached["sha256"]):
+                    return document
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
+            logger.warning("DART 원문 캐시 무결성 확인 실패: %s; 재조회 필요", rcept_no)
+        if not self.is_configured:
+            raise RuntimeError("DART_API_KEY가 설정되지 않았습니다.")
+
+        url = f"{DART_BASE_URL}/document.xml"
+        try:
+            response = self.session.get(
+                url,
+                params={"crtfc_key": self.api_key, "rcept_no": rcept_no},
+                timeout=TIMEOUT,
+            )
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise RuntimeError(f"DART 원문 다운로드 실패 ({rcept_no}): {type(exc).__name__}") from None
+
+        content = response.content
+        if not zipfile.is_zipfile(BytesIO(content)):
+            message = content.decode("utf-8", errors="ignore")[:300]
+            raise RuntimeError(f"DART 원문 ZIP 응답이 아닙니다 ({rcept_no}): {message}")
+
+        fragments: list[str] = []
+        with zipfile.ZipFile(BytesIO(content)) as archive:
+            for name in archive.namelist():
+                if name.endswith("/") or name.lower().endswith((".jpg", ".jpeg", ".gif", ".png", ".pdf")):
+                    continue
+                raw = archive.read(name)
+                for encoding in ("utf-8", "cp949", "euc-kr"):
+                    try:
+                        fragments.append(raw.decode(encoding))
+                        break
+                    except UnicodeDecodeError:
+                        continue
+
+        # 후속 파서가 표의 같은 행인지 판단할 수 있도록 HTML/XML 경계는
+        # 보존한다. 텍스트가 필요한 파서는 각자 _normalize_text를 호출한다.
+        document = " ".join(fragments)
+        if not document.strip():
+            raise RuntimeError(f"DART 원문 텍스트가 비어 있습니다 ({rcept_no})")
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            record = {"schema_version": 1, "rcept_no": rcept_no,
+                      "source_url": f"{DART_BASE_URL}/document.xml",
+                      "collected_at": datetime.now(timezone.utc).isoformat(),
+                      "sha256": hashlib.sha256(document.encode("utf-8")).hexdigest(),
+                      "decoded_document": document}
+            temporary = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=cache_path.parent,
+                                                 delete=False) as handle:
+                    temporary = Path(handle.name)
+                    json.dump(record, handle, ensure_ascii=False)
+                os.replace(temporary, cache_path)
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+        return document
 
     # ── 공시 목록 수집 ─────────────────────────────────────────
 
@@ -74,43 +280,150 @@ class DARTCollector:
         self,
         start_date: str,   # "20150101"
         end_date:   str,   # "20241231"
-        pblntf_ty:  str = "I",   # I = 증권신고서
+        pblntf_ty: str = "C",  # C = 발행공시
+        pblntf_detail_ty: str = "C001",  # 증권신고서(지분증권)
     ) -> pd.DataFrame:
-        """
-        증권신고서 목록을 날짜 범위로 수집.
-        반환: corp_code, corp_name, rcept_no, rcept_dt
+        """증권신고서(지분증권) 목록을 날짜 범위로 수집한다.
+
+        법인 고유번호 없이 OpenDART 목록 API를 호출할 때는 조회 기간이
+        3개월로 제한되므로 긴 기간을 90일 단위로 나눈다.
         """
         all_records = []
-        page = 1
+        cursor = pd.Timestamp(start_date)
+        final_date = pd.Timestamp(end_date)
 
-        while True:
-            data = self._get("list", {
-                "bgn_de":   start_date,
-                "end_de":   end_date,
-                "pblntf_ty": pblntf_ty,
-                "page_no":  page,
-                "page_count": 100,
-            })
-            items = data.get("list", [])
-            if not items:
-                break
-            all_records.extend(items)
-            total_page = int(data.get("total_page", 1))
-            if page >= total_page:
-                break
-            page += 1
-            time.sleep(REQUEST_DELAY)
+        while cursor <= final_date:
+            chunk_end = min(cursor + pd.Timedelta(days=89), final_date)
+            page = 1
+            while True:
+                data = self._get("list", {
+                    "bgn_de": cursor.strftime("%Y%m%d"),
+                    "end_de": chunk_end.strftime("%Y%m%d"),
+                    "pblntf_ty": pblntf_ty,
+                    "pblntf_detail_ty": pblntf_detail_ty,
+                    "page_no": page,
+                    "page_count": 100,
+                })
+                items = data.get("list", [])
+                if not items:
+                    break
+                all_records.extend(items)
+                total_page = int(data.get("total_page", 1))
+                if page >= total_page:
+                    break
+                page += 1
+                time.sleep(REQUEST_DELAY)
+            cursor = chunk_end + pd.Timedelta(days=1)
 
         if not all_records:
             return pd.DataFrame()
 
-        df = pd.DataFrame(all_records)
+        df = pd.DataFrame(all_records).drop_duplicates("rcept_no", keep="last")
         # 공모 관련 공시만 필터 (제목에 '증권신고서(지분증권)' 포함)
         mask = df["report_nm"].str.contains("증권신고서.*지분증권|지분증권.*증권신고서", na=False)
         df = df[mask].copy()
         df["rcept_dt"] = pd.to_datetime(df["rcept_dt"], format="%Y%m%d")
         logger.info("IPO 공시 수집 완료: %d건 (%s ~ %s)", len(df), start_date, end_date)
         return df.reset_index(drop=True)
+
+    def get_company_disclosure_list(
+        self,
+        corp_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> pd.DataFrame:
+        """기업별 공시 목록을 반환한다.
+
+        수요예측 결과는 신고서 정정본 또는 별도 공시 안에 들어갈 수 있어,
+        공시 제목만으로 단정하지 않고 이 목록을 후보 탐색에 사용한다.
+        """
+        records = []
+        page = 1
+        while True:
+            data = self._get("list", {
+                "corp_code": corp_code,
+                "bgn_de": start_date,
+                "end_de": end_date,
+                "page_no": page,
+                "page_count": 100,
+            })
+            items = data.get("list", [])
+            if not items:
+                break
+            records.extend(items)
+            if page >= int(data.get("total_page", 1)):
+                break
+            page += 1
+            time.sleep(REQUEST_DELAY)
+
+        if not records:
+            return pd.DataFrame()
+        result = pd.DataFrame(records)
+        result["rcept_dt"] = pd.to_datetime(result["rcept_dt"], format="%Y%m%d", errors="coerce")
+        return result.sort_values("rcept_dt").reset_index(drop=True)
+
+    def find_demand_forecast_disclosure(
+        self,
+        corp_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> Optional[str]:
+        """수요예측 숫자를 포함할 가능성이 가장 큰 공시 접수번호를 찾는다."""
+        record = self.find_demand_forecast_disclosure_record(corp_code, start_date, end_date)
+        return None if record is None else str(record["rcept_no"])
+
+    def find_demand_forecast_disclosure_record(
+        self,
+        corp_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> Optional[dict]:
+        """수요예측 후보의 접수번호와 공개 시각을 함께 반환한다."""
+        records = self.find_demand_forecast_disclosure_records(corp_code, start_date, end_date)
+        return records[0] if records else None
+
+    def find_demand_forecast_disclosure_records(
+        self,
+        corp_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[dict]:
+        """수요예측·확약 값이 있을 수 있는 공시 계보 후보를 순서대로 반환한다.
+
+        기관 수요예측 결과는 독립 제목 공시, 발행조건확정 신고서, 투자설명서
+        중 어느 곳에나 들어갈 수 있다. 단일 제목을 "정답"으로 고르면 한 ZIP
+        실패나 문서 형식 차이로 회사 전체의 값을 잃으므로, 제목 근거와 접수일을
+        보존한 후보 목록을 반환한다.
+        """
+        disclosures = self.get_company_disclosure_list(corp_code, start_date, end_date)
+        if disclosures.empty:
+            return []
+
+        title = disclosures["report_nm"].fillna("").astype(str)
+        eligible = (
+            title.str.contains("수요예측|발행조건확정|투자설명서|증권신고서", regex=True)
+        )
+        candidates = disclosures.loc[eligible].copy()
+        if candidates.empty:
+            return []
+        candidate_title = candidates["report_nm"].fillna("").astype(str)
+        candidates["candidate_score"] = (
+            candidate_title.str.contains("수요예측", regex=False).astype(int) * 100
+            + candidate_title.str.contains("발행조건확정", regex=False).astype(int) * 80
+            + candidate_title.str.contains("기관투자자", regex=False).astype(int) * 40
+            + candidate_title.str.contains("투자설명서", regex=False).astype(int) * 30
+            + candidate_title.str.contains("정정", regex=False).astype(int) * 10
+            + candidate_title.str.contains("증권신고서", regex=False).astype(int) * 5
+        )
+        candidates = candidates.sort_values(
+            ["candidate_score", "rcept_dt", "rcept_no"], ascending=[False, False, False]
+        ).drop_duplicates("rcept_no", keep="first")
+        return [{
+            "rcept_no": str(row.rcept_no),
+            "rcept_dt": row.rcept_dt,
+            "report_nm": row.report_nm,
+            "candidate_score": int(row.candidate_score),
+        } for row in candidates.itertuples(index=False)]
 
     # ── 수요예측 결과 파싱 ─────────────────────────────────────
 
@@ -125,14 +438,14 @@ class DARTCollector:
         실제 구현 시: DART XML API를 통해 공시 원문을 가져온 후
         특정 테이블 패턴을 정규식으로 파싱한다.
         """
-        data = self._get("fnlttXbrl", {
-            "rcept_no": rcept_no,
-            "reprt_code": "F001",
-        })
-        # NOTE: 실제 파싱 로직은 DART 공시 HTML 구조에 의존하므로
-        # 여기서는 인터페이스만 정의하고 파서를 별도 모듈로 분리한다.
-        raw_html = data.get("document", "")
-        return self._parse_demand_forecast_html(raw_html, corp_code)
+        document = self.get_document_text(rcept_no)
+        result = self._parse_demand_forecast_html(document, corp_code)
+        # Prospectuses contain offering structure too; do not discard it by search purpose.
+        offering = self._parse_offering_html(document, rcept_no)
+        result.update({f"float_document_{field}": value for field, value in offering.items()
+                       if field.startswith(("public_float_", "total_post_listing_shares"))
+                       or field == "offering_price"})
+        return result
 
     def _parse_demand_forecast_html(self, html: str, corp_code: str) -> dict:
         """
@@ -152,12 +465,28 @@ class DARTCollector:
         """
         result = {
             "corp_code":              corp_code,
+            "dart_final_terms_demand_parser_version": DEMAND_PARSER_VERSION,
             "institutional_demand_ratio": None,
+            "demand_offering_price":  None,
+            "demand_offering_price_context": None,
+            "lockup_commitment_ratio": None,
             "lockup_6m_ratio":        None,
             "lockup_3m_ratio":        None,
             "lockup_1m_ratio":        None,
             "lockup_15d_ratio":       None,
             "lockup_none_ratio":      None,
+            "institutional_demand_parse_method": None,
+            "institutional_demand_evidence": None,
+            "institutional_demand_rule_id": None,
+            "institutional_demand_parser_validation_status": "value_not_found",
+            "institutional_demand_structured_evidence": None,
+            "institutional_demand_rejection_reason": None,
+            "lockup_parse_method": None,
+            "lockup_parse_evidence": None,
+            "lockup_rule_id": None,
+            "lockup_parser_validation_status": "value_not_found",
+            "lockup_structured_evidence": None,
+            "lockup_rejection_reason": None,
             "parse_success":          False,
         }
 
@@ -165,28 +494,80 @@ class DARTCollector:
             return result
         text = self._normalize_text(html)
 
-        # 경쟁률 패턴: "XXX : 1" 또는 "XXX대 1"
-        ratio_pattern = r"경쟁률[^0-9]*([0-9,]+(?:\.[0-9]+)?)\s*(?::|대)\s*1"
-        m = re.search(ratio_pattern, text)
-        if m:
-            result["institutional_demand_ratio"] = float(m.group(1).replace(",", ""))
+        demand_price = self._extract_offering_price_details(text, self._extract_table_rows(html))
+        result["demand_offering_price"] = demand_price["offering_price"]
+        result["demand_offering_price_context"] = demand_price["offering_price_audit_context"]
 
-        # 확약 비율 파싱 — 각 행의 신청주식수를 추출해 합계 대비 비율 계산
-        total_shares = self._extract_share_after(text, "합계")
-        lockup_shares = {
-            "lockup_6m_ratio":   self._extract_share_after(text, "6개월"),
-            "lockup_3m_ratio":   self._extract_share_after(text, "3개월"),
-            "lockup_1m_ratio":   self._extract_share_after(text, "1개월"),
-            "lockup_15d_ratio":  self._extract_share_after(text, "15일"),
-            "lockup_none_ratio": self._extract_share_after(text, "확약없음|미확약"),
-        }
-        if total_shares and total_shares > 0:
-            for key, shares in lockup_shares.items():
-                if shares is not None:
-                    result[key] = round(min(max(shares / total_shares, 0), 1), 6)
+        # 기관별 열과 합계 열이 함께 있는 표에서는 헤더가 가리키는 합계 셀만
+        # 사용한다. 마지막 숫자라는 위치 추정은 주석·재심의 기준을 오인할 수 있다.
+        table_parser = _TableRowParser()
+        table_parser.feed(html)
+        table_parser.close()
+        for table, heading in zip(table_parser.tables, table_parser.table_contexts):
+            parsed_table = self._extract_aggregate_demand_ratio(table, heading)
+            if parsed_table is not None:
+                result.update(parsed_table)
+                break
+
+        if (result["institutional_demand_ratio"] is None
+                and result['institutional_demand_rejection_reason']!='institutional_aggregate_numeric_grouping_invalid'
+                and re.search(
+            r"(?:기관\s*(?:투자자)?|수요\s*예측).*?[0-9][0-9,]*(?:\.[0-9]+)?\s*(?::|：|대)\s*1\b",
+            text,
+        )):
+            result["institutional_demand_parser_validation_status"] = "candidate_rejected"
+            result["institutional_demand_rejection_reason"] = (
+                "risk_or_planned_threshold_context"
+                if re.search(r"재심의|예정|이하|리스크|기준", text)
+                else "aggregate_scope_or_table_alignment_not_verified"
+            )
+
+        # 표가 아닌 문장에서는 기관 수요예측 라벨과 비율이 직접 연결된 경우만 허용한다.
+        demand_blocks = self._extract_table_rows(html) + self._split_sentences(text)
+        for block in demand_blocks if (result["institutional_demand_ratio"] is None
+                and result['institutional_demand_rejection_reason']!='institutional_aggregate_numeric_grouping_invalid') else []:
+            normalized = re.sub(r"\s+", " ", block).strip()
+            if re.search(r"비례\s*배정|일반\s*청약|개인\s*청약|재심의|예정|이하|리스크", normalized):
+                continue
+            if re.search(r"신규\s*상장\s*기업|기업\s*수|평균\s*공모|공모\s*규모", normalized):
+                continue
+            if len(re.findall(r"[0-9][0-9,]*(?:\.[0-9]+)?\s*(?::|：|대)\s*1\b", normalized)) != 1:
+                continue
+            match = re.search(
+                r"기관\s*(?:투자자)?\s*(?:수요\s*예측\s*)?(?:유효\s*)?경쟁률"
+                r"\s*(?:은|는|:|：)?\s*((?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)(?:\.[0-9]+)?)\s*(?::|：|대)\s*1\b",
+                normalized,
+            )
+            if match:
+                result["institutional_demand_ratio"] = float(match.group(1).replace(",", ""))
+                result["institutional_demand_parse_method"] = "demand_ratio_same_table_row_or_sentence"
+                result["institutional_demand_evidence"] = normalized[:300]
+                result["institutional_demand_rule_id"] = "DART_DEMAND_DIRECT_LABEL_V1"
+                result["institutional_demand_parser_validation_status"] = "structurally_verified"
+                result["institutional_demand_structured_evidence"] = json.dumps({
+                    "kind": "direct_label", "text": normalized[:1000],
+                }, ensure_ascii=False)
+                break
+
+        lockup = self._extract_lockup_ratios_from_tables(html)
+        for key in (
+            "lockup_commitment_ratio", "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio",
+            "lockup_15d_ratio", "lockup_none_ratio",
+        ):
+            result[key] = lockup.get(key)
+        result["lockup_parse_method"] = lockup.get("parse_method")
+        result["lockup_parse_evidence"] = lockup.get("evidence")
+        result["lockup_rule_id"] = lockup.get("rule_id")
+        result["lockup_parser_validation_status"] = lockup.get("parser_validation_status", "value_not_found")
+        result["lockup_structured_evidence"] = lockup.get("structured_evidence")
+        result["lockup_rejection_reason"] = lockup.get("rejection_reason")
 
         # 파싱 성공 여부만 플래그 설정 (실제 비율 계산은 수집된 데이터로)
-        if result["institutional_demand_ratio"] is not None or total_shares:
+        if result["institutional_demand_ratio"] is not None or any(
+            result[field] is not None for field in (
+                "lockup_commitment_ratio",
+            )
+        ):
             result["parse_success"] = True
 
         return result
@@ -208,6 +589,17 @@ class DARTCollector:
           11013 = 1분기보고서
           11014 = 3분기보고서
         """
+        corp_code = str(corp_code).strip()
+        report_code = str(report_code).strip()
+        year_text = str(year).strip()
+        if not re.fullmatch(r"\d{8}", corp_code):
+            raise ValueError("financial corp_code must contain 8 digits")
+        if not re.fullmatch(r"\d{4}", year_text) or int(year_text) < 2015:
+            raise ValueError("financial business year must be 2015 or later (4 digits)")
+        if report_code not in {"11011", "11012", "11013", "11014"}:
+            raise ValueError("invalid financial report code")
+        year = int(year_text)
+        fs_div = "CFS"
         data = self._get("fnlttSinglAcntAll", {
             "corp_code":   corp_code,
             "bsns_year":   str(year),
@@ -218,6 +610,7 @@ class DARTCollector:
         items = data.get("list", [])
         if not items:
             # 연결 없으면 별도 재무제표 시도
+            fs_div = "OFS"
             data = self._get("fnlttSinglAcntAll", {
                 "corp_code":  corp_code,
                 "bsns_year":  str(year),
@@ -229,10 +622,11 @@ class DARTCollector:
         if not items:
             return pd.DataFrame()
 
-        df = pd.DataFrame(items)
-        df["year"] = year
+        return self.normalize_financial_statements(items, corp_code, year, report_code, fs_div)
 
-        # 필요한 계정과목만 추출
+    @staticmethod
+    def normalize_financial_statements(items, corp_code, year, report_code, fs_div):
+        """Retain filing identity, statement basis, currency and amount evidence."""
         target_accounts = {
             "ifrs-full_Revenue":                    "revenue",
             "ifrs-full_OperatingIncomeLoss":        "operating_income",
@@ -241,14 +635,62 @@ class DARTCollector:
             "ifrs-full_Liabilities":                "total_liabilities",
             "ifrs-full_Equity":                     "equity",
             "ifrs-full_BasicEarningsLossPerShare":  "eps",
+            "dart_OperatingIncomeLoss":            "operating_income",
         }
+        records = []
+        for item in items:
+            account = target_accounts.get(item.get("account_id"))
+            section = item.get("sj_div")
+            if account is None or section not in ({"BS"} if account in {
+                "total_assets", "total_liabilities", "equity"} else {"IS", "CIS"}):
+                continue
+            raw = str(item.get("thstrm_amount", "")).strip()
+            amount = pd.to_numeric(raw.replace(",", ""), errors="coerce")
+            records.append({
+                "year": year, "account_name_en": account, "amount": amount,
+                "corp_code": str(item.get("corp_code", "")),
+                "rcept_no": str(item.get("rcept_no", "")),
+                "report_code": str(item.get("reprt_code", "")),
+                "response_year": str(item.get("bsns_year", "")),
+                "requested_corp_code": str(corp_code), "requested_report_code": report_code,
+                "fs_div": fs_div, "sj_div": section, "account_id": item.get("account_id"),
+                "currency": str(item.get("currency", "")).strip().upper(),
+                "raw_amount": raw, "period_name": item.get("thstrm_nm"),
+                "collected_at": datetime.now(timezone.utc).isoformat(),
+                "source_url": "https://opendart.fss.or.kr/api/fnlttSinglAcntAll.json",
+            })
+        return pd.DataFrame(records)
 
-        filtered = df[df["account_id"].isin(target_accounts.keys())].copy()
-        filtered["account_name_en"] = filtered["account_id"].map(target_accounts)
-        filtered["amount"] = pd.to_numeric(
-            filtered["thstrm_amount"].str.replace(",", ""), errors="coerce"
-        )
-        return filtered[["year", "account_name_en", "amount"]].dropna()
+    def get_equity_offering_prices(
+        self,
+        corp_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> list[dict]:
+        """지분증권 구조화 API의 모집(매출)가액을 접수번호별로 반환한다.
+
+        ``estkRs``의 ``slprc``는 원문 표를 정규식으로 읽는 값이 아니라
+        OpenDART가 구조화해 제공하는 모집(매출)가액이다. 원문 추출값과
+        접수번호가 같은 경우에만 서로 대조한다.
+        """
+        data = self._get("estkRs", {
+            "corp_code": corp_code,
+            "bgn_de": start_date,
+            "end_de": end_date,
+        })
+        records: list[dict] = []
+        for item in self._walk_dicts(data):
+            if "slprc" not in item:
+                continue
+            price = self._parse_money_value(item.get("slprc"))
+            if price is None:
+                continue
+            records.append({
+                "rcept_no": str(item.get("rcept_no", "")),
+                "offering_price": price,
+                "security_type": item.get("stksen"),
+            })
+        return records
 
     # ── 공모가 밴드 수집 ───────────────────────────────────────
 
@@ -264,9 +706,22 @@ class DARTCollector:
           - 주관사명
           - 최대주주 보호예수 기간
         """
-        data = self._get("fnlttXbrl", {"rcept_no": rcept_no, "reprt_code": "F001"})
-        html = data.get("document", "")
-        return self._parse_offering_html(html, rcept_no)
+        # 최종 발행조건 신고서에는 공모 구조뿐 아니라 대표주관사가 취합한
+        # 기관 수요예측·의무보유확약 표가 함께 실릴 수 있다. 원문을 한 번만
+        # 내려받아 두 파서를 적용해, 같은 접수번호의 통합 결과인지 검증한다.
+        document_text = self.get_document_text(rcept_no)
+        result = self._parse_offering_html(document_text, rcept_no)
+        demand = self._parse_demand_forecast_html(document_text, "")
+        result.update({
+            key: value
+            for key, value in demand.items()
+            if key not in {"corp_code", "parse_success"}
+        })
+        # 공모 구조와 수요예측은 같은 원문을 읽지만, 어느 한쪽이 없다고 다른
+        # 쪽의 파싱 성공 상태를 덮어쓰면 안 된다.
+        result["dart_final_terms_demand_parse_success"] = demand["parse_success"]
+        result["dart_final_terms_demand_parser_version"] = DEMAND_PARSER_VERSION
+        return result
 
     def _parse_offering_html(self, html: str, rcept_no: str) -> dict:
         """공모 정보 HTML 파싱"""
@@ -275,9 +730,28 @@ class DARTCollector:
             "price_band_low":     None,
             "price_band_high":    None,
             "offering_price":     None,
+            "offering_price_extracted_amount": None,
+            "offering_price_review_status": "missing",
+            "offering_price_finality": "unknown",
+            "offering_price_parse_method": None,
+            "offering_price_audit_context": None,
+            "offering_price_range_warning": False,
             "new_shares":         None,
+            "new_shares_parse_method": None,
+            "new_shares_parse_evidence": None,
+            "new_shares_parser_validation_status": "value_not_found",
             "secondary_shares":   None,
+            "secondary_shares_parse_method": None,
+            "secondary_shares_parse_evidence": None,
+            "secondary_shares_parser_validation_status": "value_not_found",
             "total_post_listing_shares": None,
+            "total_post_listing_shares_parse_method": None,
+            "total_post_listing_shares_parse_evidence": None,
+            "total_post_listing_shares_parser_validation_status": "value_not_found",
+            "public_float_shares": None,
+            "public_float_ratio_disclosed": None,
+            "public_float_parse_method": None,
+            "public_float_parse_evidence": None,
             "lead_underwriter":   None,
             "listing_date":       None,
             "major_shareholder_lockup_months": None,
@@ -290,25 +764,111 @@ class DARTCollector:
         text = self._normalize_text(html)
 
         # 희망공모가 밴드 패턴
-        band_pattern = r"희망\s*공모가[^0-9]*([0-9,]+)\s*[~～]\s*([0-9,]+)"
-        m = re.search(band_pattern, text)
-        if m:
-            result["price_band_low"]  = int(m.group(1).replace(",", ""))
-            result["price_band_high"] = int(m.group(2).replace(",", ""))
-
-        # 확정 공모가
-        final_pattern = r"확정\s*공모가[^0-9]*([0-9,]+)"
-        m = re.search(final_pattern, text)
-        if m:
-            result["offering_price"] = int(m.group(1).replace(",", ""))
-
-        # 공모 구조
-        result["new_shares"] = self._extract_share_after(text, "신주모집|신주발행|모집주식수")
-        result["secondary_shares"] = self._extract_share_after(text, "구주매출|매출주식수")
-        result["total_post_listing_shares"] = self._extract_share_after(
-            text,
-            "상장예정주식수|상장\\s*예정\\s*주식수|상장\\s*후\\s*총\\s*발행주식수|발행주식총수",
+        band_pattern = (
+            r"(?:희망\s*공모가(?:액)?|공모\s*희망가(?:액)?)\s*(?:밴드)?"
+            r"\s*[:：(]?\s*([0-9][0-9,]*)\s*(?:원|KRW)?\s*[~～]"
+            r"\s*([0-9][0-9,]*)\s*(?:원|KRW)"
         )
+        band_matches = list(re.finditer(band_pattern,text))
+        bands = {(int(m[1].replace(",", "")), int(m[2].replace(",", ""))) for m in band_matches}
+        if len(bands) == 1:
+            low, high = next(iter(bands))
+            if 0 < low < high:
+                result.update(price_band_low=low, price_band_high=high,
+                              price_band_validation_status="direct_currency_band",
+                              price_band_parse_method="direct_currency_range_v1",
+                              price_band_parse_evidence=json.dumps([m.group(0) for m in band_matches],ensure_ascii=False))
+        elif len(bands) > 1:
+            result["price_band_validation_status"] = "conflicting_bands_review_required"
+
+        price_details = self._extract_offering_price_details(
+            text,
+            table_rows=self._extract_table_rows(html),
+        )
+        result.update(price_details)
+
+        # 공모 구조는 표 행 또는 라벨과 수량이 직접 연결된 문구만 승인한다.
+        # 라벨 뒤 120자를 탐색하던 기존 규칙은 다른 표의 숫자를
+        # 신주·구주 수량으로 오인할 수 있어 학습 승인에 사용하지 않는다.
+        tables = self._extract_table_cells(html)
+        result.update(self._extract_share_details(
+            tables, text, "new_shares", r"신주\s*(?:모집|발행)(?:\s*주식수|\s*수량)?"
+        ))
+        result.update(self._extract_share_details(
+            tables, text, "secondary_shares", r"(?:구주\s*매출|매출\s*주식수)(?:\s*주식수|\s*수량)?"
+        ))
+        for label, present, absent in (
+            ("신주모집", "new_shares", "secondary_shares"),
+            ("구주매출", "secondary_shares", "new_shares"),
+        ):
+            match = re.search(
+                rf"{label}\s*([0-9][0-9,]*)\s*주\s*\(\s*공모주식(?:수)?의\s*100(?:\.0+)?\s*%\s*\)",
+                text,
+            )
+            if match and result[present] == int(match[1].replace(",", "")) and result[absent] is None:
+                result[absent] = 0
+                result[f"{absent}_parser_validation_status"] = "structurally_verified"
+                result[f"{absent}_parse_method"] = "explicit_all_offered_shares_v1"
+                result[f"{absent}_parse_evidence"] = match[0]
+            exclusive = re.search(rf"공모는\s*100\s*%\s*{label}(?:으)?로\s*진행", text)
+            if exclusive and result[present] is not None and result[absent] is None:
+                result[absent] = 0
+                result[f"{absent}_parser_validation_status"] = "structurally_verified"
+                result[f"{absent}_parse_method"] = "explicit_exclusive_offering_v1"
+                result[f"{absent}_parse_evidence"] = exclusive[0]
+        result.update(self._extract_share_details(
+            tables,
+            text,
+            "total_post_listing_shares",
+            r"(?:상장\s*예정\s*주식수|상장\s*후\s*총\s*발행주식수|발행\s*주식\s*총수)",
+        ))
+        public_float = self._extract_public_float_details(text)
+        result.update(public_float)
+        float_candidates = []
+        for table in tables:
+            if not table or not any("유통가능" in re.sub(r"\s+", "", " ".join(row)) for row in table):
+                continue
+            for row_index, row in enumerate(table):
+                if row and re.fullmatch(r"합계|총계", re.sub(r"\s+", "", row[0])):
+                    headers = table[:row_index]
+                    columns = [c for c in range(len(row))
+                               if any(c < len(h) and re.fullmatch(r"유통가능(?:물량|주식수)?", re.sub(r"\s+", "", h[c])) for h in headers)
+                               and any(c < len(h) and re.fullmatch(r"(?:지분율|비율)(?:\(%\))?", re.sub(r"\s+", "", h[c])) for h in headers)]
+                    if len(columns) == 1:
+                        match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*", row[columns[0]])
+                        if match and 0 <= float(match[1]) <= 100:
+                            float_candidates.append((float(match[1]) / 100, table))
+                if not any(re.fullmatch(r"유통가능물량소계", re.sub(r"\s+", "", cell)) for cell in row):
+                    continue
+                headers = table[:row_index]
+                columns = [c for c in range(len(row))
+                           if any(c < len(h) and re.fullmatch(r"공모후(?:기준)?", re.sub(r"\s+", "", h[c])) for h in headers)
+                           and any(c < len(h) and re.fullmatch(r"(?:지분율|비율)\(%\)", re.sub(r"\s+", "", h[c])) for h in headers)]
+                if len(columns) == 1:
+                    match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*", row[columns[0]])
+                    if match and 0 <= float(match[1]) <= 100:
+                        float_candidates.append((float(match[1]) / 100, table))
+            for row in table:
+                if not row or not re.fullmatch(r"상장(?:일|직후)유통가능", re.sub(r"\s+", "", row[0])):
+                    continue
+                ratios = [float(m[1]) / 100 for cell in row[1:]
+                          if (m := re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*", cell))]
+                if len(ratios) == 1 and 0 <= ratios[0] <= 1:
+                    float_candidates.append((ratios[0], table))
+        unique_ratios = {value for value, _ in float_candidates}
+        if len(unique_ratios) == 1:
+            result.update(public_float_ratio_disclosed=float_candidates[0][0],
+                          public_float_parse_method="disclosed_public_float_ratio_direct_context",
+                          public_float_parse_evidence=self._table_evidence(float_candidates[0][1]))
+        elif len(unique_ratios) > 1:
+            result.update(public_float_shares=None, public_float_ratio_disclosed=None,
+                          public_float_parse_method="conflicting_float_ratios_review_required",
+                          public_float_parse_evidence=json.dumps(sorted(unique_ratios)))
+
+        # A same-table post-offering subtotal is stronger than a historical
+        # issued-share label or an unrevised narrative elsewhere in the filing.
+        from data.collectors.float_tables import ownership_float
+        result.update(ownership_float(tables))
 
         # 대표 주관사
         underwriter_pattern = (
@@ -353,6 +913,8 @@ class DARTCollector:
                 "new_shares",
                 "secondary_shares",
                 "total_post_listing_shares",
+                "public_float_shares",
+                "public_float_ratio_disclosed",
                 "lead_underwriter",
                 "listing_date",
                 "major_shareholder_lockup_months",
@@ -366,7 +928,57 @@ class DARTCollector:
     def _normalize_text(raw_html: str) -> str:
         text = re.sub(r"<[^>]+>", " ", raw_html)
         text = html_unescape(text)
+        text = text.replace("&cr;", "\n")
         return re.sub(r"\s+", " ", text).strip()
+
+    @classmethod
+    def _extract_public_float_details(cls, text: str) -> dict:
+        """상장 직후 실제 유통가능 물량을 공시 문맥에서만 읽는다.
+
+        신주와 구주매출은 공모 물량일 뿐 기존주주의 즉시 유통 물량을 포함하지
+        않는다. 따라서 두 값을 더해 유통가능 비율로 추정하지 않고, 신고서가
+        직접 밝힌 주식 수 또는 전체 주식 대비 비율만 사용한다.
+        """
+        result = {
+            "public_float_shares": None,
+            "public_float_ratio_disclosed": None,
+            "public_float_parse_method": None,
+            "public_float_parse_evidence": None,
+        }
+        label = r"상장\s*(?:직후\s*)?유통\s*가능\s*(?:주식\s*)?(?:수|물량)|유통\s*가능\s*(?:주식\s*)?(?:수|물량)"
+        # 문서에 유통가능물량을 설명한 뒤 다른 문단의 자기주식·일반투자자
+        # 수량이 나오는 사례가 있다. 따라서 라벨 뒤 임의의 120자를 탐색하지
+        # 않고, 라벨과 수량이 바로 이어지거나 "보호예수 제외"라는 계산식이
+        # 같은 문맥에 직접 있는 경우만 승인한다.
+        share_patterns = (
+            rf"(?:{label})\s*(?:은|는|:|=)?\s*(?:공모\s*후\s*주식수\s*기준)?\s*([0-9][0-9,]*)\s*주",
+            rf"(?:{label})[^.&]{{0,80}}보호예수\s*및\s*매도금지물량\s*을?\s*제외한\s*([0-9][0-9,]*)\s*주",
+        )
+        for pattern in share_patterns:
+            share_match = re.search(pattern, text)
+            if not share_match:
+                continue
+            shares = cls._parse_int(share_match.group(1))
+            if shares is not None and shares > 0:
+                result.update({
+                    "public_float_shares": shares,
+                    "public_float_parse_method": "disclosed_public_float_shares_direct_context",
+                    "public_float_parse_evidence": share_match.group(0)[:300],
+                })
+                return result
+
+        ratio_match = re.search(
+            rf"(?:{label})\s*(?:은|는|:|=)?\s*(?:전체\s*(?:상장\s*)?주식\s*대비)?\s*([0-9][0-9,]*(?:\.[0-9]+)?)\s*%", text
+        )
+        if ratio_match:
+            ratio = float(ratio_match.group(1).replace(",", "")) / 100
+            if 0 <= ratio <= 1:
+                result.update({
+                    "public_float_ratio_disclosed": round(ratio, 6),
+                    "public_float_parse_method": "disclosed_public_float_ratio_direct_context",
+                    "public_float_parse_evidence": ratio_match.group(0)[:300],
+                })
+        return result
 
     @staticmethod
     def _extract_share_after(text: str, label_pattern: str) -> Optional[int]:
@@ -376,12 +988,1230 @@ class DARTCollector:
             return None
         return DARTCollector._parse_int(m.group(1))
 
+    @classmethod
+    def _extract_share_details(
+        cls,
+        tables: list[list[list[str]]],
+        text: str,
+        field: str,
+        label_pattern: str,
+    ) -> dict:
+        """공모 주식 수량을 명시적인 표 행/문구에서만 추출한다."""
+        result = {
+            field: None,
+            f"{field}_parse_method": None,
+            f"{field}_parse_evidence": None,
+            f"{field}_parser_validation_status": "value_not_found",
+        }
+        value_pattern = re.compile(r"\s*([0-9][0-9,]*)\s*주\s*")
+        label = re.compile(label_pattern)
+
+        for table_index, table in enumerate(tables):
+            for row_index, row in enumerate(table):
+                for column_index, cell in enumerate(row):
+                    if not label.fullmatch(cell.strip()):
+                        continue
+                    candidates: list[tuple[int, int]] = []
+                    for value_column, candidate in enumerate(row[column_index + 1:], column_index + 1):
+                        match = value_pattern.fullmatch(candidate)
+                        if match:
+                            candidates.append((value_column, int(match.group(1).replace(",", ""))))
+                    if len(candidates) == 1:
+                        value_column, value = candidates[0]
+                        result.update({
+                            field: value,
+                            f"{field}_parse_method": "direct_table_row_v1",
+                            f"{field}_parse_evidence": cls._table_evidence(
+                                table, selected_row=row_index, label_column=column_index,
+                                value_column=value_column, table_index=table_index,
+                            ),
+                            f"{field}_parser_validation_status": "structurally_verified",
+                        })
+                        return result
+
+        direct = re.search(
+            rf"(?:{label_pattern})\s*(?:은|는|:|=)?\s*([0-9][0-9,]*)\s*주",
+            text,
+        )
+        if direct:
+            result.update({
+                field: int(direct.group(1).replace(",", "")),
+                f"{field}_parse_method": "direct_label_text_v1",
+                f"{field}_parse_evidence": direct.group(0),
+                f"{field}_parser_validation_status": "structurally_verified",
+            })
+        return result
+
+    @staticmethod
+    def _extract_table_rows(raw_html: str) -> list[str]:
+        parser = _TableRowParser()
+        try:
+            parser.feed(raw_html)
+            parser.close()
+        except Exception as exc:
+            logger.debug("DART 표 행 파싱을 건너뜁니다: %s", exc)
+            return []
+        return parser.rows
+
+    @staticmethod
+    def _extract_table_cells(raw_html: str) -> list[list[list[str]]]:
+        parser = _TableRowParser()
+        try:
+            parser.feed(raw_html)
+            parser.close()
+        except Exception as exc:
+            logger.debug("DART 표 셀 파싱을 건너뜁니다: %s", exc)
+            return []
+        return parser.tables
+
+    @staticmethod
+    def _table_evidence(table: list[list[str]], **metadata) -> str:
+        """재감사가 가능하도록 선택 셀과 주변 표 구조를 함께 직렬화한다."""
+        # 중간에서 자른 JSON은 감사 시 다시 읽을 수 없다. Parquet 원장에는
+        # 선택 좌표와 표 격자를 완전한 JSON으로 보존한다.
+        return json.dumps({"table": table, **metadata}, ensure_ascii=False)
+
+    @classmethod
+    def _extract_aggregate_demand_ratio(cls, table: list[list[str]], heading: str = "") -> Optional[dict]:
+        """기관 수요예측 표에서 명시적인 전체/합계 셀의 경쟁률만 승인한다."""
+        if not table:
+            return None
+        integer = r"(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)"
+        number = integer + r"(?:\.[0-9]+)?"
+        def rejected_number(row, column):
+            return {'institutional_demand_ratio':None,
+                'institutional_demand_parser_validation_status':'candidate_rejected',
+                'institutional_demand_rejection_reason':'institutional_aggregate_numeric_grouping_invalid',
+                'institutional_demand_structured_evidence':cls._table_evidence(
+                    table,heading=heading,selected_row=row,selected_column=column,
+                    scope='aggregate_cell_numeric_format_requires_review')}
+        table_text = " ".join(" ".join(row) for row in table)
+        # Only the immediate result heading establishes scope. Earlier bidding
+        # instructions may mention retail subscriptions and are not this table.
+        heading_text = re.sub(r"\s+", "", heading)
+        numbering = r"(?:[①-⑳]|\d+[.)]|\([가-하]\))*"
+        result_heading = re.search(
+            r"(?:수요예측결과(?:및배정결과)?(?:통보)?" + numbering
+            + r"(?:기관투자자)?수요예측(?:참여|참가)(?:내역|결과)"
+            r"|기관투자자수요예측(?:참여|참가)(?:내역|결과))$",
+            heading_text,
+        )
+        if result_heading and re.search(r"(?:국내|해외|일부|당사)$", heading_text[:result_heading.start()]):
+            result_heading = None
+        # A two-row summary can carry its institutional scope in the immediate heading.
+        if len(table) == 2 and result_heading:
+            headers = [re.sub(r"\s+", "", c) for c in table[0]]
+            row = table[1]
+            if headers[:1] == ['구분'] and len(row)==4 and re.sub(r'\s+','',row[0]) in {
+                    '국내외기관투자자','국내및해외기관투자자','전체기관투자자','합계','전체'}:
+                headers,row=headers[1:],row[1:]
+            if (len(headers) == 3 and len(row) == 3
+                    and re.fullmatch(r"(?:참여|참가)건수(?:\(건\))?", headers[0])
+                    and re.fullmatch(r"(?:신청수량|참여수량|참가수량|참여주식수)(?:\(주\))?", headers[1])
+                    and re.fullmatch(r"단순경쟁[률율](?:\([:：]1\))?", headers[2])):
+                counts = [re.fullmatch('('+integer+r")\s*"+unit+'?'+suffix, c.strip())
+                          for c,unit,suffix in zip(row[:2],['건','주'],
+                              [r'(?:\s*\(\s*주\s*[1-9][0-9]*\s*\))?', ''])]
+                rate = re.fullmatch('('+number+r")(?:\s*[:：]\s*1)?", row[2].strip())
+                if all(counts) and rate:
+                    return {
+                        "institutional_demand_ratio": float(rate.group(1).replace(",", "")),
+                        "institutional_demand_parse_method": "demand_ratio_institutional_summary",
+                        "institutional_demand_evidence": " | ".join(table[1]),
+                        "institutional_demand_rule_id": "DART_DEMAND_INSTITUTIONAL_SUMMARY_V4",
+                        "institutional_demand_parser_validation_status": "structurally_verified",
+                        "institutional_demand_structured_evidence": cls._table_evidence(
+                            table, heading=heading, selected_row=1, selected_column=len(table[1])-1,
+                            application_quantity=int(counts[1][1].replace(',','')),
+                            application_count=int(counts[0][1].replace(',','')),
+                            scope="institutional_demand_participation_summary",
+                        ),
+                    }
+        category_heading = bool(result_heading or (
+            re.search(r'수요\s*예측\s*참여\s*(?:내역|결과)\s*$', heading)
+            and not re.search(r'일반\s*청약|개인\s*청약|비례\s*배정', heading)))
+        institutional_header = bool(category_heading
+            and table and all(any(label in re.sub(r'\s+', '',cell) for cell in table[0])
+                              for label in ('운용사(집합)','운용사(고유)','투자일임사')))
+        if not institutional_header and not re.search(r"기관\s*(?:투자자)?|수요\s*예측", table_text):
+            return None
+        if re.search(
+            r"신규\s*상장\s*기업|기업\s*수|평균\s*공모|공모\s*규모|재심의|예정|"
+            r"일반\s*청약|개인\s*청약|비례\s*배정",
+            table_text,
+        ):
+            return None
+
+        # The competition-rate row supplies the unit even when cells omit ':1'.
+        ratio_pattern = re.compile('('+number+r")(?:\s*(?::|：|대)\s*1)?")
+        ratio_rows = [
+            (index, row) for index, row in enumerate(table)
+            if re.search(r"(?:유효\s*|단순\s*)?경쟁[률율]", " ".join(row))
+        ]
+        for row_index, row in ratio_rows:
+            # 세로형 표: 합계/전체 행 자체에 경쟁률이 직접 기재된다.
+            row_text = " | ".join(row)
+            if re.search(r"합\s*계|총\s*계|전체", row_text):
+                matches = [(index, ratio_pattern.fullmatch(cell.strip())) for index, cell in enumerate(row)]
+                values = [(index, match) for index, match in matches if match]
+                numeric_like=[index for index,cell in enumerate(row) if re.fullmatch(
+                    r'[0-9][0-9,.]*(?:\s*(?::|：|대)\s*1)?',cell.strip())]
+                if not values and len(numeric_like)==1:
+                    return rejected_number(row_index,numeric_like[0])
+                if len(values) == 1:
+                    column_index, match = values[0]
+                    return {
+                        "institutional_demand_ratio": float(match.group(1).replace(",", "")),
+                        "institutional_demand_parse_method": "demand_ratio_explicit_total_row",
+                        "institutional_demand_evidence": row_text[:500],
+                        "institutional_demand_rule_id": "DART_DEMAND_TOTAL_ROW_V1",
+                        "institutional_demand_parser_validation_status": "structurally_verified",
+                        "institutional_demand_structured_evidence": cls._table_evidence(
+                            table, selected_row=row_index, selected_column=column_index,
+                            scope="aggregate_total_row",
+                        ),
+                    }
+
+            # 가로형 표: 경쟁률 행보다 앞선 헤더에서 합계/전체 열을 찾아 같은 열만 읽는다.
+            header_rows = table[:row_index]
+            aggregate_columns = {
+                column_index
+                for header in header_rows
+                for column_index, cell in enumerate(header)
+                if re.fullmatch(r"\s*(?:총\s*)?합\s*계\s*|\s*전\s*체\s*", cell)
+            }
+            valid = []
+            for column_index in aggregate_columns:
+                if column_index >= len(row):
+                    continue
+                match = ratio_pattern.fullmatch(row[column_index].strip())
+                if match:
+                    valid.append((column_index, match))
+                elif len(aggregate_columns)==1 and re.fullmatch(
+                        r'[0-9][0-9,.]*(?:\s*(?::|：|대)\s*1)?',row[column_index].strip()):
+                    return rejected_number(row_index,column_index)
+            if len(valid) != 1:
+                continue
+            column_index, match = valid[0]
+            return {
+                "institutional_demand_ratio": float(match.group(1).replace(",", "")),
+                "institutional_demand_parse_method": "demand_ratio_explicit_total_column",
+                "institutional_demand_evidence": row_text[:500],
+                "institutional_demand_rule_id": "DART_DEMAND_TOTAL_COLUMN_V1",
+                "institutional_demand_parser_validation_status": "structurally_verified",
+                "institutional_demand_structured_evidence": cls._table_evidence(
+                    table, heading=heading, selected_row=row_index, selected_column=column_index,
+                    scope="aggregate_total_column",
+                ),
+            }
+        return None
+
+    @classmethod
+    def _extract_lockup_ratios_from_tables(cls, raw_html: str) -> dict:
+        """의무보유확약 표의 비율 열 또는 신청주식수 열만 사용한다.
+
+        기존의 "6개월 뒤 첫 숫자" 방식은 다른 표의 번호·건수까지 가져올 수
+        있었다. 이제 확약 표라는 문맥과 같은 행/열의 백분율 또는 신청주식수
+        합계를 모두 확인할 때만 값을 만든다.
+        """
+        result = {
+            "lockup_commitment_ratio": None,
+            "lockup_6m_ratio": None, "lockup_3m_ratio": None,
+            "lockup_1m_ratio": None, "lockup_15d_ratio": None,
+            "lockup_none_ratio": None, "parse_method": None, "evidence": None,
+            "rule_id": None, "parser_validation_status": "value_not_found",
+            "structured_evidence": None,
+            "rejection_reason": None,
+        }
+        label_map = (
+            (r"6\s*개월", "lockup_6m_ratio"),
+            (r"3\s*개월", "lockup_3m_ratio"),
+            (r"1\s*개월", "lockup_1m_ratio"),
+            (r"15\s*일", "lockup_15d_ratio"),
+            (r"확약\s*없음|미확약", "lockup_none_ratio"),
+        )
+        normalized_document = cls._normalize_text(raw_html)
+        direct_pattern = re.compile(
+            r"의무\s*보유\s*확약\s*(?:비율|률)?\s*(?:은|는|:|：)?\s*"
+            r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*%",
+            flags=re.IGNORECASE,
+        )
+        # 평문 직접값은 기관 수요예측 결과와 확약 라벨이 같은 문장/표 행에
+        # 함께 있을 때만 승인한다. 주변 250자 탐색은 다른 보호예수 표를 섞는다.
+        direct_blocks = cls._extract_table_rows(raw_html) + cls._split_sentences(normalized_document)
+        for block in direct_blocks:
+            normalized = re.sub(r"\s+", " ", block).strip()
+            direct_total = direct_pattern.search(normalized)
+            if not direct_total:
+                continue
+            if not re.search(r"기관\s*(?:투자자)?", normalized) or not re.search(r"수요\s*예측", normalized):
+                continue
+            if re.search(r"최대\s*주주|기존\s*주주|임원|보유\s*주식", normalized):
+                continue
+            return {
+                **result,
+                "lockup_commitment_ratio": round(
+                    float(direct_total.group(1).replace(",", "")) / 100, 6
+                ),
+                "parse_method": "lockup_direct_total_ratio",
+                "evidence": normalized[:500],
+                "rule_id": "DART_LOCKUP_DIRECT_AGGREGATE_V1",
+                "parser_validation_status": "structurally_verified",
+                "structured_evidence": json.dumps({
+                    "kind": "direct_aggregate_label", "text": normalized[:1000],
+                }, ensure_ascii=False),
+            }
+        table_parser = _TableRowParser()
+        table_parser.feed(raw_html)
+        table_parser.close()
+        application_totals = set()
+        application_sources = []
+        application_unit_sources = []
+        application_unit_conflicts = []
+        integer = r"(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+)"
+
+        def independent_quantity(table, heading):
+            compact = re.sub(r"\s+", "", heading)
+            numbering = r"(?:[①-⑳]|\d+[.)]|\([가-하]\))*"
+            scope = re.search(
+                r"(?:수요예측결과(?:및배정결과)?(?:통보)?" + numbering
+                + r"(?:기관투자자)?수요예측(?:참여|참가)(?:내역|결과)"
+                r"|기관투자자수요예측(?:참여|참가)(?:내역|결과))$", compact)
+            if not scope or re.search(r"(?:국내|해외|일부|당사)$", compact[:scope.start()]):
+                return None
+            if len(table) == 2:
+                headers = [re.sub(r"\s+", "", c) for c in table[0]]
+                row = table[1]
+                offset = 0
+                if headers[:1] == ['구분'] and len(row) == 4 and re.sub(r'\s+', '', row[0]) in {
+                        '국내외기관투자자', '국내및해외기관투자자', '전체기관투자자', '합계', '전체'}:
+                    headers, row, offset = headers[1:], row[1:], 1
+                if (len(headers) == len(row) == 3
+                        and re.fullmatch(r"(?:참여|참가)건수(?:\(건\))?", headers[0])
+                        and re.fullmatch(r"(?:신청수량|참여수량|참가수량|참여주식수)(?:\(주\))?", headers[1])
+                        and re.fullmatch(r"단순경쟁[률율](?:\([:：]1\))?", headers[2])):
+                    count = re.fullmatch('('+integer+r")\s*건?(?:\s*\(\s*주\s*[1-9][0-9]*\s*\))?", row[0])
+                    quantity = re.fullmatch('('+integer+r")\s*주?", row[1])
+                    if count and quantity:
+                        return {'application_quantity':int(quantity[1].replace(',', '')),
+                            'selected_row':1, 'selected_column':offset+1,
+                            'scope':'institutional_participation_summary_quantity'}
+            # Horizontal participation tables identify share quantities by their
+            # count/quantity/rate row schema, independently of the rate's value.
+            headers = table[:next((i for i, row in enumerate(table) if row and re.fullmatch(
+                r"(?:참여)?건수(?:\(건\))?", re.sub(r"\s+", "", row[0]))), 0)]
+            text = re.sub(r"\s+", "", ' '.join(' '.join(row) for row in headers))
+            if not (re.search(r"해외기관투자자|외국기관투자자", text)
+                    and re.search(r"국내기관투자자|운용사\(집합\)|투자매매", text)):
+                return None
+            columns = {c for row in headers for c, cell in enumerate(row)
+                       if re.fullmatch(r"합계|전체", re.sub(r"\s+", "", cell))}
+            quantity_rows = [(i, row) for i, row in enumerate(table) if row and re.fullmatch(
+                r"(?:신청)?수량(?:\(주\))?", re.sub(r"\s+", "", row[0]))]
+            count_rows = [row for row in table if row and re.fullmatch(
+                r"(?:참여)?건수(?:\(건\))?", re.sub(r"\s+", "", row[0]))]
+            if len(columns) != 1 or len(quantity_rows) != 1 or len(count_rows) != 1:
+                return None
+            column = next(iter(columns))
+            index, row = quantity_rows[0]
+            counts=count_rows[0]
+            if column<2 or column!=len(row)-1 or len(counts)!=len(row):return None
+            quantities=[];participants=[];paired_dash_columns=[]
+            for c in range(1,column+1):
+                q,n=row[c].strip(),counts[c].strip()
+                if c<column and q==n=='-':
+                    quantities.append(0);participants.append(0);paired_dash_columns.append(c)
+                elif re.fullmatch(integer,q) and re.fullmatch(integer,n):
+                    quantities.append(int(q.replace(',','')));participants.append(int(n.replace(',','')))
+                else:return None
+            if (quantities[-1]<=0 or participants[-1]<=0
+                    or sum(quantities[:-1])!=quantities[-1]
+                    or sum(participants[:-1])!=participants[-1]):return None
+            return {'application_quantity':int(row[column].replace(',', '')),
+                'selected_row':index, 'selected_column':column,
+                'scope':'institutional_domestic_foreign_quantity_total',
+                'component_quantities_and_counts_reconciled':True,
+                'paired_dash_components_reconciled_as_zero':paired_dash_columns}
+
+        for summary, heading in zip(table_parser.tables, table_parser.table_contexts):
+            compact=re.sub(r'\s+','',heading)
+            unit_title=re.search(r'수요예측(?:참가|참여)수량단위및가격단위$',compact)
+            if unit_title and not re.search(r'(?:차기|예정|비교회사|종속회사|국내|해외|외국|일부|당사)$',compact[:unit_title.start()]):
+                quantity_cells=[(i,1,row[1]) for i,row in enumerate(summary) if len(row)==2
+                                and re.sub(r'\s+','',row[0])=='수량단위']
+                price_cells=[row[1] for row in summary if len(row)==2 and re.sub(r'\s+','',row[0])=='가격단위']
+                if summary and [re.sub(r'\s+','',c) for c in summary[0]]==['수량단위','가격단위']:
+                    quantity_cells=[(i,0,row[0]) for i,row in enumerate(summary[1:],1) if len(row)==2]
+                    price_cells=[row[1] for row in summary[1:] if len(row)==2]
+                if len(quantity_cells)==len(price_cells)==1:
+                    i,c,raw_unit=quantity_cells[0]
+                    if (re.fullmatch(integer+r'\s*주',raw_unit.strip())
+                            and re.fullmatch(integer+r'\s*(?:원|KRW)',price_cells[0].strip())):
+                        application_unit_sources.append(json.loads(cls._table_evidence(summary,heading=heading,
+                            rule_id='DART_BOOKBUILDING_QUANTITY_UNIT_DECLARATION_V1',selected_row=i,selected_column=c,
+                            quantity_unit='shares',quantity_unit_raw=raw_unit,price_unit_raw=price_cells[0])))
+                    else:application_unit_conflicts.append(cls._table_evidence(summary,heading=heading))
+                elif quantity_cells or price_cells:
+                    application_unit_conflicts.append(cls._table_evidence(summary,heading=heading))
+            quantity = independent_quantity(summary, heading)
+            if quantity is not None:
+                application_totals.add(quantity['application_quantity'])
+                application_sources.append(json.loads(cls._table_evidence(
+                    summary, heading=heading, rule_id='DART_INDEPENDENT_APPLICATION_QUANTITY_V1', **quantity)))
+                continue
+            # Retain other previously supported participation schemas, but do
+            # not require a successful rate for the independent schemas above.
+            summary_result=cls._extract_aggregate_demand_ratio(summary, heading)
+            if summary_result is None:
+                continue
+            summary_evidence=json.loads(summary_result['institutional_demand_structured_evidence'])
+            if summary_evidence.get('application_quantity') is not None:
+                application_totals.add(summary_evidence['application_quantity'])
+            for i, row in enumerate(summary):
+                if not row or not re.fullmatch(r"(?:신청)?수량(?:\(주\))?",re.sub(r"\s+", "", row[0])):
+                    continue
+                columns = {c for header in summary[:i] for c, cell in enumerate(header)
+                           if re.fullmatch(r"합계|전체", re.sub(r"\s+", "", cell))}
+                if len(columns) == 1:
+                    c = next(iter(columns))
+                    if c < len(row) and re.fullmatch(integer, row[c]):
+                        application_totals.add(int(row[c].replace(",", "")))
+                        application_sources.append(json.loads(cls._table_evidence(
+                            summary,heading=heading,rule_id='DART_VERIFIED_DEMAND_QUANTITY_REFERENCE_V1',
+                            selected_row=i,selected_column=c,application_quantity=int(row[c].replace(',','')),
+                            scope='verified_aggregate_demand_application_quantity_reference')))
+        application_total = next(iter(application_totals)) if len(application_totals) == 1 else None
+        if len(application_totals)>1:
+            result.update(parser_validation_status='candidate_rejected',
+                rejection_reason='lockup_conflicting_independent_application_quantities',
+                structured_evidence=json.dumps({'independent_application_quantities':sorted(application_totals)}))
+            return result
+        def disclosed_percentage_check(table, column, printed):
+            check = {'printed_percentage': printed, 'status': 'independent_quantity_unavailable'}
+            if application_total is None or application_total <= 0:
+                return check
+            check['independent_application_quantity'] = application_total
+            if application_sources:
+                check['independent_application_sources'] = application_sources
+            rows = [(re.sub(r"\s+", "", row[0]), row[column].strip())
+                    for row in table if len(row)>column]
+            def quantity(labels):
+                values = [value for label,value in rows if label in labels]
+                if len(values)==1 and re.fullmatch(r"[0-9][0-9,]*", values[0]):
+                    return int(values[0].replace(',', ''))
+                return None
+            none = quantity({'미확약', '확약없음'})
+            declared = quantity({'합계', '총합계', '총계', '확약합계'})
+            if any(label in {'미확약','확약없음'} for label,_ in rows):
+                grand_total=quantity({'총합계','총계'})
+                all_total=grand_total if grand_total is not None else quantity({'합계'})
+                positions={label:[i for i,r in enumerate(table) if r and re.sub(r'\s+','',r[0])==label]
+                           for label in ('합계','미확약','확약없음')}
+                none_positions=positions['미확약']+positions['확약없음']
+                subtotal_position=(len(positions['합계'])==len(none_positions)==1
+                                   and positions['합계'][0]<none_positions[0])
+                subtotal_before_none=(grand_total is None and subtotal_position
+                                      and all_total!=application_total)
+                if subtotal_before_none:
+                    if all_total is None or none is None or all_total+none!=application_total:
+                        return {**check,'status':'conflict','declared_committed_quantity':all_total,
+                                'noncommitted_quantity':none}
+                    committed=all_total
+                    check['subtotal_before_noncommitted']=True
+                elif all_total is not None and all_total != application_total:
+                    return {**check, 'status':'conflict', 'declared_table_total':all_total}
+                elif none is None or all_total is None:
+                    return check
+                else:committed = application_total-none
+                subtotal = quantity({'확약합계', '확약소계'})
+                if subtotal is None and grand_total is not None and subtotal_position:
+                    subtotal=quantity({'합계'})
+                if subtotal is not None and subtotal != committed:
+                    return {**check, 'status':'conflict', 'declared_committed_quantity':subtotal,
+                            'noncommitted_quantity':none}
+                check['noncommitted_quantity'] = none
+            else:
+                if declared is None:
+                    return check
+                committed = declared
+            check['declared_committed_quantity'] = committed
+            if not 0 <= committed <= application_total:
+                return {**check, 'status':'conflict'}
+            periods = [value for label,value in rows
+                       if re.fullmatch(r"\d+(?:개월|일|주일|주)(?:확약)?",label)]
+            if periods and all(re.fullmatch(r"[0-9][0-9,]*|-",value) for value in periods):
+                period_sum = sum(int(value.replace(',','')) for value in periods if value!='-')
+                check['period_quantity_sum'] = period_sum
+                if period_sum != committed:
+                    check['warnings'] = ['period_breakdown_differs_from_explicit_aggregate']
+            # A printed aggregate is authoritative; incomplete duration detail is
+            # audit evidence, not a prerequisite. Check its independent basis.
+            computed = committed/application_total
+            decimals = len(printed.split('.')[1]) if '.' in printed else 0
+            quantum = 10**(-decimals)/100
+            value = float(printed)/100
+            nearest = value-quantum/2-1e-12 <= computed <= value+quantum/2+1e-12
+            truncated = value-1e-12 <= computed < value+quantum-1e-12
+            return {**check, 'status':'compatible' if nearest or truncated else 'conflict',
+                    'computed_fraction':computed, 'display_quantum_fraction':quantum,
+                    'compatible_display_modes':(['nearest'] if nearest else [])+
+                                               (['positive_truncation'] if truncated else [])}
+        def flat_committed_aggregate(table, context):
+            compact = re.sub(r'\s+', '', context)
+            title = re.search(r'의무보유확약(?:기관수(?:및신청수량)?|신청내역)$', compact)
+            if not title or re.search(r'(?:국내|해외|외국|일부|당사)(?:기관투자자|기관)?$', compact[:title.start()]):
+                return None
+            if not table:return None
+            if not any(row and re.fullmatch(r'\d+(?:개월|일|주일|주)(?:확약)?', re.sub(r'\s+', '', row[0])) for row in table):
+                return None
+            header = [re.sub(r'\s+', '', cell) for cell in table[0]]
+            header_corrections={'신청수랑(주)':'신청수량(주)','신청수량㈜':'신청수량(주)'}
+            normalizations=[{'column':c,'original':table[0][c],'interpreted':header_corrections[cell],
+                             'rule':'explicit_share_unit_header_variant_with_independent_quantity_v1'}
+                            for c,cell in enumerate(header) if cell in header_corrections]
+            header=[header_corrections.get(cell,cell) for cell in header]
+            columns = [i for i, cell in enumerate(header) if re.fullmatch(
+                r'(?:신청|참여)(?:수량|주식수)\((?:단위:)?주\)', cell)]
+            bare_columns=[i for i,cell in enumerate(header) if re.fullmatch(r'(?:신청|참여)(?:수량|주식수)',cell)]
+            if (application_unit_sources and not application_unit_conflicts
+                    and application_total is not None and application_sources):columns+=bare_columns
+            totals = [(i,row) for i,row in enumerate(table) if row and re.fullmatch(
+                r'합계|총합계|총계|확약합계',re.sub(r'\s+', '',row[0]))]
+            if len(columns)!=1 or len(totals)!=1:return None
+            column=columns[0];index,row=totals[0]
+            if column>=len(row) or not re.fullmatch(integer,row[column].strip()):return None
+            committed=int(row[column].replace(',',''))
+            proof={'selected_row':index,'selected_column':column,'committed_quantity':committed,
+                   'scope':'all_institution_committed_application_quantity',
+                   'independently_disclosed_application_total':application_total,
+                   'independent_application_sources':application_sources}
+            if normalizations:proof['header_unit_normalizations']=normalizations
+            if column in bare_columns:
+                proof['quantity_unit_binding']={'rule':'same_document_bookbuilding_share_unit_and_whole_quantity_v1',
+                    'raw_header':table[0][column],'unit':'shares','declarations':application_unit_sources,
+                    'independent_application_quantity':application_total}
+            none_rows=[(i,r) for i,r in enumerate(table) if r and re.sub(r'\s+','',r[0]) in {'미확약','확약없음'}]
+            if none_rows:
+                periods=[r[column].strip() for r in table[1:index] if len(r)>column and re.fullmatch(
+                    r'\d+(?:개월|일|주일|주)(?:확약)?',re.sub(r'\s+','',r[0]))]
+                if (len(none_rows)!=1 or none_rows[0][0]<=index or column>=len(none_rows[0][1])
+                        or not re.fullmatch(integer,none_rows[0][1][column].strip()) or not periods
+                        or not all(re.fullmatch(integer,value) for value in periods)
+                        or sum(int(value.replace(',','')) for value in periods)!=committed):return None
+                none=int(none_rows[0][1][column].replace(',',''))
+                if application_total is None or committed+none!=application_total:return None
+                proof['subtotal_noncommitted_reconciliation']={'committed':committed,'noncommitted':none,
+                    'total':application_total,'subtotal_row':index,'noncommitted_row':none_rows[0][0]}
+            if application_total is None or application_total<=0:
+                return {**result,'parser_validation_status':'candidate_rejected',
+                    'rejection_reason':'lockup_outcome_quantity_schema_or_reconciliation_unverified',
+                    'structured_evidence':json.dumps({
+                        'failure_cause':'independent_application_quantity_unavailable',
+                        'candidate_tables':[json.loads(cls._table_evidence(table,heading=context,**proof))]},
+                        ensure_ascii=False)}
+            if normalizations and not application_sources:return None
+            if committed>application_total:
+                return {**result,'parser_validation_status':'candidate_rejected',
+                    'rejection_reason':'lockup_independent_application_quantity_mismatch',
+                    'structured_evidence':cls._table_evidence(table,heading=context,**proof)}
+            printed=[]
+            for c, cell in enumerate(header):
+                if (c<len(row) and cell=='비율(%)' and row[c].strip() not in {'','-'}
+                        and not re.fullmatch(r'\d+(?:\.\d+)?%?',row[c].replace(' ',''))):
+                    return {**result,'parser_validation_status':'candidate_rejected',
+                        'rejection_reason':'lockup_flat_percentage_cell_unverified',
+                        'structured_evidence':cls._table_evidence(table,heading=context,**proof)}
+                if (c<len(row) and re.fullmatch(r'비율\(%\)|신청수량비중(?:\(%\))?',cell)
+                        and re.fullmatch(r'\d+(?:\.\d+)?%?',row[c].replace(' ',''))
+                        and ('%' in cell or row[c].strip().endswith('%'))):
+                    printed.append((row[c].replace(' ','').rstrip('%'),index,c))
+            for i, cells in enumerate(table):
+                label=re.sub(r'\s+','',cells[0]) if cells else ''
+                if (column<len(cells) and re.fullmatch(r'총.*대비(?:비율|율)\(%\)',label)
+                        and cells[column].strip() not in {'','-'}
+                        and not re.fullmatch(r'\d+(?:\.\d+)?%?',cells[column].replace(' ',''))):
+                    return {**result,'parser_validation_status':'candidate_rejected',
+                        'rejection_reason':'lockup_flat_percentage_cell_unverified',
+                        'structured_evidence':cls._table_evidence(table,heading=context,**proof)}
+                if (column<len(cells) and re.fullmatch(
+                        r'비율|총(?:(?:참여|신청)?건수(?:및|또는|/))?(?:신청|참여)?수량대비(?:비율|율)(?:\(%\))?'
+                        r'|총건수대비(?:비율|율)(?:\(%\))?',label)
+                        and re.fullmatch(r'\d+(?:\.\d+)?%?',cells[column].replace(' ',''))
+                        and ('%' in label or cells[column].strip().endswith('%'))):
+                    printed.append((cells[column].replace(' ','').rstrip('%'),i,column))
+            if any(not 0<=float(v)<=100 for v,_,_ in printed) or len({float(v) for v,_,_ in printed})>1:
+                return {**result,'parser_validation_status':'candidate_rejected',
+                    'rejection_reason':'lockup_disclosed_percent_quantity_conflict',
+                    'structured_evidence':cls._table_evidence(table,heading=context,printed_candidates=printed,**proof)}
+            if printed:
+                value,pr,pc=printed[0]
+                check=disclosed_percentage_check(table,column,value)
+                proof.update(percentage_row=pr,percentage_column=pc,aggregate_quantity_check=check)
+                if check['status']!='compatible':
+                    return {**result,'parser_validation_status':'candidate_rejected',
+                        'rejection_reason':'lockup_disclosed_percent_quantity_conflict',
+                        'structured_evidence':cls._table_evidence(table,heading=context,**proof)}
+                ratio=float(value)/100
+            else:
+                ratio=committed/application_total
+            return {**result,'lockup_commitment_ratio':ratio,
+                'parse_method':'lockup_flat_committed_quantity_aggregate',
+                'rule_id':'DART_LOCKUP_FLAT_COMMITTED_QUANTITY_V1',
+                'parser_validation_status':'structurally_verified',
+                'evidence':f'committed={committed}; all_applications={application_total}',
+                'structured_evidence':cls._table_evidence(table,heading=context,
+                    printed_aggregate_preferred=bool(printed),**proof)}
+
+        def continued_aggregate(table, previous):
+            if application_total is None or application_total<=0:return None
+            period=r'\d+(?:개월|일|주일|주)(?:확약)?|미확약|확약없음|합계|총합계|총계|계'
+            def split(rows):
+                start=next((i for i,row in enumerate(rows) if row and re.fullmatch(
+                    r'\d+(?:개월|일|주일|주)(?:확약)?',re.sub(r'\s+','',row[0]))),None)
+                if start is None:return None
+                data={}
+                for i,row in enumerate(rows[start:],start):
+                    if not row or len(row)!=len(rows[0]):return None
+                    label=re.sub(r'\s+','',row[0])
+                    if not re.fullmatch(period,label) or label in data:return None
+                    if label in {'총합계','총계','계'}:label='합계'
+                    if label=='확약없음':label='미확약'
+                    if label in data:return None
+                    data[label]=(i,row)
+                return start,data
+            left=split(previous);right=split(table)
+            if left is None or right is None or set(left[1])!=set(right[1]):return None
+            if not {'미확약','합계'}.issubset(left[1]):return None
+            if len(previous[0])<4 or (len(previous[0])-1)%3 or len(table[0])<7 or (len(table[0])-1)%3:return None
+            left_scope=[re.sub(r'\s+','',c) for c in previous[0][1:]]
+            right_scope=[re.sub(r'\s+','',c) for c in table[0][1:]]
+            if (not all(c=='국내기관투자자' for c in left_scope)
+                    or not all(c in {'외국기관투자자','해외기관투자자'} for c in right_scope[:-3])
+                    or right_scope[-3:]!=['합계']*3):return None
+            units=[re.sub(r'\s+','',c) for c in previous[left[0]-1][1:]]
+            if units!=['건수','수량','신청가격']*((len(previous[0])-1)//3):return None
+            def pair(row,column):
+                n,q=row[column].strip(),row[column+1].strip()
+                if n==q=='-':return 0,0
+                if not re.fullmatch(integer,n) or not re.fullmatch(integer,q):return None
+                n,q=int(n.replace(',','')),int(q.replace(',',''))
+                return (n,q) if (n==0)==(q==0) else None
+            domestic_columns=list(range(1,len(previous[0]),3))
+            foreign_columns=list(range(1,len(table[0])-3,3));total_column=len(table[0])-3
+            reconciled={}
+            for label,(right_index,row) in right[1].items():
+                domestic=[pair(left[1][label][1],c) for c in domestic_columns]
+                foreign=[pair(row,c) for c in foreign_columns];whole=pair(row,total_column)
+                if whole is None or any(value is None for value in domestic+foreign):return None
+                if tuple(sum(v[i] for v in domestic+foreign) for i in (0,1))!=whole:return None
+                reconciled[label]={'row':right_index,'domestic':domestic,'foreign':foreign,'whole':whole}
+            for group in ['domestic','foreign','whole']:
+                width=len(reconciled['합계'][group]) if group!='whole' else 1
+                for c in range(width):
+                    values=[r[group] if group=='whole' else r[group][c] for label,r in reconciled.items() if label!='합계']
+                    expected=reconciled['합계'][group] if group=='whole' else reconciled['합계'][group][c]
+                    if tuple(sum(v[i] for v in values) for i in (0,1))!=expected:return None
+            total=reconciled['합계']['whole'][1];none=reconciled['미확약']['whole'][1]
+            if total!=application_total:return None
+            committed=total-none
+            return {**result,'lockup_commitment_ratio':committed/total,
+                'parse_method':'lockup_adjacent_domestic_foreign_quantity_reconciliation',
+                'rule_id':'DART_LOCKUP_CONTINUED_DOMESTIC_FOREIGN_QUANTITY_V5',
+                'parser_validation_status':'structurally_verified',
+                'evidence':f'committed={committed}; noncommitted={none}; total={total}',
+                'structured_evidence':cls._table_evidence(table,selected_column=total_column+1,
+                    committed=committed,noncommitted=none,total=total,scope='aggregate_quantity',
+                    continuation_schema_source={'table':previous,'schema_row':left[0]-1,
+                        'domestic_count_columns':domestic_columns,'foreign_count_columns':foreign_columns,
+                        'total_count_column':total_column,'reconciled_rows':reconciled},
+                    independently_disclosed_application_total=application_total,
+                    independent_application_sources=application_sources)}
+
+        outcome_candidates = []
+        for table_index,(table, context) in enumerate(zip(table_parser.tables, table_parser.table_contexts)):
+            table_text = " ".join(" ".join(row) for row in table)
+            context_scope = bool(re.search(
+                r"의무보유확약(?:기관수및신청수량|신청내역)$", re.sub(r"\s+", "", context)))
+            has_outcome_rows = any(row and re.fullmatch(
+                r"(?:의무보유확약)?\d+(?:개월|일)(?:확약)?|미확약|확약없음",
+                re.sub(r"\s+", "", row[0])) for row in table)
+            if has_outcome_rows and (context_scope or re.search(r"기관\s*(?:투자자)?", table_text)):
+                outcome_candidates.append(cls._table_evidence(table, heading=context,
+                    scope="unverified_lockup_outcome_table"))
+            # Older reports put the institutional scope in a separate heading.
+            if context_scope:
+                header = table[0] if table else []
+                quantity_columns = [i for i, cell in enumerate(header)
+                                    if re.fullmatch(r"\s*(?:참여|신청)\s*수량\s*\((?:단위\s*:\s*)?주\)\s*", cell)]
+                totals = [row for row in table if row and
+                          re.fullmatch(r"\s*총\s*(?:(?:참여|신청)\s*건수\s*(?:및|또는|/)\s*)?(?:참여|신청)?\s*수량\s*대비\s*(?:비율|율)\s*(?:\(%\))?\s*", row[0])]
+                if len(quantity_columns) == 1 and len(totals) == 1:
+                    column = quantity_columns[0]
+                    row = totals[0]
+                    match = re.fullmatch(r"\s*([0-9]+(?:\.[0-9]+)?)\s*%\s*", row[column]) if column < len(row) else None
+                    if match and 0 <= float(match[1]) <= 100:
+                        check=disclosed_percentage_check(table,column,match[1])
+                        if check['status']=='conflict':
+                            result.update(parser_validation_status='candidate_rejected',
+                                rejection_reason='lockup_disclosed_percent_quantity_conflict',
+                                structured_evidence=cls._table_evidence(table,heading=context,aggregate_quantity_check=check))
+                            return result
+                        result.update({
+                            "lockup_commitment_ratio": float(match[1]) / 100,
+                            "parse_method": "lockup_explicit_quantity_percentage",
+                            "rule_id": "DART_LOCKUP_TOTAL_QUANTITY_PERCENT_V1",
+                            "parser_validation_status": "structurally_verified",
+                            "evidence": " | ".join(row),
+                            "structured_evidence": cls._table_evidence(
+                                table, heading=context, selected_column=column,
+                                scope="institutional_application_quantity",
+                                aggregate_quantity_check=check,
+                            ),
+                        })
+                        return result
+            flat = flat_committed_aggregate(table,context)
+            if flat is not None:
+                result.update(flat)
+                return result
+            if not context_scope and not re.search(r"기관\s*(?:투자자)?", table_text):
+                continue
+            direct_aggregate = cls._extract_disclosed_aggregate_lockup_ratio(table)
+            if direct_aggregate is not None:
+                selection=json.loads(direct_aggregate['structured_evidence'])
+                column=selection['selected_column'];row=selection['selected_row']
+                printed=re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)%",table[row][column].replace(' ',''))[1]
+                check=disclosed_percentage_check(table,column,printed)
+                if check['status']=='conflict':
+                    result.update(parser_validation_status='candidate_rejected',
+                        rejection_reason='lockup_disclosed_percent_quantity_conflict',
+                        structured_evidence=cls._table_evidence(table,heading=context,aggregate_quantity_check=check))
+                    return result
+                selection['aggregate_quantity_check']=check
+                direct_aggregate['structured_evidence']=json.dumps(selection,ensure_ascii=False)
+                result.update(direct_aggregate)
+                return result
+            diagnostics={}
+            aggregate_shares = cls._extract_aggregate_lockup_shares(table, application_total, context,diagnostics)
+            if aggregate_shares is not None:
+                if application_sources:
+                    evidence = json.loads(aggregate_shares['structured_evidence'])
+                    evidence['independent_application_sources'] = application_sources
+                    aggregate_shares['structured_evidence'] = json.dumps(evidence, ensure_ascii=False)
+                result.update(aggregate_shares)
+                return result
+            if table_index:
+                previous_index=table_index-1;captions=[]
+                previous_table=table_parser.tables[previous_index]
+                if (previous_index and len(previous_table)==len(previous_table[0])==1
+                        and re.fullmatch(r'\(단위[:：]건[,/]주\)',re.sub(r'\s+','',previous_table[0][0]))):
+                    captions=[{'table_index':previous_index,'table':previous_table}]
+                    previous_index-=1
+                continued=continued_aggregate(table,table_parser.tables[previous_index])
+                if continued is not None:
+                    evidence=json.loads(continued['structured_evidence'])
+                    evidence['continuation_schema_source'].update(table_index=previous_index,
+                        continuation_table_index=table_index,intervening_unit_captions=captions)
+                    continued['structured_evidence']=json.dumps(evidence,ensure_ascii=False)
+                    return continued
+            if diagnostics:
+                result.update(parser_validation_status='candidate_rejected',
+                    rejection_reason='lockup_independent_application_quantity_mismatch',
+                    structured_evidence=cls._table_evidence(table,heading=context,**diagnostics))
+                return result
+            if not re.search(r"의무\s*보유\s*확약|보유\s*확약|확약\s*기간", table_text):
+                continue
+            if re.search(r"최대\s*주주|기존\s*주주|주주\s*등|보유\s*주식", table_text):
+                continue
+            direct_total = re.search(
+                r"의무\s*보유\s*확약\s*(?:비율|률)?\s*(?:은|는|:|：)?\s*"
+                r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*%",
+                table_text,
+                flags=re.IGNORECASE,
+            )
+            if direct_total:
+                result.update({
+                    "lockup_commitment_ratio": round(float(direct_total.group(1).replace(",", "")) / 100, 6),
+                    "parse_method": "lockup_direct_total_ratio",
+                    "evidence": table_text[:500],
+                    "rule_id": "DART_LOCKUP_TABLE_DIRECT_AGGREGATE_V1",
+                    "parser_validation_status": "structurally_verified",
+                    "structured_evidence": cls._table_evidence(table, scope="aggregate_direct_ratio"),
+                })
+                return result
+            # Regulatory footnotes can mention 15-day lockups and allocation
+            # percentages. They are not outcome rows and must not end the scan.
+            period_rows = [row for row in table if row and re.fullmatch(
+                r'(?:의무보유확약)?\d+(?:개월|일)(?:확약)?|미확약|확약없음',
+                re.sub(r'\s+', '', row[0]))]
+            if len(period_rows) < 2 or not re.search(r"의무\s*보유|보유\s*확약|확약\s*기간", table_text):
+                continue
+
+            direct_values: dict[str, float] = {}
+            for row in period_rows:
+                row_text = " | ".join(row)
+                field = next((field for pattern, field in label_map if re.search(pattern, row_text)), None)
+                percent = re.search(r"([0-9][0-9,]*(?:\.[0-9]+)?)\s*%", row_text)
+                if field and percent:
+                    value = float(percent.group(1).replace(",", "")) / 100
+                    if 0 <= value <= 1:
+                        direct_values[field] = round(value, 6)
+            if direct_values:
+                result.update(direct_values)
+                if all(field in direct_values for field in (
+                    "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
+                )):
+                    result["lockup_commitment_ratio"] = round(sum(
+                        direct_values[field] for field in (
+                            "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
+                        )
+                    ), 6)
+                    result["parse_method"] = "lockup_complete_periods_sum"
+                    result["rule_id"] = "DART_LOCKUP_COMPLETE_PERIOD_PERCENT_SUM_V1"
+                    result["parser_validation_status"] = "structurally_verified"
+                else:
+                    result["parse_method"] = "lockup_same_table_row_percent_audit_only"
+                result["evidence"] = table_text[:500]
+                result["structured_evidence"] = cls._table_evidence(table, scope="period_percent_rows")
+                if result['parser_validation_status'] == 'structurally_verified':
+                    return result
+                continue
+
+            header_index = next((
+                index for index, row in enumerate(table)
+                if any(re.search(r"신청\s*주식\s*수|신청주식수", cell) for cell in row)
+            ), None)
+            if header_index is None:
+                continue
+            header = table[header_index]
+            share_index = next(
+                (index for index, cell in enumerate(header) if re.search(r"신청\s*주식\s*수|신청주식수", cell)),
+                None,
+            )
+            if share_index is None:
+                continue
+            total_row = next((row for row in table[header_index + 1:] if re.search(r"합계|총계", " ".join(row))), None)
+            if total_row is None or len(total_row) <= share_index:
+                continue
+            total = cls._parse_int(re.sub(r"[^0-9,]", "", total_row[share_index]))
+            if not total:
+                continue
+            calculated: dict[str, float] = {}
+            for row in period_rows:
+                row_text = " | ".join(row)
+                field = next((field for pattern, field in label_map if re.search(pattern, row_text)), None)
+                if field is None or len(row) <= share_index:
+                    continue
+                shares = cls._parse_int(re.sub(r"[^0-9,]", "", row[share_index]))
+                if shares is not None and 0 <= shares <= total:
+                    calculated[field] = round(shares / total, 6)
+            if calculated:
+                result.update(calculated)
+                if all(field in calculated for field in (
+                    "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
+                )):
+                    result["lockup_commitment_ratio"] = round(sum(
+                        calculated[field] for field in (
+                            "lockup_6m_ratio", "lockup_3m_ratio", "lockup_1m_ratio", "lockup_15d_ratio",
+                        )
+                    ), 6)
+                    result["parse_method"] = "lockup_complete_period_shares_sum"
+                    result["rule_id"] = "DART_LOCKUP_COMPLETE_PERIOD_SHARE_SUM_V1"
+                    result["parser_validation_status"] = "structurally_verified"
+                else:
+                    result["parse_method"] = "lockup_table_share_column_audit_only"
+                result["evidence"] = table_text[:500]
+                result["structured_evidence"] = cls._table_evidence(table, scope="period_share_rows")
+                if result['parser_validation_status'] == 'structurally_verified':
+                    return result
+        if outcome_candidates:
+            result["parser_validation_status"] = "candidate_rejected"
+            result["rejection_reason"] = "lockup_outcome_quantity_schema_or_reconciliation_unverified"
+            candidates = [json.loads(item) for item in outcome_candidates]
+            empty = [];dash_only=[]
+            for candidate in candidates:
+                data = [row for row in candidate['table'] if row and re.fullmatch(
+                    r'\d+(?:개월|일|주일|주)(?:확약)?|미확약|확약없음|합계|총합계|총계|계|총합',
+                    re.sub(r'\s+', '', row[0]))]
+                empty.append(len(data)>=2 and any(re.fullmatch(r'(?:총)?합계|총계|계',
+                    re.sub(r'\s+', '', row[0])) for row in data)
+                    and all(len(row)>1 and all(not cell.strip() for cell in row[1:]) for row in data))
+                dash_only.append(len(data)>=2 and any(re.fullmatch(r'(?:총)?합계|총계|계|총합',
+                    re.sub(r'\s+','',row[0])) for row in data)
+                    and all(len(row)>1 and all(cell.strip() in {'','-'} for cell in row[1:]) for row in data))
+            if empty and all(empty):
+                result['parser_validation_status'] = 'value_not_found'
+                result['rejection_reason'] = 'selected_document_lockup_outcome_cells_empty'
+            elif dash_only and all(dash_only):
+                # A blank result form is not a zero, a numeric contradiction,
+                # or evidence that an earlier linked final result is absent.
+                result['parser_validation_status'] = 'value_not_found'
+                result['rejection_reason'] = 'selected_document_lockup_outcome_dash_only'
+            elif all(any(re.search(r'배정\s*(?:수량|주식\s*수)',cell)
+                         for row in candidate['table'][:2] for cell in row)
+                     and not any(re.search(r'(?:신청|참여)\s*(?:수량|주식\s*수)',cell)
+                                 for row in candidate['table'][:2] for cell in row)
+                     for candidate in candidates):
+                result['rejection_reason']='lockup_allocation_quantity_scope_not_application_demand'
+            result["structured_evidence"] = json.dumps({"candidate_tables": candidates}, ensure_ascii=False)
+        elif re.search(r"의무\s*보유\s*확약", normalized_document):
+            result["parser_validation_status"] = "candidate_rejected"
+            result["rejection_reason"] = "selected_document_lockup_rules_without_identified_outcome"
+        return result
+
+    @classmethod
+    def _extract_disclosed_aggregate_lockup_ratio(cls, table: list[list[str]]) -> Optional[dict]:
+        """Read an explicit all-institution application-quantity percentage, not counts."""
+        for index, row in enumerate(table):
+            if not row:
+                continue
+            headers = table[:index]
+            label=re.sub(r"\s+", "", row[0])
+            header_text=re.sub(r"\s+", "", ' '.join(' '.join(h) for h in headers[:3]))
+            all_institutions=(bool(re.search(r'국내기관투자자',header_text)) and
+                              bool(re.search(r'해외기관투자자|외국기관투자자',header_text)))
+            if not (re.fullmatch(r"총참여건수및(?:신청)?수량대비비율(?:\(%\))?",label)
+                    or label=='확약비중' and all_institutions):
+                continue
+            columns = [c for c in range(len(row))
+                       if any(c < len(h) and re.sub(r"\s+", "", h[c]) in ("합계", "전체") for h in headers)
+                       and any(c < len(h) and re.sub(r"\s+", "", h[c]) in ("수량", "신청수량") for h in headers)]
+            if len(columns) != 1:
+                continue
+            column = columns[0]
+            quantity_columns=[c for h in headers[:3] for c,cell in enumerate(h)
+                              if re.sub(r'\s+','',cell) in {'수량','신청수량','신청주식수'}]
+            if label=='확약비중' and (not quantity_columns or column!=max(quantity_columns)):
+                continue
+            match = re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)%", row[column].replace(" ", ""))
+            if match and 0 <= float(match[1]) <= 100:
+                internal_check=None
+                if label=='확약비중':
+                    def quantity(labels):
+                        cells=[r[column].strip() for r in table[:index] if len(r)>column and re.sub(r'\s+','',r[0]) in labels]
+                        if len(cells)!=1 or not re.fullmatch(r'[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+',cells[0]):return None
+                        return int(cells[0].replace(',',''))
+                    total=quantity({'합계','총합계','총계','계'})
+                    none=quantity({'미확약','확약없음'})
+                    committed=quantity({'확약소계','확약합계'})
+                    if total is None or total<=0 or none is None or committed is None or committed+none!=total:
+                        continue
+                    value=float(match[1])/100
+                    quantum=10**(-len(match[1].partition('.')[2]))/100
+                    computed=committed/total
+                    if not (value-quantum/2-1e-12<=computed<=value+quantum/2+1e-12
+                            or value-1e-12<=computed<value+quantum-1e-12):continue
+                    internal_check={'committed':committed,'noncommitted':none,'total':total,
+                        'computed_fraction':computed,'display_quantum_fraction':quantum,
+                        'status':'compatible','all_institution_domestic_foreign_headers':True}
+                return {
+                    "lockup_commitment_ratio": float(match[1]) / 100,
+                    "parse_method": "lockup_explicit_aggregate_quantity_percentage",
+                    "rule_id": "DART_LOCKUP_AGGREGATE_QUANTITY_PERCENT_V2",
+                    "parser_validation_status": "structurally_verified",
+                    "evidence": " | ".join(row),
+                    "structured_evidence": cls._table_evidence(
+                        table, selected_row=index, selected_column=column,
+                        scope="all_institution_application_quantity_percentage",
+                        **({'internal_aggregate_quantity_check':internal_check} if internal_check else {}),
+                    ),
+                }
+        return None
+
+    @classmethod
+    def _extract_aggregate_lockup_shares(cls, table: list[list[str]], application_total: Optional[int] = None,
+                                       heading: str = "", diagnostics: Optional[dict] = None) -> Optional[dict]:
+        """Read the total quantity column, never a participant-count column."""
+        text = " ".join(" ".join(row) for row in table)
+        if re.search(r"최대\s*주주|기존\s*주주|보유\s*주식|매각제한", text):
+            return None
+        if not any(row and re.fullmatch(r"\d+(?:개월|일|주일|주)(?:확약)?", re.sub(r"\s+", "", row[0])) for row in table):
+            return None
+        start = next((i for i, row in enumerate(table) if row and re.fullmatch(
+            r"\d+(?:개월|일|주일|주)(?:확약)?|미확약|확약없음", re.sub(r"\s+", "", row[0]))), None)
+        if start is None:
+            return None
+        headers = table[:start]
+        header_text=re.sub(r'\s+','', ' '.join(' '.join(row) for row in headers))
+        all_institutions=(bool(re.search(r'국내기관투자자',header_text)) and
+                          bool(re.search(r'해외기관투자자|외국기관투자자',header_text)))
+        columns = [c for c in range(max(map(len, headers), default=0))
+                   if any(c < len(row) and re.fullmatch(r"\s*합\s*계\s*", row[c]) for row in headers)
+                   and any(c < len(row) and re.fullmatch(r"\s*(?:신청\s*주식\s*수|수량)\s*", row[c]) for row in headers)]
+        composite_units = False
+        # Count punctuation is retained as text; only the explicit share quantity
+        # participates in this reconciliation, never an inferred participant count.
+        cell_quantity = re.compile(r'(?P<count>[0-9][0-9,.]*)\s*건\s*/\s*'
+                                   r'(?P<quantity>(?:[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+))\s*주')
+        if not columns and application_total is not None and re.search(
+                r'기관\s*투자자', ' '.join(' '.join(row) for row in headers)):
+            totals = sorted({c for row in headers for c, cell in enumerate(row)
+                             if re.fullmatch(r'합\s*계', cell.strip())})
+            if len(totals)==1 and all(totals[0]<len(row) and (
+                    row[totals[0]].strip() in {'-','0'} or cell_quantity.fullmatch(row[totals[0]].strip()))
+                    for row in table[start:]):
+                columns=totals
+                composite_units=True
+        single_quantity_schema = False
+        if not columns and re.search(r"의무\s*보유\s*확약\s*신청내역\s*$", heading):
+            columns = sorted({c for row in headers for c, cell in enumerate(row)
+                              if re.fullmatch(r"신청(?:수량|주식수)\((?:단위:)?주\)",
+                                              re.sub(r"\s+", "", cell))})
+            single_quantity_schema = len(columns) == 1
+        inferred_header = False
+        if not columns and headers:
+            # Some DART tables merge the total header through the unit row.
+            # Recover its schema only when two explicit adjacent group schemas
+            # agree and the total group has exactly the same width.
+            units = [re.sub(r"\s+", "", c) for c in headers[-1]]
+            total_columns = [c for c, value in enumerate(units) if value == "합계"]
+            if len(total_columns) == 3:
+                first = total_columns[0]
+                schema = ["건수", "수량", "신청가격"]
+                if (total_columns == list(range(first, first + 3)) and first >= 7
+                        and units[first - 3:first] == schema
+                        and units[first - 6:first - 3] == schema):
+                    columns = [first + 1]
+                    inferred_header = True
+        if len(columns) != 1:
+            return None
+        column = columns[0]
+        quantity_columns=[c for h in headers for c,cell in enumerate(h)
+                          if re.sub(r'\s+','',cell) in {'수량','신청수량','신청주식수'}]
+        complete_scope=(all_institutions and quantity_columns and column==max(quantity_columns))
+        quantities = {}
+        dash_rows = []
+        total_label_alias = False
+        committed_subtotal = None
+        unparsed_count_cells=[]
+        for i, row in enumerate(table[start:], start):
+            if not row or column >= len(row):
+                return None
+            label = re.sub(r"\s+", "", row[0])
+            if re.fullmatch(r"총참여건수(?:및|/)(?:신청)?수량대비(?:비율|율)(?:\(%\))?", label):
+                continue
+            value = row[column].strip()
+            if composite_units and value not in {'-','0'}:
+                match=cell_quantity.fullmatch(value)
+                if match is None:return None
+                if not re.fullmatch(r'[0-9]+|[0-9]{1,3}(?:,[0-9]{3})+',match['count']):
+                    unparsed_count_cells.append({'row':i,'column':column,'raw_count_token':match['count'],
+                        'status':'unverified_participant_count_not_used_in_share_ratio'})
+                value=match['quantity']
+            if label in {'확약합계','확약소계'} or label=='소계' and all_institutions:
+                if committed_subtotal is not None or not re.fullmatch(r"[0-9][0-9,]*|-", value):
+                    return None
+                committed_subtotal = int(value.replace(',', '')) if value != '-' else 0
+                continue
+            if label in {'계', '총합계', '총계', '총합'}:
+                if application_total is None and not complete_scope:
+                    return None
+                label = '합계'
+                total_label_alias = True
+            if not re.fullmatch(r"\d+(?:개월|일|주일|주)(?:확약)?|미확약|확약없음|합계", label):
+                return None
+            quantity = value
+            if label in quantities:
+                return None
+            if quantity == '-' and label != '합계' and (application_total is not None or single_quantity_schema):
+                dash_rows.append(label)
+                quantities[label] = 0
+            elif re.fullmatch(r"[0-9][0-9,]*", quantity):
+                quantities[label] = int(quantity.replace(",", ""))
+            else:
+                return None
+        total = quantities.pop("합계", None)
+        # A continued table can contain foreign groups plus the domestic+foreign
+        # total. Anchor the merged unit to the separate demand summary, not just
+        # the adjacent subgroup values (which do not cover domestic investors).
+        if inferred_header and (application_total is None or total != application_total):
+            return None
+        if application_total is not None and total != application_total:
+            if diagnostics is not None:
+                diagnostics.update(selected_column=column,declared_table_total=total,
+                    independent_application_quantity=application_total)
+            return None
+        none_labels = [label for label in ("미확약", "확약없음") if label in quantities]
+        if len(none_labels) != 1:
+            return None
+        none = quantities.pop(none_labels[0])
+        if total is None or total <= 0 or none is None or not quantities:
+            return None
+        committed = sum(quantities.values())
+        if committed + none != total or (committed_subtotal is not None and committed_subtotal != committed):
+            return None
+        return {
+            "lockup_commitment_ratio": committed / total,
+            "parse_method": "lockup_reconciled_aggregate_quantity",
+            "rule_id": ("DART_LOCKUP_EXPLICIT_COUNT_SHARE_CELL_V4" if composite_units
+                        else "DART_LOCKUP_RECONCILED_TOTAL_QUANTITY_V3"),
+            "parser_validation_status": "structurally_verified",
+            "evidence": f"committed={committed}; noncommitted={none}; total={total}",
+            "structured_evidence": cls._table_evidence(
+                table, heading=heading, selected_column=column, committed=committed,
+                noncommitted=none, total=total, scope="aggregate_quantity",
+                inferred_total_unit_from_repeated_schema=inferred_header,
+                independently_disclosed_application_total=application_total,
+                dash_rows_reconciled_as_zero=dash_rows,
+                total_label_alias_reconciled=total_label_alias,
+                row_order_independent=True,
+                all_institution_domestic_foreign_headers=all_institutions,
+                single_application_quantity_schema=single_quantity_schema,
+                independently_disclosed_committed_subtotal=committed_subtotal,
+                **({'explicit_count_and_share_cell_units':True} if composite_units else {}),
+                **({'unparsed_participant_count_cells':unparsed_count_cells} if unparsed_count_cells else {}),
+            ),
+        }
+
+    @staticmethod
+    def _is_institutional_lockup_context(text: str, start: int, end: int) -> bool:
+        """확약 수치가 기관 수요예측 결과인지 좁은 문맥에서 확인한다."""
+        context = text[max(0, start - 250):min(len(text), end + 250)]
+        if not re.search(r"기관\s*(?:투자자)?", context) or not re.search(
+            r"수요\s*예측\s*(?:결과|경쟁률)", context
+        ):
+            return False
+        return not re.search(r"최대\s*주주|기존\s*주주|임원|보유\s*주식", context)
+
+    @staticmethod
+    def _extract_offering_price_details(text: str, table_rows: Optional[list[str]] = None) -> dict:
+        """공모가와 추출 근거를 함께 반환한다.
+
+        금액 범위는 삭제 기준이 아니다. ``원`` 또는 ``KRW`` 단위까지 있는
+        값만 자동 확인하고, 단위 없는 숫자는 표 번호일 가능성이 있어
+        감사 로그에서 사람이 판단할 수 있도록 ``needs_review``로 격리한다.
+        """
+        result = {
+            "offering_price": None,
+            "offering_price_extracted_amount": None,
+            "offering_price_review_status": "missing",
+            "offering_price_finality": "unknown",
+            "offering_price_parse_method": None,
+            "offering_price_audit_context": None,
+            "offering_price_range_warning": False,
+        }
+        sources = [("final_price_table_row", row) for row in (table_rows or [])]
+        sources.extend(("final_price_same_sentence", sentence) for sentence in DARTCollector._split_sentences(text))
+
+        # 자동 승인: 확정가 라벨과 통화 단위 금액이 같은 표 행 또는 같은
+        # 문장에 직접 이어진 경우만 허용한다. 넓은 임의 길이 탐색은 하지 않는다.
+        for method, context in sources:
+            value = DARTCollector._extract_direct_price_with_currency(context)
+            if value is not None:
+                result.update({
+                    "offering_price": value,
+                    "offering_price_extracted_amount": value,
+                    "offering_price_review_status": "verified_currency_unit",
+                    "offering_price_finality": "confirmed_price_language",
+                    "offering_price_parse_method": method,
+                    "offering_price_audit_context": context,
+                    "offering_price_range_warning": value < 100 or value > 10_000_000,
+                })
+                return result
+
+        # 초기 신고서의 정형 문구는 금액 후보를 만들지 않고 별도 상태로 남긴다.
+        for _, context in sources:
+            if re.search(
+                FINAL_PRICE_LABEL_PATTERN
+                + r"[^.!?。;]{0,100}(?:최종\s*)?결정할\s*예정|"
+                + FINAL_PRICE_LABEL_PATTERN
+                + r"[^.!?。;]{0,100}정정(?:증권)?신고서.{0,40}?제출할\s*예정",
+                context,
+                flags=re.IGNORECASE,
+            ):
+                result.update({
+                    "offering_price_review_status": "preliminary_price_language",
+                    "offering_price_finality": "preliminary_price_language",
+                    "offering_price_parse_method": "preliminary_price_statement",
+                    "offering_price_audit_context": context,
+                })
+                return result
+
+        # 단위 없는 직접 연결 숫자는 감사 후보로만 남긴다. 1주당의 "1"과
+        # 희망밴드·액면가·총액 문맥은 후보에서도 제외한다.
+        for _, context in sources:
+            value = DARTCollector._extract_direct_price_without_currency(context)
+            if value is not None:
+                result.update({
+                    "offering_price_extracted_amount": value,
+                    "offering_price_review_status": "needs_review_no_currency_unit",
+                    "offering_price_parse_method": "direct_price_without_currency_unit",
+                    "offering_price_audit_context": context,
+                    "offering_price_range_warning": value < 100 or value > 10_000_000,
+                })
+                return result
+        return result
+
+    @staticmethod
+    def _split_sentences(text: str) -> list[str]:
+        # 기관 수요예측 경쟁률은 `850.00 : 1`처럼 소수점을 자주 포함한다.
+        # 숫자 사이의 `.`를 문장 끝으로 분리하면 경쟁률과 `: 1`이 갈라져
+        # 실제 DART 원문 값을 놓치므로, 숫자 뒤 마침표는 보존한다.
+        return [
+            sentence.strip()
+            for sentence in re.split(r"[!?。;]|(?<!\d)\.", text)
+            if sentence.strip()
+        ]
+
+    @staticmethod
+    def _extract_direct_price_with_currency(context: str) -> Optional[int]:
+        pattern = re.compile(
+            FINAL_PRICE_LABEL_PATTERN
+            + r"(?P<bridge>[^.!?。;]{0,28}?)(?P<amount>[1-9][0-9,]*)\s*(?:원|KRW)",
+            flags=re.IGNORECASE,
+        )
+        for match in pattern.finditer(context):
+            bridge = match.group("bridge")
+            if "~" in bridge or "～" in bridge or re.search(PRICE_CONTEXT_EXCLUSIONS + r"|예정|정정|기재|따른", bridge):
+                continue
+            value = DARTCollector._parse_int(match.group("amount"))
+            if value is not None:
+                return value
+        return None
+
+    @staticmethod
+    def _extract_direct_price_without_currency(context: str) -> Optional[int]:
+        pattern = re.compile(
+            FINAL_PRICE_LABEL_PATTERN
+            + r"(?P<bridge>[^.!?。;]{0,28}?)(?P<amount>[1-9][0-9,]*)(?!\s*(?:원|KRW))",
+            flags=re.IGNORECASE,
+        )
+        for match in pattern.finditer(context):
+            bridge = match.group("bridge")
+            suffix = context[match.end("amount"):]
+            if (
+                "~" in bridge
+                or "～" in bridge
+                or re.search(PRICE_CONTEXT_EXCLUSIONS, bridge)
+                or re.match(r"\s*주당", suffix)
+            ):
+                continue
+            value = DARTCollector._parse_int(match.group("amount"))
+            if value is not None:
+                return value
+        return None
+
     @staticmethod
     def _parse_int(value: str) -> Optional[int]:
         try:
             return int(str(value).replace(",", ""))
         except (TypeError, ValueError):
             return None
+
+    @staticmethod
+    def _parse_money_value(value: object) -> Optional[int]:
+        match = re.search(r"([0-9][0-9,]*)", str(value or ""))
+        return DARTCollector._parse_int(match.group(1)) if match else None
+
+    @staticmethod
+    def _walk_dicts(value: object):
+        """OpenDART의 그룹형 JSON 응답을 평탄화한다."""
+        if isinstance(value, dict):
+            yield value
+            for child in value.values():
+                yield from DARTCollector._walk_dicts(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from DARTCollector._walk_dicts(child)
 
     @staticmethod
     def _parse_lockup_months(text: str) -> int:

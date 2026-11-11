@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "purpose": "Official event classification evidence only; never prediction features",
+  "entries": [
+    {
+      "event_id": "krx_kind|316140|20190213|우리금융지주",
+      "ticker": "316140",
+      "corp_code": "01350869",
+      "listing_date": "2019-02-13",
+      "receipt": "20190515002466",
+      "published_at": "2019-05-15",
+      "section_title": "2. 회사의 연혁",
+      "section_sha256": "fad54b88d52c2ac7a76bbee64fa23690139ba2596b7523ac397719cc784b2610",
+      "required_table_values": [
+        "설립방법",
+        "포괄적 주식이전에 의한 완전모회사 설립",
+        "주식회사 우리금융지주 (완전모회사)",
+        "주식이전일",
+        "2019년 01월 11일",
+        "우리은행 상장폐지일(지주 상장일)",
+        "2019년 02월 13일"
+      ],
+      "event_class": "non_public_listing",
+      "offering_type": "holding_company_stock_transfer"
+    }
+  ]
+}
